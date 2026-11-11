@@ -25,7 +25,13 @@ export class DiscordGateway implements ChatGateway {
         log.info(`Eingeloggt als ${c.user.tag} – auf ${c.guilds.cache.size} Server(n)`);
         resolve();
       });
-      this.client.login(token).catch(reject);
+      this.client.login(token).catch((e: Error) => {
+        if (/disallowed intents/i.test(e.message)) {
+          reject(new Error('Discord lehnt die Intents ab: Im Developer Portal unter Bot → Privileged Gateway Intents den „Message Content Intent“ einschalten und speichern (docs/DISCORD.md).'));
+        } else if (/invalid token|TokenInvalid/i.test(e.message)) {
+          reject(new Error('Discord-Token ungültig: im Developer Portal unter Bot → Reset Token neu erzeugen und in .env eintragen.'));
+        } else reject(e);
+      });
     });
   }
 

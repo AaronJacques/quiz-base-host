@@ -14,6 +14,8 @@ Live erkundet mit Host + 2 Testspielern. Diese Datei dokumentiert, worauf `src/s
 1. Format-Buttons enthalten `h3` mit `Tafelquiz`, `Eagle Eye`, `Punktejagd`, `Auktion`, `Blind Ranking`.
 2. `h1` = Formatname → Buttons `Öffentliches Board verwenden` / `Neues Board erstellen`.
 3. Board-Liste: Karten mit `h3`-Titel, klickbarer Vorfahre (`cursor: pointer`) → Auswahl → Button `Board verwenden →`.
+   - Ohne Suche zeigt quiz-base nur eine **Auswahl (~40 Boards)**. Viele Boards (z.B. „Dragon Ball Quiz“, „One Piece v1.0“) erscheinen erst über das Suchfeld `input[placeholder="Nach Boards suchen..."]`: serverseitig, entprellt (~1–2 s), durchsucht auch Beschreibungen, liefert max. ~35 Treffer. Wert per React-Setter + `input`-Event setzen.
+   - Sortier-Buttons `Neueste` / `Meist gespielt` / `Beste Bewertung`; die `Mehr anzeigen`-Buttons klappen nur Beschreibungen auf (keine Paginierung).
 4. `h1` = `Board Vorschau` → Button `Lobby erstellen` (Achtung: gleicher Text im Header-Nav-Link → nur in `main` suchen).
 5. URL wird `/lobby?host=true`, `h1` = `Lobby Warteraum`.
 

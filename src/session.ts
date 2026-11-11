@@ -102,13 +102,24 @@ export class GameSession {
   }
 }
 
-/** Lists public Tafelquiz boards with a short-lived browser. */
-export async function fetchPublicBoards(config: Config): Promise<string[]> {
-  const driver = createDriver(config);
-  try {
-    await driver.open(config.baseUrl);
-    return await listPublicBoards(driver, config.baseUrl, 'Tafelquiz');
-  } finally {
-    await driver.close().catch(() => {});
-  }
+let searchQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Lists public Tafelquiz boards (optionally via quiz-base's search) with a
+ * short-lived browser. Uses its own profile so it never collides with a game's
+ * browser, and runs one search at a time.
+ */
+export function fetchPublicBoards(config: Config, query?: string): Promise<string[]> {
+  const run = async () => {
+    const driver = createDriver({ ...config, browser: { ...config.browser, headless: true, profileDir: `${config.browser.profileDir}-search` } });
+    try {
+      await driver.open(config.baseUrl);
+      return await listPublicBoards(driver, config.baseUrl, 'Tafelquiz', query);
+    } finally {
+      await driver.close().catch(() => {});
+    }
+  };
+  const result = searchQueue.then(run, run);
+  searchQueue = result.catch(() => {});
+  return result;
 }

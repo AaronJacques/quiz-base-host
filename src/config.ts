@@ -83,6 +83,7 @@ export const ConfigSchema = z.object({
       /** Token kommt aus der Umgebung (DISCORD_TOKEN bzw. .env), nie aus der Config-Datei. */
       tokenEnv: z.string().default('DISCORD_TOKEN'),
       /** Überwachte Channel-IDs: dort reichen `!quiz …`-Befehle. Leer = Befehle mit Präfix überall. Ein @Mention funktioniert immer. */
+      /** Channels the bot works in (prefix and @mention). Empty = every channel it can see. */
       channelIds: z.array(z.string()).default([]),
       prefix: z.string().default('!quiz'),
       /** Lobby wird geschlossen, wenn das Spiel nach so vielen Minuten nicht gestartet ist. */

@@ -7,7 +7,7 @@
 - Spieler-Pult (Web), Operator-Konsole, Browser: Playwright / Orca / Chrome (CDP)
 
 ## ✅ v0.2 – Discord-Bot
-- Lobby per Chat-Befehl, Beitrittslink, Verknüpfung Discord↔quiz-base (automatisch per Name oder `!quiz ich`)
+- Lobby per Chat-Befehl mit Quiz-Auswahl (Rückfrage, Suche auf quiz-base, Nachfrage bei mehreren Treffern), Beitrittslink, Verknüpfung Discord↔quiz-base (automatisch per Name oder `!quiz ich`)
 - Kartenwahl in natürlicher Sprache mit Prüfung frei/schon weg, Antworten im Chat
 - Punkteregeln per Chat (`!quiz regel …`), Spielleitung mit Overrides, Lösungen nur per DM vor der Auflösung
 

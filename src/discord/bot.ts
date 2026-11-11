@@ -2,7 +2,7 @@ import type { Config } from '../config.ts';
 import type { EventBus, HostEvents } from '../core/events.ts';
 import { createLogger } from '../core/logger.ts';
 import type { PlayerState } from '../core/types.ts';
-import { normalize } from '../judge/normalize.ts';
+import { normalize, similarity } from '../judge/normalize.ts';
 import { applyRule, findRule, formatRuleValue, type GameRules } from '../modes/tafelquiz/rules.ts';
 import type { LobbyInfo } from '../session.ts';
 import { helpText, medal, rulesText } from './format.ts';
@@ -28,8 +28,20 @@ export interface BotDeps {
   config: Config;
   store: GuildStore;
   createSession: (config: Config) => SessionLike;
-  listBoards: () => Promise<string[]>;
+  /** Public Tafelquiz boards; with a query via quiz-base's own search. */
+  listBoards: (query?: string) => Promise<string[]>;
 }
+
+/** A numbered board list shown in a channel. With `askedBy`, that user's next message answers it. */
+interface BoardMenu {
+  channelId: string;
+  options: string[];
+  askedBy: string | null;
+  expires: number;
+}
+
+const MENU_TTL_MS = 5 * 60_000;
+const MENU_SIZE = 15;
 
 interface ActiveGame {
   guildId: string;
@@ -67,7 +79,8 @@ type Handler = (msg: ChatMessage, args: string[], game: ActiveGame | null) => Pr
  */
 export class QuizBot {
   private game: ActiveGame | null = null;
-  private boards: { at: number; list: string[] } | null = null;
+  private boardCache = new Map<string, { at: number; list: string[] }>();
+  private menu: BoardMenu | null = null;
   private outbox = new Map<string, { lines: string[]; timer?: NodeJS.Timeout }>();
   private commands: Record<string, Handler>;
 
@@ -102,6 +115,9 @@ export class QuizBot {
 
   async onMessage(msg: ChatMessage): Promise<void> {
     if (msg.author.isBot || !msg.guildId) return;
+    // With configured channels the bot lives only there – prefix and @mentions elsewhere are ignored.
+    const allowed = this.d.config.discord.channelIds;
+    if (allowed.length && !allowed.includes(msg.channelId)) return;
     const game = this.game;
     if (game && msg.channelId === game.channelId) game.seen.set(msg.author.id, { username: msg.author.username, displayName: msg.author.displayName });
 
@@ -113,14 +129,23 @@ export class QuizBot {
       if (game && msg.channelId === game.channelId) return this.onGameInput(msg, game, [cmd.name, ...cmd.args].join(' '));
       return this.say(msg.channelId, `Kenne ich nicht: \`${cmd.name}\`. \`${this.prefix} hilfe\` zeigt alle Befehle.`);
     }
-    if (game && msg.channelId === game.channelId) await this.onGameInput(msg, game, msg.content);
+    if (game && msg.channelId === game.channelId) return this.onGameInput(msg, game, msg.content);
+    const menu = this.menu;
+    if (!game && menu?.askedBy === msg.author.id && menu.channelId === msg.channelId && Date.now() < menu.expires) {
+      const text = msg.content.trim();
+      if (!text || text.startsWith('//')) return;
+      if (/^(abbrechen|abbruch|stop|cancel|nein)$/i.test(text)) {
+        this.menu = null;
+        return this.say(msg.channelId, 'Okay, keine neue Lobby.');
+      }
+      await this.chooseBoard(msg, text);
+    }
   }
 
   private parseCommand(msg: ChatMessage): { name: string; args: string[] } | null {
-    const watched = !this.d.config.discord.channelIds.length || this.d.config.discord.channelIds.includes(msg.channelId);
     let text = msg.content.trim();
     const p = this.prefix.toLowerCase();
-    if (watched && (text.toLowerCase() === p || text.toLowerCase().startsWith(p + ' '))) text = text.slice(p.length).trim();
+    if ((text.toLowerCase() === p || text.toLowerCase().startsWith(p + ' '))) text = text.slice(p.length).trim();
     else if (!msg.mentionsBot) return null;
     if (!text) return { name: 'hilfe', args: [] };
     const [name = '', ...args] = text.split(/\s+/);
@@ -130,24 +155,65 @@ export class QuizBot {
   // ───────────────────────────── commands ─────────────────────────────
 
   private async cmdBoards(msg: ChatMessage, args: string[]): Promise<void> {
-    const list = await this.getBoards(msg.channelId);
+    const query = args.join(' ').trim();
+    const list = await this.getBoards(msg.channelId, query);
     if (!list) return;
-    const q = normalize(args.join(' '));
-    const rows = list.map((t, i) => ({ t, i })).filter(({ t }) => !q || normalize(t).includes(q));
-    if (!rows.length) return this.say(msg.channelId, `Kein Board passt zu „${args.join(' ')}“.`);
-    const shown = rows.slice(0, 30).map(({ t, i }) => `\`${i + 1}\` ${t}`);
-    await this.say(msg.channelId, [`**📚 Tafelquiz-Boards** (${rows.length})`, ...shown, rows.length > 30 ? '…' : '', `Starten mit \`${this.prefix} neu <Nr>\``].join('\n'));
+    if (!list.length) return this.say(msg.channelId, this.notFound(query, await this.suggest(query)));
+    this.menu = { channelId: msg.channelId, options: list.slice(0, MENU_SIZE), askedBy: null, expires: Date.now() + MENU_TTL_MS };
+    await this.say(msg.channelId, [
+      query ? `**📚 Boards zu „${query}“** (${list.length})` : `**📚 Tafelquiz-Boards** (Auswahl von quiz-base; \`${this.prefix} boards <suche>\` findet mehr)`,
+      ...this.numbered(this.menu.options),
+      list.length > MENU_SIZE ? `… und ${list.length - MENU_SIZE} weitere – genauer suchen.` : '',
+      `Starten mit \`${this.prefix} neu <Nr>\` oder \`${this.prefix} neu <Name>\``,
+    ].filter(Boolean).join('\n'));
   }
 
   private async cmdNew(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
     if (game) return this.say(msg.channelId, `Es läuft schon ein Spiel in <#${game.channelId}>. Die Spielleitung kann es mit \`${this.prefix} ende\` beenden.`);
-    if (!args.length) return this.cmdBoards(msg, []);
+    const text = args.join(' ').trim();
+    if (text) return this.chooseBoard(msg, text);
+    // No board named → ask instead of picking one.
     const list = await this.getBoards(msg.channelId);
     if (!list) return;
-    const arg = args.join(' ');
-    const board = /^\d+$/.test(arg) ? list[Number(arg) - 1] : list.find((t) => normalize(t) === normalize(arg)) ?? list.find((t) => normalize(t).includes(normalize(arg)));
-    if (!board) return this.say(msg.channelId, `Board „${arg}“ nicht gefunden. \`${this.prefix} boards ${arg}\` zum Suchen.`);
+    this.menu = { channelId: msg.channelId, options: list.slice(0, 10), askedBy: msg.author.id, expires: Date.now() + MENU_TTL_MS };
+    await this.say(msg.channelId, [
+      `🎲 ${mention(msg.author.id)}, **welches Quiz** wollt ihr spielen? Schreib den Namen (oder einen Teil davon), ich suche auf quiz-base.`,
+      'Oder nimm eins der beliebten Boards per Nummer:',
+      ...this.numbered(this.menu.options),
+      '`abbrechen` bricht ab.',
+    ].join('\n'));
+  }
 
+  /** Resolves a board from a number or a name and creates the lobby – or asks back when it is not unambiguous. */
+  private async chooseBoard(msg: ChatMessage, text: string): Promise<void> {
+    const menu = this.menu?.channelId === msg.channelId && Date.now() < this.menu.expires ? this.menu : null;
+    if (/^\d+$/.test(text)) {
+      const options = menu?.options ?? (await this.getBoards(msg.channelId));
+      if (!options) return;
+      const board = options[Number(text) - 1];
+      if (!board) return this.say(msg.channelId, `Nummer ${text} gibt es nicht${options.length ? ` (1–${options.length})` : ''}. Schreib sonst den Namen des Quiz.`);
+      return this.createGame(msg, board);
+    }
+    const query = text.replace(/^["„“']+|["„“']+$/g, '').trim();
+    const results = await this.getBoards(msg.channelId, query);
+    if (!results) return;
+    const exact = results.filter((t) => normalize(t) === normalize(query));
+    if (exact.length === 1) return this.createGame(msg, exact[0]!);
+    if (results.length === 1) return this.createGame(msg, results[0]!);
+
+    const options = results.length ? results.slice(0, MENU_SIZE) : await this.suggest(query);
+    this.menu = { channelId: msg.channelId, options, askedBy: msg.author.id, expires: Date.now() + MENU_TTL_MS };
+    if (!results.length) return this.say(msg.channelId, this.notFound(query, options) + ' Schreib einen anderen Namen oder `abbrechen`.');
+    await this.say(msg.channelId, [
+      `🤔 Zu „${query}“ passen ${results.length} Boards. Welches meinst du? Antworte mit der **Nummer** (oder genauerem Namen, \`abbrechen\`):`,
+      ...this.numbered(options),
+      results.length > MENU_SIZE ? `… und ${results.length - MENU_SIZE} weitere.` : '',
+    ].filter(Boolean).join('\n'));
+  }
+
+  private async createGame(msg: ChatMessage, board: string): Promise<void> {
+    if (this.game) return;
+    this.menu = null;
     const guild = this.d.store.get(msg.guildId!);
     const config: Config = { ...this.d.config, game: { ...this.d.config.game, ...guild.rules, autoStart: false, publicBoard: undefined } };
     const session = this.d.createSession(config);
@@ -533,16 +599,43 @@ export class QuizBot {
     return { ...this.d.config.game, ...this.d.store.get(guildId).rules };
   }
 
-  private async getBoards(channelId: string): Promise<string[] | null> {
-    if (this.boards && Date.now() - this.boards.at < 10 * 60_000) return this.boards.list;
+  /** Default selection (no query) or quiz-base search results, cached for 10 minutes. */
+  private async getBoards(channelId: string, query = ''): Promise<string[] | null> {
+    const key = normalize(query);
+    const hit = this.boardCache.get(key);
+    if (hit && Date.now() - hit.at < 10 * 60_000) return hit.list;
     try {
-      await this.say(channelId, '🔎 Lade Boards von quiz-base …');
-      this.boards = { at: Date.now(), list: await this.d.listBoards() };
-      return this.boards.list;
+      await this.say(channelId, query ? `🔎 Suche „${query}“ auf quiz-base …` : '🔎 Lade Boards von quiz-base …');
+      await this.flush(channelId);
+      const list = await this.d.listBoards(query || undefined);
+      this.boardCache.set(key, { at: Date.now(), list });
+      return list;
     } catch (e) {
       await this.say(channelId, `⚠️ Boards konnten nicht geladen werden: ${(e as Error).message}`);
       return null;
     }
+  }
+
+  /** Close titles from the default selection, for typos the server-side search does not forgive. */
+  private async suggest(query: string): Promise<string[]> {
+    const list = this.boardCache.get('')?.list ?? (await this.d.listBoards().catch(() => [] as string[]));
+    if (!this.boardCache.has('')) this.boardCache.set('', { at: Date.now(), list });
+    const q = normalize(query);
+    return list
+      .map((t) => ({ t, s: Math.max(similarity(normalize(t), q), ...normalize(t).split(' ').map((w) => similarity(w, q))) }))
+      .filter((x) => x.s >= 0.6)
+      .sort((a, b) => b.s - a.s)
+      .slice(0, 5)
+      .map((x) => x.t);
+  }
+
+  private notFound(query: string, suggestions: string[]): string {
+    const base = `Kein Board zu „${query}“ gefunden.`;
+    return suggestions.length ? [`${base} Meintest du (Nummer antworten):`, ...this.numbered(suggestions)].join('\n') : base;
+  }
+
+  private numbered(list: string[]): string[] {
+    return list.map((t, i) => `\`${i + 1}\` ${t}`);
   }
 
   private async finish(g: ActiveGame): Promise<void> {

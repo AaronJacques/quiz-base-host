@@ -9,7 +9,7 @@ import { EventBus } from './core/events.ts';
 import { setLogLevel } from './core/logger.ts';
 import { createJudge } from './judge/index.ts';
 import { createLlm, UsageMeter } from './llm/index.ts';
-import { listPublicBoards } from './site/lobby.ts';
+import { fetchPublicBoards } from './session.ts';
 import { TafelquizPage } from './site/tafelquiz/page.ts';
 
 const run = promisify(execFile);
@@ -19,7 +19,7 @@ const USAGE = `qbhost – Claude als Host für quiz-base.de (Tafelquiz)
 Befehle:
   host     Spiel hosten, Bedienung über Terminal + Web-Spieler-Pult (Standard)
   discord  Als Discord-Bot laufen (Token in DISCORD_TOKEN bzw. .env)
-  boards   Öffentliche Tafelquiz-Boards auflisten
+  boards   Öffentliche Tafelquiz-Boards auflisten (qbhost boards [suche])
   probe    Aktuellen Seitenzustand als JSON ausgeben (Debug)
   judge    Bewertung testen:  qbhost judge "<Frage>" "<Lösung>" "<Antwort>"
   doctor   Umgebung prüfen
@@ -95,11 +95,9 @@ switch (command) {
     break;
 
   case 'boards': {
-    const driver = createDriver(config);
-    await driver.open(config.baseUrl);
-    const titles = await listPublicBoards(driver, config.baseUrl, 'Tafelquiz');
-    console.log(titles.map((t) => `• ${t}`).join('\n'));
-    await driver.close();
+    const query = rest.join(' ');
+    const titles = await fetchPublicBoards(config, query || undefined);
+    console.log(titles.length ? titles.map((t) => `• ${t}`).join('\n') : `Kein Board zu „${query}“ gefunden.`);
     break;
   }
 

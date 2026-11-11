@@ -59,10 +59,12 @@ class FakeSession implements SessionLike {
     ],
   );
   private ac = new AbortController();
+  board = '';
   constructor(private config: Config) {
     this.rules = { ...config.game };
   }
-  async createLobby() {
+  async createLobby(board: string) {
+    this.board = board;
     return { code: 'ABC123', joinUrl: 'https://www.quiz-base.de/join?code=ABC123' };
   }
   async run() {
@@ -87,24 +89,29 @@ async function until(fn: () => boolean, ms = 5000) {
   throw new Error('timeout');
 }
 
-function setup() {
+function setup(discord: Record<string, unknown> = {}) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbbot-'));
   const config = ConfigSchema.parse({
     game: { revealPauseSec: 0, answerTimeoutSec: 2, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2 },
     judge: { cacheFile: path.join(tmp, 'cache.json') },
     llm: { provider: 'none' },
-    discord: { dataDir: tmp },
+    discord: { dataDir: tmp, ...discord },
   });
   const gw = new FakeGateway();
   let session: FakeSession | null = null;
+  const searches: string[] = [];
   const bot = new QuizBot({
     gateway: gw,
     config,
     store: new GuildStore(tmp),
     createSession: (cfg) => (session = new FakeSession(cfg)),
-    listBoards: async () => ['Test Board', 'Anderes Board'],
+    listBoards: async (q?: string) => {
+      searches.push(q ?? '');
+      const all = ['Test Board', 'Anderes Board', 'Allgemeinwissen Quiz v1', 'Allgemeinwissen Quiz v2', 'Dragon Ball Quiz'];
+      return q ? all.filter((t) => t.toLowerCase().includes(q.toLowerCase())) : all.slice(0, 4);
+    },
   });
-  return { gw, bot, session: () => session!, config };
+  return { gw, bot, session: () => session!, created: () => session, searches, config };
 }
 
 const anna = { id: 'u-anna', name: 'Anna' };
@@ -192,6 +199,70 @@ describe('QuizBot', () => {
     expect(gw.sent).toHaveLength(0);
     await gw.write(anna, '', { mentionsBot: true });
     expect(gw.all()).toContain('Befehle');
+  });
+});
+
+describe('QuizBot channel restriction', () => {
+  it('ignores prefix and @mentions outside the configured channels', async () => {
+    const { gw } = setup({ channelIds: ['chan'] });
+    await gw.write(anna, '!quiz hilfe', { channelId: 'other' });
+    await gw.write(anna, 'hilfe', { channelId: 'other', mentionsBot: true });
+    expect(gw.sent).toHaveLength(0);
+    await gw.write(anna, '!quiz hilfe');
+    expect(gw.all()).toContain('Befehle');
+  });
+});
+
+describe('QuizBot board choice', () => {
+  it('asks which quiz when none is named and takes the answer of the asker only', async () => {
+    const { gw, bot, session, created } = setup();
+    await gw.write(anna, '!quiz neu');
+    expect(gw.all()).toContain('welches Quiz');
+    expect(created()).toBeNull();
+    await gw.write(ben, 'Test Board'); // not asked
+    expect(created()).toBeNull();
+    await gw.write(anna, 'dragon');
+    await until(() => !!bot.activeGame?.lobby);
+    expect(session().board).toBe('Dragon Ball Quiz');
+    expect(gw.all()).toContain('join?code=ABC123');
+  });
+
+  it('asks back when several boards match and accepts a number', async () => {
+    const { gw, bot, session, created } = setup();
+    await gw.write(anna, '!quiz neu allgemeinwissen');
+    expect(gw.all()).toContain('passen 2 Boards');
+    expect(created()).toBeNull();
+    await gw.write(anna, '2');
+    await until(() => !!bot.activeGame?.lobby);
+    expect(session().board).toBe('Allgemeinwissen Quiz v2');
+  });
+
+  it('takes an exact title directly even if it is part of other titles', async () => {
+    const { gw, bot, session } = setup();
+    await gw.write(anna, '!quiz neu Allgemeinwissen Quiz v1');
+    await until(() => !!bot.activeGame?.lobby);
+    expect(session().board).toBe('Allgemeinwissen Quiz v1');
+  });
+
+  it('suggests close titles when the search finds nothing, and can be cancelled', async () => {
+    const { gw, created, searches } = setup();
+    await gw.write(anna, '!quiz neu Allgemeinwisen Quiz v1');
+    expect(searches).toContain('Allgemeinwisen Quiz v1');
+    expect(gw.all()).toContain('Meintest du');
+    expect(gw.all()).toContain('Allgemeinwissen Quiz v1');
+    await gw.write(anna, 'abbrechen');
+    expect(gw.all()).toContain('keine neue Lobby');
+    await gw.write(anna, '1');
+    expect(created()).toBeNull();
+  });
+
+  it('uses the numbers of the last shown list', async () => {
+    const { gw, bot, session } = setup();
+    await gw.write(anna, '!quiz boards board');
+    expect(gw.all()).toContain('`2` Anderes Board');
+    await gw.write(anna, '!quiz neu 2');
+    await until(() => !!bot.activeGame?.lobby);
+    expect(session().board).toBe('Anderes Board');
   });
 });
 

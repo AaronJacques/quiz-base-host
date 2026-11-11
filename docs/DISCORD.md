@@ -30,17 +30,18 @@ In `qbhost.config.json`:
 { "discord": { "channelIds": ["123456789012345678"], "prefix": "!quiz" } }
 ```
 
-- In diesen Channels reichen Befehle mit Präfix (`!quiz neu 3`).
-- Überall sonst reagiert der Bot nur, wenn er @erwähnt wird (`@Quiz-Host neu 3`).
-- Ist die Liste leer, funktioniert das Präfix in jedem Channel, den der Bot sehen kann.
+- Der Bot reagiert **nur in diesen Channels**, mit Präfix (`!quiz neu`) oder @Erwähnung (`@Quiz-Host neu`). Woanders ignoriert er alles, auch Erwähnungen.
+- Ist die Liste leer, funktioniert er in jedem Channel, den er sehen kann.
 
 Channel-ID: In Discord unter Einstellungen → Erweitert den Entwicklermodus aktivieren, dann Rechtsklick auf den Channel → „Kanal-ID kopieren“.
 
 ## 3. Ablauf einer Runde
 
 ```
-Anna:  !quiz boards musik           → Bot listet passende öffentliche Boards mit Nummern
-Anna:  !quiz neu 4                  → Bot erstellt die Lobby und postet den Beitrittslink
+Anna:  !quiz neu                    → Bot fragt: „Welches Quiz wollt ihr spielen?“
+Anna:  dragon ball                  → Bot sucht auf quiz-base; passt genau eins, erstellt er die Lobby,
+                                      passen mehrere, fragt er mit Nummern nach („2“)
+Bot:   🎮 Neue Lobby: Dragon Ball Quiz · 🔗 Beitrittslink
                                       (Anna ist ab jetzt Spielleitung)
 Alle:  Link öffnen → Namen eingeben → „Ich bin bereit!“
 Ben:   !quiz ich Benjamin           → verknüpft Discord-Ben mit „Benjamin“ in quiz-base
@@ -52,6 +53,17 @@ Anna:  Luigi Mario                  → ✅ richtig +200, 💡 Lösung, 📊 Sta
        (falsch → Abzug, 🔔 Buzzer frei → wer auf quiz-base buzzert, antwortet im Chat)
 Bot:   🏁 Spiel vorbei! 🥇 …
 ```
+
+### Quiz auswählen
+
+Der Bot nimmt nie einfach irgendein Board:
+
+- `!quiz neu` ohne Namen → er **fragt**, welches Quiz ihr spielen wollt, und zeigt beliebte Boards mit Nummern. Die nächste Nachricht der fragenden Person ist die Antwort (Name, Teil des Namens oder Nummer; `abbrechen` bricht ab).
+- `!quiz neu <Name>` → er sucht mit der **Suche von quiz-base**, findet also auch Boards, die nicht in der Standardauswahl stehen:
+  - genauer Titel oder genau ein Treffer → Lobby wird erstellt
+  - mehrere Treffer → nummerierte Liste, Antwort mit der Nummer
+  - kein Treffer → ähnliche Titel als Vorschlag („Meintest du …“), sonst neuer Versuch
+- `!quiz boards <suche>` zeigt Treffer mit Nummern, danach geht `!quiz neu <Nr>`.
 
 ### Verknüpfung Discord ↔ quiz-base
 

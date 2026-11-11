@@ -7,7 +7,7 @@ Unterstützt: **Tafelquiz** (inkl. 2 Boards, Bild- und Audiofragen, Buzzer). Wei
 ```
 Discord-Channel                         qbhost (läuft auf deinem Rechner)              quiz-base.de
 ───────────────                         ─────────────────────────────────              ────────────
-!quiz neu 4          ─────────────►     erstellt Lobby im Browser          ─────────►  Host-Ansicht
+!quiz neu <Quiz>     ─────────────►     sucht Board, erstellt Lobby        ─────────►  Host-Ansicht
 🔗 Beitrittslink     ◄─────────────     postet Link + Code
 !quiz ich Benjamin   ─────────────►     verknüpft Discord-User ↔ Spieler
 "nintendo 200"       ─────────────►     prüft Karte (frei / schon weg) und öffnet sie ──► alle sehen die Frage
@@ -17,7 +17,7 @@ Discord-Channel                         qbhost (läuft auf deinem Rechner)      
 
 ## Highlights
 
-- **Komplett per Discord-Chat bedienbar:** Lobby erstellen, Beitrittslink, Namen verknüpfen, Karten wählen, antworten, Regeln einstellen, Spielleitung.
+- **Komplett per Discord-Chat bedienbar:** Quiz per Name aussuchen (der Bot fragt nach, statt irgendeins zu nehmen), Lobby erstellen, Beitrittslink, Namen verknüpfen, Karten wählen, antworten, Regeln einstellen, Spielleitung.
 - **Kartenwahl in natürlicher Sprache:** `Nintendo 200`, `nin 200`, `2 200`, `ich nehme Filme für 300`. Der Bot prüft, ob die Karte existiert, frei oder schon weg ist.
 - **Punkteregeln per Chat einstellbar:** `!quiz regel minus 0`, `!quiz regel buzzerplus 50%`, `!quiz regel zeit 30`. Sie werden pro Server gespeichert.
 - **Sparsam:** Die Engine spielt deterministisch. Claude wird nur bei unklaren Antworten oder Bildfragen ohne Lösung gefragt, standardmäßig Haiku über dein Claude-Code-Abo. Ein Board mit Lösungsnotizen kostet oft **0 Aufrufe**, ein reines Bilder-Board ohne Notizen ca. **1–2 Cent**.
@@ -42,8 +42,9 @@ npx qbhost discord
 Dann im Discord-Channel:
 
 ```
-!quiz boards              Board-Liste mit Nummern
-!quiz neu 4               Lobby erstellen → Link wird gepostet
+!quiz neu                 Bot fragt, welches Quiz → Name schreiben → Link wird gepostet
+!quiz neu dragon ball     direkt mit Namen (Suche auf quiz-base, Rückfrage bei mehreren Treffern)
+!quiz boards [suche]      Board-Liste mit Nummern
 !quiz ich <Name>          mit deinem quiz-base-Namen verknüpfen (bei gleichem Namen automatisch)
 nintendo 200              wenn du am Zug bist
 <deine Antwort>           wenn der Bot dich fragt
@@ -77,7 +78,7 @@ Defaults stehen in [`src/config.ts`](src/config.ts). Für Anpassungen `qbhost.co
 | `game` | `correctFactor` 1, `wrongFactor` 0.5, `buzzerCorrectFactor` 1, `buzzerWrongFactor` 0.5, `buzzerOnWrong`, `answerTimeoutSec`, `buzzWindowSec` |
 | `judge` | `strategy`: `cascade` (Fuzzy → Cache → LLM → Mensch) · `fuzzy` (nie LLM) · `operator` |
 | `llm` | `provider`: `claude-cli` (Abo) · `anthropic` (API-Key) · `none`; `model`: `haiku` |
-| `discord` | `channelIds` (überwachte Channels), `prefix` (`!quiz`), `autoStart`, `lobbyTimeoutMin` |
+| `discord` | `channelIds` (nur dort reagiert der Bot), `prefix` (`!quiz`), `autoStart`, `lobbyTimeoutMin` |
 | `browser` | `driver`, `headless`, `pollMs` |
 
 ## Befehle (CLI)
@@ -85,7 +86,7 @@ Defaults stehen in [`src/config.ts`](src/config.ts). Für Anpassungen `qbhost.co
 ```
 qbhost discord          Discord-Bot starten
 qbhost host             ein Spiel mit Terminal + Web-Spieler-Pult hosten
-qbhost boards           öffentliche Tafelquiz-Boards auflisten
+qbhost boards [suche]   öffentliche Tafelquiz-Boards auflisten / suchen
 qbhost probe            aktuellen Seitenzustand als JSON (Debug)
 qbhost judge "<Frage>" "<Lösung>" "<Antwort>"
 qbhost doctor           Umgebung prüfen
@@ -94,7 +95,7 @@ qbhost doctor           Umgebung prüfen
 ## Entwicklung
 
 ```bash
-npm test            # 57 Tests: Bewertung, Regeln, Kartenparser, Spielablauf, Discord-Bot (ohne Netzwerk)
+npm test            # 62 Tests: Bewertung, Regeln, Kartenparser, Spielablauf, Discord-Bot (ohne Netzwerk)
 npm run typecheck
 ```
 

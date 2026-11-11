@@ -17,12 +17,25 @@ const H = `({
     b.click(); return {ok:true};
   },
   boardTitles(){ return [...document.querySelectorAll('main h3')].filter(h=>this.vis(h)).map(h=>this.t(h)) },
+  norm(x){ return x.toLowerCase().replace(/\\s+/g,' ').trim() },
   pickBoard(title){
-    const h=[...document.querySelectorAll('main h3')].find(h=>this.t(h).toLowerCase()===title.toLowerCase())
-      ||[...document.querySelectorAll('main h3')].find(h=>this.t(h).toLowerCase().includes(title.toLowerCase()));
-    if(!h) return {ok:false,error:'board not found: '+title};
+    const hs=[...document.querySelectorAll('main h3')].filter(h=>this.vis(h));
+    const want=this.norm(title);
+    let h=hs.find(h=>this.norm(this.t(h))===want);
+    if(!h){
+      const partial=hs.filter(h=>this.norm(this.t(h)).includes(want));
+      if(partial.length===1) h=partial[0];
+      else return {ok:false,error:(partial.length?'mehrdeutig: ':'nicht gefunden: ')+title, candidates:partial.map(h=>this.t(h))};
+    }
     let e=h; while(e && getComputedStyle(e).cursor!=='pointer') e=e.parentElement;
     (e||h).click(); return {ok:true, title:this.t(h)};
+  },
+  search(q){
+    const i=document.querySelector('main input[placeholder^="Nach Boards suchen"]');
+    if(!i) return {ok:false,error:'Suchfeld fehlt'};
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,q);
+    i.dispatchEvent(new Event('input',{bubbles:true}));
+    return {ok:true};
   },
   heading(){ return this.t(document.querySelector('main h1')) },
 })`;
@@ -52,15 +65,10 @@ export async function createLobbyWithPublicBoard(
   boardTitle: string,
 ): Promise<void> {
   log.info(`Erstelle Lobby: ${format} / "${boardTitle}"`);
-  await driver.goto(`${baseUrl}/create-lobby`);
-  await until(driver, `boardTitles().includes(${JSON.stringify(format)})`);
-  await expectOk(call(driver, `clickButton(${JSON.stringify(format)}, true)`), 'Format wählen');
-  await until(driver, `heading()===${JSON.stringify(format)}`);
-  await expectOk(call(driver, `clickButton('Öffentliches Board verwenden')`), 'Öffentliches Board');
-  const loaded = await until(driver, `boardTitles().length>3`, 15000);
-  if (!loaded) throw new Error('Board-Liste lädt nicht');
+  await openPublicBoards(driver, baseUrl, format);
+  await searchBoards(driver, boardTitle);
   const picked = await call<{ ok: boolean; title?: string; error?: string }>(driver, `pickBoard(${JSON.stringify(boardTitle)})`);
-  if (!picked.ok) throw new Error(picked.error);
+  if (!picked.ok) throw new Error(`Board ${picked.error}`);
   log.info(`Board gewählt: ${picked.title}`);
   await sleep(500);
   await expectOk(call(driver, `clickButton('Board verwenden', true)`), 'Board verwenden');
@@ -69,14 +77,44 @@ export async function createLobbyWithPublicBoard(
   if (!(await until(driver, `heading()==='Lobby Warteraum'`, 15000))) throw new Error('Warteraum erscheint nicht');
 }
 
-export async function listPublicBoards(driver: BrowserDriver, baseUrl: string, format: QuizFormat): Promise<string[]> {
+/**
+ * Public boards of a format. Without a query: quiz-base's default selection
+ * (~40 boards). With a query: quiz-base's own search, which also finds boards
+ * that are not in the default selection.
+ */
+export async function listPublicBoards(driver: BrowserDriver, baseUrl: string, format: QuizFormat, query?: string): Promise<string[]> {
+  await openPublicBoards(driver, baseUrl, format);
+  if (query?.trim()) await searchBoards(driver, query.trim());
+  return call<string[]>(driver, 'boardTitles()');
+}
+
+async function openPublicBoards(driver: BrowserDriver, baseUrl: string, format: QuizFormat): Promise<void> {
   await driver.goto(`${baseUrl}/create-lobby`);
   await until(driver, `boardTitles().includes(${JSON.stringify(format)})`);
-  await call(driver, `clickButton(${JSON.stringify(format)}, true)`);
+  await expectOk(call(driver, `clickButton(${JSON.stringify(format)}, true)`), 'Format wählen');
   await until(driver, `heading()===${JSON.stringify(format)}`);
-  await call(driver, `clickButton('Öffentliches Board verwenden')`);
-  await until(driver, `boardTitles().length>3`, 15000);
-  return call<string[]>(driver, 'boardTitles()');
+  await expectOk(call(driver, `clickButton('Öffentliches Board verwenden')`), 'Öffentliches Board');
+  if (!(await until(driver, `boardTitles().length>3`, 15000))) throw new Error('Board-Liste lädt nicht');
+}
+
+/** Types into quiz-base's board search and waits until the (debounced, server-side) result list settles. */
+async function searchBoards(driver: BrowserDriver, query: string): Promise<void> {
+  const sig = () => call<string[]>(driver, 'boardTitles()').then((t) => t.join('|'));
+  const before = await sig();
+  await expectOk(call(driver, `search(${JSON.stringify(query)})`), 'Board-Suche');
+  const end = Date.now() + 4000;
+  let last = await sig();
+  while (last === before && Date.now() < end) {
+    await sleep(300);
+    last = await sig();
+  }
+  // Settled = unchanged over two consecutive polls.
+  for (let stable = 0; stable < 2 && Date.now() < end + 4000; ) {
+    await sleep(400);
+    const now = await sig();
+    stable = now === last ? stable + 1 : 0;
+    last = now;
+  }
 }
 
 async function expectOk(p: Promise<unknown>, what: string): Promise<void> {

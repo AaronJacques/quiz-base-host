@@ -20,7 +20,7 @@ export async function runDiscordBot(config: Config): Promise<void> {
     store: new GuildStore(config.discord.dataDir),
     // Discord games have no terminal/web channel – the chat is the interface.
     createSession: (cfg) => new GameSession(cfg, []),
-    listBoards: () => fetchPublicBoards(config),
+    listBoards: (query) => fetchPublicBoards(config, query),
   });
   await gateway.login(token);
   log.info(`Bereit. Befehle mit "${config.discord.prefix} hilfe" oder @Mention.`);
