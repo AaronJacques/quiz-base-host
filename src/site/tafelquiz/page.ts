@@ -113,6 +113,14 @@ export class TafelquizPage implements TafelquizPort {
     return res;
   }
 
+  /** Closes the waiting room (before the game started); confirms a dialog if one appears. */
+  async closeLobby(): Promise<ActionResult> {
+    const r = await this.act('closeLobby');
+    await sleep(500);
+    if ((await this.state()).dialog) await this.act('confirmDialog', 'Lobby schließen');
+    return r;
+  }
+
   async endGame(): Promise<ActionResult> {
     const r = await this.act('endGame');
     if (!r.ok) return r;

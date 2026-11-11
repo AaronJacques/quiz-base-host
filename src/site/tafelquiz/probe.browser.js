@@ -244,6 +244,9 @@
     if (this.lobbyCode()) return { ok: true };
     return this.click('Lobby-Code anzeigen');
   },
+  closeLobby() {
+    return this.click('Lobby schließen');
+  },
   startGame() {
     return this.click('Spiel starten', null, 'prefix');
   },

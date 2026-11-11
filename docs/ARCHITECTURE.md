@@ -10,8 +10,9 @@
 
 ```
 src/
-├── cli.ts                 Kommandozeile (host, boards, probe, judge, doctor)
-├── app.ts                 Composition Root: baut alles aus der Config zusammen
+├── cli.ts                 Kommandozeile (discord, host, boards, probe, judge, doctor)
+├── app.ts                 CLI-Modus: eine Runde mit Terminal + Spieler-Pult
+├── session.ts             GameSession = eine Runde (Browser, Bus, Controller, Judge); vom CLI und vom Bot genutzt
 ├── config.ts              Zod-Schema mit allen Einstellungen + Defaults
 │
 ├── core/                  framework-freie Basis
@@ -49,6 +50,14 @@ src/
 │   ├── claude-cli.ts      `claude -p` headless, ohne Tools/MCP/Settings → Abo statt API-Key
 │   └── anthropic-api.ts   offizielles SDK, messages.parse + Zod, effort "low"
 │
+├── discord/               Discord-Bot (Hauptbedienung)
+│   ├── gateway.ts         ChatGateway-Interface (testbar ohne Discord)
+│   ├── discord-gateway.ts discord.js-Implementierung
+│   ├── bot.ts             Befehle, Verknüpfung Discord↔quiz-base, Kartenwahl, Antworten, Rendering
+│   ├── pick-parser.ts     "nin 200" → Karte + Prüfung frei/schon weg (reine Funktion)
+│   ├── store.ts           pro Server: Verknüpfungen + Regeln (.qbhost/discord/)
+│   └── format.ts          Hilfe-/Regeltexte
+│
 └── channels/              "Wie reden Menschen mit dem Host?"
     ├── channel.ts         Channel-Interface
     ├── terminal.ts        Operator-Konsole
@@ -79,7 +88,9 @@ Jeder Warteschritt läuft über `whilePage()`: Ändert ein Mensch im Browser den
 | Ich will … | Dann … |
 |---|---|
 | einen **neuen Spielmodus** (Punktejagd, Eagle Eye, …) | `src/site/<modus>/probe.browser.js` + `page.ts` (Port-Interface), `src/modes/<modus>/controller.ts` implementiert `GameMode`; in `app.ts` anhand des erkannten Formats wählen. Erkenntnisse zu Punktejagd stehen in SITE-NOTES.md. |
-| einen **neuen Eingabekanal** (Discord-Bot, Sprache) | Klasse mit `Channel`-Interface, die `host:*` rendert und `player:pick`/`player:answer` emittiert. In `app.ts` registrieren. Kein Controller-Code nötig. |
+| eine **andere Chat-Plattform** (Slack, Matrix, Twitch) | `ChatGateway` implementieren und `QuizBot` damit starten – Bot-Logik bleibt gleich. |
+| eine **neue Spielregel** per Discord einstellbar machen | Feld in `config.ts` `game` + Eintrag in `RULES` (`rules.ts`) – `!quiz regel` kennt sie dann automatisch. |
+| einen **neuen Eingabekanal** (Sprache) | Klasse mit `Channel`-Interface, die `host:*` rendert und `player:pick`/`player:answer` emittiert. In `app.ts` registrieren. Kein Controller-Code nötig. |
 | eine **Sprachausgabe** (TTS ins Discord) | Channel, der `host:say` / `host:question` an z. B. macOS `say` oder ElevenLabs gibt. |
 | **eigene Hausregeln** | `rules.ts` und neue Felder in `config.ts`. |
 | einen **anderen Browser** | `BrowserDriver` implementieren (nur `evaluate(expression)` ist wirklich nötig). |

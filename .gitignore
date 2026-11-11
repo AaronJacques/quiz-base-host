@@ -1,6 +1,27 @@
+# Dependencies
 node_modules/
+
+# Laufzeitdaten: Browser-Profil, Bewertungs-Cache, Discord-Verknüpfungen, Screenshots
 .qbhost/
-scratch/
-*.log
+
+# Secrets & lokale Konfiguration
 .env
+.env.*
+!.env.example
 qbhost.config.json
+
+# Lokale Test-/Spielwiese
+scratch/
+
+# Logs, Builds, Coverage
+*.log
+dist/
+coverage/
+*.tsbuildinfo
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

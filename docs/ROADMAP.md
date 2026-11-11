@@ -6,8 +6,13 @@
 - Bewertungs-Kaskade Fuzzy → Cache → Haiku → Operator, Vision-Lösung für Bildfragen ohne Notiz
 - Spieler-Pult (Web), Operator-Konsole, Browser: Playwright / Orca / Chrome (CDP)
 
+## ✅ v0.2 – Discord-Bot
+- Lobby per Chat-Befehl, Beitrittslink, Verknüpfung Discord↔quiz-base (automatisch per Name oder `!quiz ich`)
+- Kartenwahl in natürlicher Sprache mit Prüfung frei/schon weg, Antworten im Chat
+- Punkteregeln per Chat (`!quiz regel …`), Spielleitung mit Overrides, Lösungen nur per DM vor der Auflösung
+
 ## Als Nächstes
-1. **Discord-Kanal**: Bot im Text-Channel der Runde (`!nehme Nintendo 200`, Antworten als Nachricht). Ersetzt das Spieler-Pult für Remote-Runden ohne Tunnel.
+1. **Slash-Commands** (`/quiz neu`) mit Autocomplete für Boards, zusätzlich zum Präfix.
 2. **Sprachausgabe**: Fragen/Urteile per TTS vorlesen (macOS `say` → virtuelles Audiogerät → Discord).
 3. **Spracheingabe**: Voice-Channel mitschneiden, lokal transkribieren (whisper.cpp), Antworten des Spielers am Zug erkennen. Damit entfällt das Tippen.
 4. **Punktejagd**: rein mechanisch (aufdecken → auflösen → weiter), kein LLM nötig. Notizen in SITE-NOTES.md.

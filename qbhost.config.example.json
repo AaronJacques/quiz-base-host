@@ -1,5 +1,8 @@
 {
-  "browser": { "driver": "playwright", "headless": false },
+  "browser": {
+    "driver": "playwright",
+    "headless": true
+  },
   "game": {
     "publicBoard": "Allgemeinwissen Quiz v1",
     "autoStart": true,
@@ -7,12 +10,29 @@
     "answerTimeoutSec": 45,
     "buzzerOnWrong": true,
     "buzzWindowSec": 15,
-    "wrongPenalty": 0.5,
-    "penalizeBuzzers": true,
     "autoplayAudio": true,
-    "revealPauseSec": 4
+    "revealPauseSec": 4,
+    "correctFactor": 1,
+    "wrongFactor": 0.5,
+    "buzzerCorrectFactor": 1,
+    "buzzerWrongFactor": 0.5
   },
-  "judge": { "strategy": "cascade", "solveMissingNotes": true },
-  "llm": { "provider": "claude-cli", "model": "haiku" },
-  "companion": { "enabled": true, "port": 4747 }
+  "judge": {
+    "strategy": "cascade",
+    "solveMissingNotes": true
+  },
+  "llm": {
+    "provider": "claude-cli",
+    "model": "haiku"
+  },
+  "companion": {
+    "enabled": true,
+    "port": 4747
+  },
+  "discord": {
+    "channelIds": [],
+    "prefix": "!quiz",
+    "autoStart": true,
+    "lobbyTimeoutMin": 20
+  }
 }

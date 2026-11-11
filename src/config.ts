@@ -39,10 +39,12 @@ export const ConfigSchema = z.object({
       buzzerOnWrong: z.boolean().default(true),
       buzzWindowSec: z.number().int().default(15),
       buzzAnswerTimeoutSec: z.number().int().default(25),
-      /** Abzug bei falscher Antwort relativ zum Fragewert: 0 = kein Abzug, 0.5 = halbe Punkte (Standard der Seite). */
-      wrongPenalty: z.union([z.literal(0), z.literal(0.5), z.literal(1)]).default(0.5),
-      /** Abzug auch für falsche Buzzer-Antworten. */
-      penalizeBuzzers: z.boolean().default(true),
+      // Punkteregeln als Faktor vom Fragewert (1 = voller Wert, 0.5 = halber, 0 = nichts).
+      // Standard = klassische quiz-base-Regeln. Per Discord änderbar (`!quiz regel …`).
+      correctFactor: z.number().min(0).max(5).default(1),
+      wrongFactor: z.number().min(0).max(5).default(0.5),
+      buzzerCorrectFactor: z.number().min(0).max(5).default(1),
+      buzzerWrongFactor: z.number().min(0).max(5).default(0.5),
       /** YouTube-/Audio-Fragen automatisch abspielen. */
       autoplayAudio: z.boolean().default(true),
       /** Pause zwischen Auflösung und Schließen der Frage, damit alle die Lösung lesen. */
@@ -73,6 +75,21 @@ export const ConfigSchema = z.object({
       model: z.string().default('haiku'),
       claudeBin: z.string().default('claude'),
       timeoutMs: z.number().int().default(30000),
+    })
+    .prefault({}),
+
+  discord: z
+    .object({
+      /** Token kommt aus der Umgebung (DISCORD_TOKEN bzw. .env), nie aus der Config-Datei. */
+      tokenEnv: z.string().default('DISCORD_TOKEN'),
+      /** Überwachte Channel-IDs: dort reichen `!quiz …`-Befehle. Leer = Befehle mit Präfix überall. Ein @Mention funktioniert immer. */
+      channelIds: z.array(z.string()).default([]),
+      prefix: z.string().default('!quiz'),
+      /** Lobby wird geschlossen, wenn das Spiel nach so vielen Minuten nicht gestartet ist. */
+      lobbyTimeoutMin: z.number().int().default(20),
+      /** Automatisch starten, sobald alle in quiz-base bereit UND mit Discord verknüpft sind. */
+      autoStart: z.boolean().default(true),
+      dataDir: z.string().default('.qbhost/discord'),
     })
     .prefault({}),
 

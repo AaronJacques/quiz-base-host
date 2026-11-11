@@ -5,6 +5,10 @@ description: Startet und betreut Claude als Host für ein Tafelquiz auf quiz-bas
 
 # Quiz-Host starten
 
+**Discord-Modus (Standard für Runden):** `npx qbhost discord` im Hintergrund starten (braucht `DISCORD_TOKEN` in `.env`, siehe `docs/DISCORD.md`). Danach läuft alles über den Discord-Chat (`!quiz hilfe`); du musst nichts weiter tun.
+
+**Terminal-Modus** (ohne Discord):
+
 Die Spiel-Engine (`qbhost`) leitet das Spiel selbstständig. Du startest sie nur und bleibst für Rückfragen erreichbar. Spiele das Spiel **nicht** selbst über Browser-Befehle: Das würde unnötig Tokens kosten.
 
 1. `npm run doctor` im Repo-Root ausführen, bei ❌ dem Nutzer den Grund nennen.

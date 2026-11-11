@@ -10,6 +10,8 @@ export interface PlayerState {
   isTurn: boolean;
   /** Player currently holds the buzzer ("Buzzer" marker). */
   hasBuzzed: boolean;
+  /** Lobby only: clicked "Ich bin bereit!". */
+  ready?: boolean;
 }
 
 export interface BoardCell {

@@ -9,7 +9,12 @@ import type { BoardCell, PlayerState } from './types.ts';
 export interface HostEvents {
   // ── host → world ─────────────────────────────────────────────
   'host:status': { phase: string; message: string };
-  'host:turn': { player: string; open: BoardCell[]; categories: string[] };
+  /** Waiting room changed (players joined / got ready). */
+  'host:lobby': { code: string | null; players: { name: string; ready: boolean }[]; canStart: boolean };
+  /** `grid` = all cells of the active board incl. answered ones (needed to say "schon weg"). */
+  'host:turn': { player: string; open: BoardCell[]; grid: BoardCell[]; categories: string[]; board: { active: number; count: number } };
+  /** Short structured game notices that chat channels may render (the terminal uses host:say). */
+  'host:notice': { kind: 'buzzer-open' | 'buzzed' | 'no-buzz' | 'reminder' | 'board-switch' | 'operator-needed' | 'started'; player?: string; text: string; /** Private detail (may contain the solution) – only for the game leader. */ detail?: string };
   'host:question': { player: string; category: string; points: number; text: string; hasImage: boolean; hasAudio: boolean };
   'host:await-answer': { player: string; timeoutSec: number; viaBuzzer: boolean };
   'host:verdict': { player: string; answer: string; correct: boolean; delta: number; reason?: string };

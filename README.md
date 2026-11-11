@@ -1,124 +1,109 @@
-# quiz-base-host
+# quiz-base-host 🎙️
 
-Lässt **Claude** auf [quiz-base.de](https://www.quiz-base.de) die Rolle des **Hosts / Gamemasters** übernehmen. Dann muss niemand aus der Runde die Antworten kennen, und alle können mitspielen.
+Ein Discord-Bot, der auf [quiz-base.de](https://www.quiz-base.de) die Rolle des **Hosts / Gamemasters** übernimmt. Dann muss niemand aus der Runde die Antworten kennen, und alle spielen mit.
 
-Aktuell unterstützt: **Tafelquiz** (inkl. 2 Boards, Bild-/Audiofragen, Buzzer). Weitere Modi siehe [Roadmap](docs/ROADMAP.md).
-
-## Wie es funktioniert
+Unterstützt: **Tafelquiz** (inkl. 2 Boards, Bild- und Audiofragen, Buzzer). Weitere Formate: siehe [Roadmap](docs/ROADMAP.md).
 
 ```
- Spieler (Handy/PC)                      qbhost (dein Rechner)                       quiz-base.de
- ───────────────────                     ─────────────────────                       ────────────
- quiz-base Lobby  ◄──────────────────────── Host-Browser (Playwright / Orca / Chrome) ──► Host-Ansicht
- Spieler-Pult  ── wählt Frage, tippt ──►  Spiel-Engine (deterministisch)
-   (Web-Seite)     Antwort                    │  liest Seite, klickt, vergibt Punkte
-                                              ▼
-                                         Bewertung: Fuzzy → Cache → Claude Haiku → Operator
+Discord-Channel                         qbhost (läuft auf deinem Rechner)              quiz-base.de
+───────────────                         ─────────────────────────────────              ────────────
+!quiz neu 4          ─────────────►     erstellt Lobby im Browser          ─────────►  Host-Ansicht
+🔗 Beitrittslink     ◄─────────────     postet Link + Code
+!quiz ich Benjamin   ─────────────►     verknüpft Discord-User ↔ Spieler
+"nintendo 200"       ─────────────►     prüft Karte (frei / schon weg) und öffnet sie ──► alle sehen die Frage
+"Luigi Mario"        ─────────────►     bewertet: Fuzzy → Cache → Claude Haiku
+✅ +200 · 💡 · 📊     ◄─────────────     vergibt Punkte, Buzzer, Zugwechsel, Endstand ──► Punkte für alle
 ```
 
-- **Die Engine macht alles Mechanische ohne KI**: Lobby erstellen, Spiel starten, Zugreihenfolge, Frage öffnen, Audio abspielen, Timer, Buzzer, Punkte (+Wert / −½ Wert), Animationen, Board-Wechsel, Spielende.
-- **Claude wird nur gefragt, wenn es wirklich nötig ist**:
-  1. eine Antwort ist nicht eindeutig (Fuzzy-Abgleich unsicher) → ~0,03 Cent, ~3 s
-  2. eine Frage hat keine hinterlegte Lösung (reine Bildfrage) → Claude schaut sich die Host-Ansicht an → ~0,06 Cent
-  
-  Exakte/fast exakte Treffer, Zahlen, „keine Ahnung“ und Wiederholungen (Cache) kosten **nichts**. Ein typisches 16-Fragen-Spiel braucht ca. 5–15 Haiku-Aufrufe, also deutlich unter 1 Cent.
-- **Spieler-Pult**: Weil quiz-base keinen Chat hat (normalerweise sagt man dem Host per Voice, was man nimmt), öffnen die Spieler eine kleine Webseite des Hosts: Dort wählt der Spieler am Zug seine Frage und tippt seine Antwort. Den Buzzer drücken alle weiterhin auf quiz-base selbst.
-- **Operator-Konsole**: Ein Mensch kann im Terminal jederzeit eingreifen (`r`/`f` für richtig/falsch, `skip`, `punkte Anna +100`, …). Greift jemand direkt im Browser ein (Frage öffnen, Spiel beenden), passt sich die Engine an.
+## Highlights
 
-## Schnellstart
+- **Komplett per Discord-Chat bedienbar:** Lobby erstellen, Beitrittslink, Namen verknüpfen, Karten wählen, antworten, Regeln einstellen, Spielleitung.
+- **Kartenwahl in natürlicher Sprache:** `Nintendo 200`, `nin 200`, `2 200`, `ich nehme Filme für 300`. Der Bot prüft, ob die Karte existiert, frei oder schon weg ist.
+- **Punkteregeln per Chat einstellbar:** `!quiz regel minus 0`, `!quiz regel buzzerplus 50%`, `!quiz regel zeit 30`. Sie werden pro Server gespeichert.
+- **Sparsam:** Die Engine spielt deterministisch. Claude wird nur bei unklaren Antworten oder Bildfragen ohne Lösung gefragt, standardmäßig Haiku über dein Claude-Code-Abo. Ein Board mit Lösungsnotizen kostet oft **0 Aufrufe**, ein reines Bilder-Board ohne Notizen ca. **1–2 Cent**.
+- **Fair:** Die Lösung erscheint nie vor der Auflösung im Channel. Unsichere Fälle entscheidet die Spielleitung, die die Lösung per DM bekommt.
+- **Erweiterbar:** saubere Schichten (Browser · Seite · Spielmodus · Bewertung · Kanäle), siehe [Architektur](docs/ARCHITECTURE.md).
 
-Voraussetzungen: Node ≥ 22, [Claude Code](https://claude.com/claude-code) eingeloggt (für die Bewertung über dein Abo) **oder** `ANTHROPIC_API_KEY`.
+## Schnellstart (Discord)
+
+Voraussetzungen: Node ≥ 22 und eines davon:
+- [Claude Code](https://claude.com/claude-code), eingeloggt (Bewertung über dein Abo)
+- `ANTHROPIC_API_KEY`
 
 ```bash
+git clone <repo> && cd quiz-base-host
 npm install
-npx playwright install chromium   # einmalig, falls noch nicht vorhanden
-npm run doctor                     # prüft Claude CLI, Browser, Haiku-Bewertung
+npx playwright install chromium
+cp .env.example .env              # DISCORD_TOKEN eintragen → docs/DISCORD.md
+npm run doctor
+npx qbhost discord
 ```
 
-### Variante A: eigener Browser (Standard)
+Dann im Discord-Channel:
+
+```
+!quiz boards              Board-Liste mit Nummern
+!quiz neu 4               Lobby erstellen → Link wird gepostet
+!quiz ich <Name>          mit deinem quiz-base-Namen verknüpfen (bei gleichem Namen automatisch)
+nintendo 200              wenn du am Zug bist
+<deine Antwort>           wenn der Bot dich fragt
+!quiz hilfe               alle Befehle
+```
+
+Bot-Einrichtung im Developer Portal, alle Befehle und Regeln: **[docs/DISCORD.md](docs/DISCORD.md)**.
+
+## Ohne Discord: Terminal + Spieler-Pult
 
 ```bash
 npx qbhost host --board "Allgemeinwissen Quiz v1" --auto-start
 ```
 
-Ein Chromium-Fenster öffnet sich, die Lobby wird erstellt, der Code steht im Terminal.
+Spieler wählen Karten und antworten über eine kleine Webseite (`http://<dein-rechner>:4747`). Eingreifen kannst du im Terminal (`r`, `f`, `skip`, `punkte Anna +100`, `hilfe`).
 
-### Variante B: Orca-Browser
+Browser-Varianten (für beide Modi):
 
-```bash
-orca tab create --url https://www.quiz-base.de --json     # → browserPageId
-npx qbhost host --driver orca --page <browserPageId> --board "Video Game Quiz" --auto-start
-```
-
-Das Spiel läuft sichtbar im Orca-Tab neben deinem Agenten.
-
-### Variante C: dein normaler Chrome
-
-```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222 --user-data-dir="$HOME/.qbhost-chrome"
-npx qbhost host --driver cdp
-```
-
-Ohne `--board` übernimmt qbhost, sobald du selbst im Browser eine Tafelquiz-Lobby erstellt hast (auch eigene Boards mit Login).
-
-### Ablauf für die Runde
-
-1. Spieler treten auf quiz-base mit dem Lobby-Code bei und klicken „Ich bin bereit!“.
-2. Spieler öffnen das **Spieler-Pult** (URL steht im Terminal, z. B. `http://192.168.178.20:4747`) und melden sich mit Code + gleichem Namen an.
-   *Freunde außerhalb deines WLANs:* Port 4747 per Tunnel freigeben, z. B. `cloudflared tunnel --url http://localhost:4747`.
-3. Spiel startet automatisch (`--auto-start`) oder per `start` in der Konsole.
-4. Am Zug: Frage im Pult antippen → Antwort tippen → Claude bewertet → bei falsch wird der Buzzer freigegeben.
-
-## Befehle
-
-```
-qbhost host     [--driver playwright|orca|cdp] [--page <id>] [--board "<Titel>"] [--auto-start]
-                [--llm claude-cli|anthropic|none] [--model haiku|sonnet] [--judge cascade|fuzzy|operator]
-                [--no-companion] [--port 4747] [--headless] [--verbose]
-qbhost boards   # öffentliche Tafelquiz-Boards auflisten
-qbhost probe    # aktuellen Seitenzustand als JSON (Debug, z. B. wenn quiz-base das Layout ändert)
-qbhost judge "<Frage>" "<Lösung>" "<Antwort>"   # Bewertung testen
-qbhost doctor   # Umgebung prüfen
-```
-
-Operator-Konsole während des Spiels: `start`, `r`/`richtig`, `f`/`falsch`, `skip`, `pick <spalte> <zeile>`, `antwort <text>`, `punkte <name> <±n>`, `hilfe`.
+| Option | Browser |
+|---|---|
+| *(Standard)* | eigener Chromium, mit `--headless` unsichtbar |
+| `--driver orca --page <browserPageId>` | Tab im Orca-Browser (`orca tab create --url https://www.quiz-base.de --json`) |
+| `--driver cdp` | dein laufender Chrome mit `--remote-debugging-port=9222` |
 
 ## Konfiguration
 
-Alle Optionen mit Defaults stehen in [`src/config.ts`](src/config.ts). Für eigene Hausregeln `qbhost.config.example.json` nach `qbhost.config.json` kopieren, z. B.:
+Defaults stehen in [`src/config.ts`](src/config.ts). Für Anpassungen `qbhost.config.example.json` nach `qbhost.config.json` kopieren.
 
-```json
-{
-  "game": { "answerTimeoutSec": 30, "wrongPenalty": 0, "buzzerOnWrong": true, "penalizeBuzzers": false },
-  "llm": { "provider": "claude-cli", "model": "haiku" },
-  "judge": { "strategy": "cascade" }
-}
-```
-
-| Bewertung | Verhalten | LLM-Verbrauch |
-|---|---|---|
-| `cascade` (Standard) | Fuzzy → Cache → Claude → Operator | minimal |
-| `fuzzy` | nur deterministisch, Unsicheres fragt den Operator | null |
-| `operator` | Fuzzy für eindeutige Treffer, sonst entscheidet ein Mensch | null |
-
-| LLM-Provider | Voraussetzung |
+| Bereich | Wichtige Optionen |
 |---|---|
-| `claude-cli` (Standard) | eingeloggtes Claude Code; nutzt `claude -p --model haiku` ohne Tools/MCP → kleiner Prompt |
-| `anthropic` | `ANTHROPIC_API_KEY` (oder `ant auth login`), Modell `claude-haiku-5-5` |
-| `none` | kein LLM, Bildfragen ohne Notiz brauchen dann den Operator |
+| `game` | `correctFactor` 1, `wrongFactor` 0.5, `buzzerCorrectFactor` 1, `buzzerWrongFactor` 0.5, `buzzerOnWrong`, `answerTimeoutSec`, `buzzWindowSec` |
+| `judge` | `strategy`: `cascade` (Fuzzy → Cache → LLM → Mensch) · `fuzzy` (nie LLM) · `operator` |
+| `llm` | `provider`: `claude-cli` (Abo) · `anthropic` (API-Key) · `none`; `model`: `haiku` |
+| `discord` | `channelIds` (überwachte Channels), `prefix` (`!quiz`), `autoStart`, `lobbyTimeoutMin` |
+| `browser` | `driver`, `headless`, `pollMs` |
+
+## Befehle (CLI)
+
+```
+qbhost discord          Discord-Bot starten
+qbhost host             ein Spiel mit Terminal + Web-Spieler-Pult hosten
+qbhost boards           öffentliche Tafelquiz-Boards auflisten
+qbhost probe            aktuellen Seitenzustand als JSON (Debug)
+qbhost judge "<Frage>" "<Lösung>" "<Antwort>"
+qbhost doctor           Umgebung prüfen
+```
 
 ## Entwicklung
 
 ```bash
-npm test          # Unit-Tests (Bewertung, Regeln, kompletter Spielablauf gegen simulierte Seite)
+npm test            # 57 Tests: Bewertung, Regeln, Kartenparser, Spielablauf, Discord-Bot (ohne Netzwerk)
 npm run typecheck
 ```
 
-Architektur & Erweiterung: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · DOM-Wissen über quiz-base: [docs/SITE-NOTES.md](docs/SITE-NOTES.md)
+Für KI-Agenten und Mitwirkende: [AGENTS.md](AGENTS.md) · [Architektur](docs/ARCHITECTURE.md) · [DOM-Notizen zu quiz-base](docs/SITE-NOTES.md)
 
 ## Bekannte Einschränkungen
 
-- Startest du qbhost **mitten in einer offenen Frage** neu, wird die Frage dem Spieler am Zug noch einmal gestellt (Punkte aus dem ersten Versuch bleiben). Zwischen zwei Fragen neu zu starten ist unproblematisch.
-- Ist das Fragebild auf quiz-base selbst kaputt, nutzt Claude nur den Dateinamen der Bild-URL als Hinweis. Ist es zu unsicher, entscheidet der Operator.
-- Multiple-Choice-Antwortoptionen im Tafelquiz sind im Probe nur heuristisch erkannt (kein Live-Board mit Optionen gefunden). Hostnotizen funktionieren vollständig.
-- quiz-base hat keine offizielle API. qbhost bedient die normale Host-Oberfläche wie ein Mensch. Ändert sich das Layout, muss nur `src/site/tafelquiz/probe.browser.js` angepasst werden.
+- Ein Spiel gleichzeitig pro Bot-Instanz.
+- Gebuzzert wird auf quiz-base selbst (quiz-base entscheidet, wer zuerst war).
+- Ein Neustart des Bots **mitten in einer Frage** stellt die Frage erneut. Zwischen Fragen ist ein Neustart unproblematisch.
+- Ist ein Fragebild auf quiz-base selbst kaputt, nutzt Claude nur den Dateinamen als Hinweis. Ist das zu unsicher, entscheidet die Spielleitung.
+- quiz-base hat keine offizielle API. qbhost bedient die normale Host-Oberfläche. Ändert sich das Layout, muss nur `src/site/tafelquiz/probe.browser.js` angepasst werden.

@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { parseArgs } from 'node:util';
 import { runHost } from './app.ts';
+import { runDiscordBot } from './discord/index.ts';
 import { createDriver } from './browser/index.ts';
 import { loadConfig, type Config } from './config.ts';
 import { EventBus } from './core/events.ts';
@@ -16,7 +17,8 @@ const run = promisify(execFile);
 const USAGE = `qbhost – Claude als Host für quiz-base.de (Tafelquiz)
 
 Befehle:
-  host     Spiel hosten (Standard)
+  host     Spiel hosten, Bedienung über Terminal + Web-Spieler-Pult (Standard)
+  discord  Als Discord-Bot laufen (Token in DISCORD_TOKEN bzw. .env)
   boards   Öffentliche Tafelquiz-Boards auflisten
   probe    Aktuellen Seitenzustand als JSON ausgeben (Debug)
   judge    Bewertung testen:  qbhost judge "<Frage>" "<Lösung>" "<Antwort>"
@@ -55,6 +57,13 @@ const { values, positionals } = parseArgs({
   },
 });
 
+// Secrets like DISCORD_TOKEN may live in a local .env file (gitignored).
+try {
+  process.loadEnvFile('.env');
+} catch {
+  /* no .env */
+}
+
 if (values.help) {
   console.log(USAGE);
   process.exit(0);
@@ -74,6 +83,15 @@ const [command = 'host', ...rest] = positionals;
 switch (command) {
   case 'host':
     await runHost(config);
+    break;
+
+  case 'discord':
+    try {
+      await runDiscordBot(config);
+    } catch (e) {
+      console.error(`❌ ${(e as Error).message}`);
+      process.exit(1);
+    }
     break;
 
   case 'boards': {
@@ -112,6 +130,10 @@ switch (command) {
       }
     };
     await check('Node', async () => process.version);
+    await check('Discord-Token', async () => {
+      if (!process.env[config.discord.tokenEnv]) throw new Error(`${config.discord.tokenEnv} fehlt (nur für "qbhost discord" nötig)`);
+      return 'gesetzt';
+    });
     await check('Claude CLI', async () => (await run(config.llm.claudeBin, ['--version'])).stdout.trim());
     await check('Orca CLI', async () => (await run(config.browser.orcaBin, ['--version'])).stdout.trim().split('\n')[0]!);
     await check('Playwright Chromium', async () => {

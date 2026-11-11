@@ -34,6 +34,7 @@ export class TafelquizController implements GameMode {
   private lastPick: (BoardCell & { player: string }) | null = null;
   private finishedBoards = new Set<number>();
   private playerSig = '';
+  private lobbySig = '';
   private codeAnnounced = false;
   private startRequested = false;
   private signal!: AbortSignal;
@@ -81,6 +82,15 @@ export class TafelquizController implements GameMode {
 
   // ───────────────────────────── Lobby ─────────────────────────────
   private async onLobby(s: TafelquizState): Promise<void> {
+    const lobbySig = JSON.stringify([s.lobbyCode, s.players.map((p) => [p.name, p.ready]), s.canStart]);
+    if (lobbySig !== this.lobbySig) {
+      this.lobbySig = lobbySig;
+      this.d.bus.emit('host:lobby', {
+        code: s.lobbyCode,
+        players: s.players.map((p) => ({ name: p.name, ready: !!p.ready })),
+        canStart: s.canStart,
+      });
+    }
     if (!s.lobbyCode) await this.d.page.revealCode();
     else if (!this.codeAnnounced) {
       this.codeAnnounced = true;
@@ -89,6 +99,7 @@ export class TafelquizController implements GameMode {
     const enough = s.players.length >= this.d.game.minPlayers;
     if (s.canStart && enough && (this.d.game.autoStart || this.startRequested)) {
       this.status('lobby', 'Alle bereit – Spiel startet!');
+      this.notice('started', 'Alle bereit – das Spiel startet!');
       await this.d.page.startGame();
       await sleep(1500);
       return;
@@ -104,6 +115,7 @@ export class TafelquizController implements GameMode {
       const next = Array.from({ length: s.boards.count }, (_, i) => i + 1).find((b) => !this.finishedBoards.has(b));
       if (next) {
         this.say(`Board ${s.boards.active} ist durch – weiter mit Board ${next}!`);
+        this.notice('board-switch', `Board ${s.boards.active} ist durch – weiter mit Board ${next}!`);
         await this.d.page.selectBoard(next);
         await sleep(1200);
         return;
@@ -119,7 +131,7 @@ export class TafelquizController implements GameMode {
     const current = s.players.find((p) => p.isTurn) ?? s.players[0];
     if (!current) return void (await sleep(this.d.pollMs));
     const categories = [...new Set(s.grid.map((c) => c.category))];
-    this.d.bus.emit('host:turn', { player: current.name, open, categories });
+    this.d.bus.emit('host:turn', { player: current.name, open, grid: s.grid, categories, board: s.boards });
     this.status('board', `${current.name} ist am Zug – wähle Kategorie und Punkte.`);
 
     const pick = await this.whilePage(
@@ -132,9 +144,10 @@ export class TafelquizController implements GameMode {
           signal,
         ),
     );
-    if (pick === 'page-changed') return; // host acted in the browser (opened a question, ended the game, …)
+    if (pick === 'page-changed' || this.signal.aborted) return; // host acted in the browser / game stopped
     if (!pick) {
       this.say(`⏰ ${current.name}, du bist dran – such dir eine Frage aus!`);
+      this.notice('reminder', 'Du bist dran – such dir eine Frage aus!', current.name);
       return;
     }
     const cell = open.find((c) => c.col === pick.col && c.row === pick.row)!;
@@ -173,6 +186,7 @@ export class TafelquizController implements GameMode {
     if (!solved && this.d.game.buzzerOnWrong) solved = await this.buzzerRound(q, referencePromise, hints, tried, s.players.length);
 
     // 3) Reveal + close.
+    this.publishPlayers(await this.d.page.state()); // scores right after awarding, for the reveal message
     const reference = await referencePromise;
     const shown = reference ? stripUrls(reference).replace(/\s+/g, ' ').trim() : null;
     this.d.bus.emit('host:reveal', { answer: shown });
@@ -252,6 +266,7 @@ export class TafelquizController implements GameMode {
       s = await this.d.page.state();
       if (s.question?.buzzer.status !== 'open') await this.d.page.releaseBuzzer();
       this.say(`🔔 Buzzer frei! (${this.d.game.buzzWindowSec}s)`);
+      this.notice('buzzer-open', `Buzzer frei! Wer es weiß, drückt auf quiz-base den Buzzer (${this.d.game.buzzWindowSec} s).`);
       this.status('question', 'Buzzer frei');
 
       const buzzed = await this.d.page.waitFor(
@@ -262,6 +277,7 @@ export class TafelquizController implements GameMode {
       const who = buzzed?.question?.buzzer.buzzedBy;
       if (!who) {
         this.say('Niemand hat gebuzzert.');
+        this.notice('no-buzz', 'Niemand hat gebuzzert.');
         return false;
       }
       if (tried.has(who)) {
@@ -270,6 +286,7 @@ export class TafelquizController implements GameMode {
       }
       tried.add(who);
       this.say(`🔔 ${who} hat gebuzzert!`);
+      this.notice('buzzed', 'hat gebuzzert!', who);
       if (await this.askAndJudge(who, q, referencePromise, hints, true)) return true;
     }
     return false;
@@ -377,6 +394,10 @@ export class TafelquizController implements GameMode {
 
   private status(phase: string, message: string): void {
     this.d.bus.emit('host:status', { phase, message });
+  }
+
+  private notice(kind: HostEvents['host:notice']['kind'], text: string, player?: string): void {
+    this.d.bus.emit('host:notice', { kind, text, player });
   }
 
   private say(text: string): void {

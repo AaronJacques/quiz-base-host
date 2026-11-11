@@ -39,7 +39,7 @@ export class FakeTafelquizPage implements TafelquizPort {
       phase: this.phase,
       url: 'fake://host',
       lobbyCode: 'TEST01',
-      players: this.players.map((p, i) => ({ ...p, isTurn: i === this.turn, hasBuzzed: p.name === this.buzzer.buzzedBy })),
+      players: this.players.map((p, i) => ({ ...p, isTurn: this.phase !== 'lobby' && i === this.turn, hasBuzzed: p.name === this.buzzer.buzzedBy, ready: true })),
       ready: this.phase === 'lobby' ? { ready: this.players.length, total: this.players.length } : null,
       canStart: this.phase === 'lobby',
       boards: { count: 1, active: 1 },
