@@ -1,0 +1,33 @@
+{
+  "name": "quiz-base-host",
+  "version": "0.1.0",
+  "description": "Lässt Claude auf quiz-base.de die Host-Rolle (Gamemaster) übernehmen – deterministische Spiel-Engine, LLM nur zum Bewerten von Antworten.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "qbhost": "./bin/qbhost.mjs"
+  },
+  "scripts": {
+    "host": "tsx src/cli.ts host",
+    "doctor": "tsx src/cli.ts doctor",
+    "probe": "tsx src/cli.ts probe",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "playwright": "1.58.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "5.9",
+    "vitest": "^5.1.0"
+  }
+}

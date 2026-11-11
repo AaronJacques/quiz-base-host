@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spieler-Pult</title>
+<style>
+  :root {
+    --bg: #17112b; --panel: #221a3d; --panel-2: #2d2350; --line: #3b2f66;
+    --fg: #f3effc; --muted: #a99fc8; --accent: #8b5cf6; --accent-2: #a78bfa;
+    --ok: #22c55e; --bad: #ef4444; --warn: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; min-height: 100vh; }
+  main { max-width: 640px; margin: 0 auto; padding: 16px 16px 40px; }
+  h1 { font-size: 20px; margin: 4px 0 16px; letter-spacing: .2px; }
+  .muted { color: var(--muted); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input { width: 100%; padding: 12px 14px; font-size: 17px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); outline: none; }
+  input:focus { border-color: var(--accent-2); }
+  button { font: inherit; cursor: pointer; border: 0; border-radius: 10px; padding: 12px 16px; background: var(--accent); color: white; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .grow { flex: 1; }
+  .status { font-size: 14px; color: var(--muted); margin-bottom: 12px; min-height: 20px; }
+  .scores { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .chip { background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; font-size: 14px; }
+  .chip.turn { border-color: var(--warn); }
+  .chip.me { background: #3a2d6b; }
+  .board { display: grid; gap: 6px; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); }
+  .cat { font-size: 12px; font-weight: 700; text-align: center; padding: 6px 4px; color: var(--accent-2); overflow-wrap: anywhere; }
+  .cell { padding: 14px 0; font-size: 17px; background: linear-gradient(135deg, #5b3fc4, #7c3aed); }
+  .cell.gone { background: transparent; border: 1px dashed var(--line); color: transparent; pointer-events: none; }
+  .q-meta { font-size: 13px; color: var(--accent-2); font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+  .q-text { font-size: 19px; margin-top: 6px; }
+  .banner { border-radius: 12px; padding: 12px 14px; font-weight: 600; margin-bottom: 12px; }
+  .banner.ok { background: rgba(34,197,94,.15); border: 1px solid var(--ok); }
+  .banner.bad { background: rgba(239,68,68,.15); border: 1px solid var(--bad); }
+  .banner.info { background: rgba(139,92,246,.15); border: 1px solid var(--accent); }
+  .timer { font-variant-numeric: tabular-nums; color: var(--warn); font-weight: 700; }
+  .feed { font-size: 14px; color: var(--muted); }
+  .feed div { padding: 3px 0; border-bottom: 1px solid #2a2148; }
+  .err { color: var(--bad); font-size: 14px; margin-top: 8px; min-height: 18px; }
+  .rank { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 18px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎙️ Spieler-Pult <span class="muted" id="who"></span></h1>
+
+  <section id="join" class="card">
+    <div class="muted">Tritt zuerst auf quiz-base.de der Lobby bei, dann hier mit demselben Namen.</div>
+    <label for="code">Lobby-Code</label>
+    <input id="code" autocomplete="off" autocapitalize="characters" placeholder="ABC123">
+    <label for="name">Dein Name (wie in quiz-base)</label>
+    <input id="name" autocomplete="nickname" placeholder="Anna">
+    <div style="margin-top:12px"><button id="joinBtn">Los geht's</button></div>
+    <div class="err" id="joinErr"></div>
+  </section>
+
+  <section id="game" class="hidden">
+    <div class="status" id="status"></div>
+    <div class="scores" id="scores"></div>
+    <div id="banner"></div>
+
+    <div id="pickBox" class="card hidden">
+      <div style="margin-bottom:10px;font-weight:600">Du bist am Zug – wähle eine Frage:</div>
+      <div class="board" id="board"></div>
+    </div>
+
+    <div id="questionBox" class="card hidden">
+      <div class="q-meta" id="qMeta"></div>
+      <div class="q-text" id="qText"></div>
+    </div>
+
+    <div id="answerBox" class="card hidden">
+      <div class="row" style="margin-bottom:8px"><strong class="grow">Deine Antwort</strong><span class="timer" id="timer"></span></div>
+      <form class="row" id="answerForm">
+        <input id="answer" class="grow" autocomplete="off" placeholder="Antwort eintippen …">
+        <button>Senden</button>
+      </form>
+      <div class="err" id="answerErr"></div>
+    </div>
+
+    <div id="overBox" class="card hidden"><h2 style="margin-top:0">🏁 Endstand</h2><div id="ranking"></div></div>
+
+    <div class="card feed" id="feed"></div>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+  };
+  let me = store.get('qb.name');
+  let token = store.get('qb.token');
+  let S = null;
+  let deadline = 0;
+
+  async function post(path, body) {
+    const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, token }) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Fehler');
+    return data;
+  }
+
+  $('joinBtn').onclick = async () => {
+    $('joinErr').textContent = '';
+    try {
+      const res = await post('/api/join', { code: $('code').value, name: $('name').value });
+      token = res.token; me = res.name;
+      store.set('qb.token', token); store.set('qb.name', me);
+      showGame();
+    } catch (e) { $('joinErr').textContent = e.message; }
+  };
+
+  $('answerForm').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const answer = $('answer').value.trim();
+    if (!answer) return;
+    $('answerErr').textContent = '';
+    try { await post('/api/answer', { answer }); $('answer').value = ''; $('answerBox').classList.add('hidden'); }
+    catch (e) { $('answerErr').textContent = e.message; if (/anmelden/.test(e.message)) logout(); }
+  };
+
+  function logout() { token = null; me = null; store.set('qb.token', ''); $('join').classList.remove('hidden'); $('game').classList.add('hidden'); }
+  function showGame() { $('join').classList.add('hidden'); $('game').classList.remove('hidden'); $('who').textContent = me ? '· ' + me : ''; render(); }
+
+  function render() {
+    if (!S) return;
+    $('status').textContent = S.status || '';
+    $('scores').innerHTML = '';
+    for (const p of S.players) {
+      const c = document.createElement('span');
+      c.className = 'chip' + (p.isTurn ? ' turn' : '') + (p.name === me ? ' me' : '');
+      c.textContent = p.name + ' · ' + p.score;
+      $('scores').appendChild(c);
+    }
+
+    // Board pick
+    const myTurn = S.turn && S.turn.player === me && !S.question;
+    $('pickBox').classList.toggle('hidden', !myTurn);
+    if (myTurn) {
+      const cats = S.turn.categories;
+      const rows = Math.max(0, ...S.turn.open.map((c) => c.row)) + 1;
+      const b = $('board');
+      b.style.setProperty('--cols', cats.length);
+      b.innerHTML = '';
+      cats.forEach((cat) => { const d = document.createElement('div'); d.className = 'cat'; d.textContent = cat; b.appendChild(d); });
+      for (let r = 0; r < rows; r++) {
+        cats.forEach((_, col) => {
+          const cell = S.turn.open.find((c) => c.col === col && c.row === r);
+          const btn = document.createElement('button');
+          btn.className = 'cell' + (cell ? '' : ' gone');
+          btn.textContent = cell ? cell.points : '–';
+          if (cell) btn.onclick = async () => { btn.disabled = true; try { await post('/api/pick', { col, row: r }); } catch (e) { alert(e.message); btn.disabled = false; } };
+          b.appendChild(btn);
+        });
+      }
+    }
+
+    // Question
+    $('questionBox').classList.toggle('hidden', !S.question);
+    if (S.question) {
+      $('qMeta').textContent = [S.question.category, S.question.points + ' Punkte', S.question.hasImage ? '🖼 Bild auf quiz-base' : '', S.question.hasAudio ? '🎵 Audio' : ''].filter(Boolean).join(' · ');
+      $('qText').textContent = S.question.text;
+    }
+
+    // Answer
+    const mine = S.awaiting && S.awaiting.player === me;
+    const wasHidden = $('answerBox').classList.contains('hidden');
+    $('answerBox').classList.toggle('hidden', !mine);
+    if (mine && wasHidden) { $('answer').focus(); }
+
+    // Banner
+    let banner = '';
+    if (S.verdict) banner = `<div class="banner ${S.verdict.correct ? 'ok' : 'bad'}">${S.verdict.correct ? '✅' : '❌'} ${esc(S.verdict.player)}: „${esc(S.verdict.answer)}“ ${S.verdict.delta ? '(' + (S.verdict.delta > 0 ? '+' : '') + S.verdict.delta + ')' : ''}</div>`;
+    if (S.reveal) banner += `<div class="banner info">💡 Lösung: ${esc(S.reveal)}</div>`;
+    else if (S.awaiting && !mine) banner += `<div class="banner info">${esc(S.awaiting.player)} antwortet${S.awaiting.viaBuzzer ? ' (Buzzer)' : ''} …</div>`;
+    else if (S.turn && !S.question && S.turn.player !== me) banner += `<div class="banner info">${esc(S.turn.player)} wählt eine Frage …</div>`;
+    $('banner').innerHTML = banner;
+
+    // Game over
+    $('overBox').classList.toggle('hidden', !S.over);
+    if (S.over) $('ranking').innerHTML = [...S.players].sort((a, b) => b.score - a.score).map((p, i) => `<div class="rank"><span>${i + 1}. ${esc(p.name)}</span><strong>${p.score}</strong></div>`).join('');
+
+    $('feed').innerHTML = S.feed.slice(-8).reverse().map((t) => `<div>${esc(t)}</div>`).join('');
+  }
+
+  function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+  setInterval(() => {
+    const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+    $('timer').textContent = deadline ? left + ' s' : '';
+  }, 250);
+
+  function connect() {
+    const es = new EventSource('/events');
+    es.addEventListener('snapshot', (e) => { S = JSON.parse(e.data); if (S.lobbyCode && !$('code').value) $('code').value = S.lobbyCode; render(); });
+    const on = (name, fn) => es.addEventListener(name, (e) => { if (!S) return; fn(JSON.parse(e.data)); render(); });
+    on('status', (d) => { S.status = d.message; });
+    on('scores', (d) => { S.players = d.players; });
+    on('turn', (d) => { Object.assign(S, { turn: d, question: null, awaiting: null, verdict: null, reveal: null }); });
+    on('question', (d) => { Object.assign(S, { question: d, awaiting: null, verdict: null, reveal: null }); });
+    on('await', (d) => { S.awaiting = d; deadline = Date.now() + d.timeoutSec * 1000; });
+    on('verdict', (d) => { S.verdict = d; S.awaiting = null; deadline = 0; });
+    on('reveal', (d) => { S.reveal = d.answer; });
+    on('say', (d) => { S.feed = [...S.feed.slice(-29), d.text]; });
+    on('over', (d) => { S.over = true; S.players = d.players; });
+    es.onerror = () => { es.close(); setTimeout(connect, 2000); };
+  }
+
+  if (me) $('name').value = me;
+  if (token && me) showGame();
+  connect();
+})();
+</script>
+</body>
+</html>

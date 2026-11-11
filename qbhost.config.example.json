@@ -1,0 +1,18 @@
+{
+  "browser": { "driver": "playwright", "headless": false },
+  "game": {
+    "publicBoard": "Allgemeinwissen Quiz v1",
+    "autoStart": true,
+    "minPlayers": 2,
+    "answerTimeoutSec": 45,
+    "buzzerOnWrong": true,
+    "buzzWindowSec": 15,
+    "wrongPenalty": 0.5,
+    "penalizeBuzzers": true,
+    "autoplayAudio": true,
+    "revealPauseSec": 4
+  },
+  "judge": { "strategy": "cascade", "solveMissingNotes": true },
+  "llm": { "provider": "claude-cli", "model": "haiku" },
+  "companion": { "enabled": true, "port": 4747 }
+}
