@@ -1,4 +1,6 @@
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { chromium } from 'playwright';
+import { PlaywrightDriver } from '../src/browser/playwright-driver.ts';
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import os from 'node:os';
@@ -7,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { ConfigSchema, type Config } from '../src/config.ts';
 import { EventBus } from '../src/core/events.ts';
 import { setLogLevel } from '../src/core/logger.ts';
+import { onStopSignal } from '../src/core/signals.ts';
 import { cleanSpokenAnswer, QuizBot, type SessionLike, type VoiceKit } from '../src/discord/bot.ts';
 import type { ChatGateway, ChatMessage } from '../src/discord/gateway.ts';
 import { GuildStore } from '../src/discord/store.ts';
@@ -14,12 +17,13 @@ import { createJudge } from '../src/judge/index.ts';
 import { UsageMeter } from '../src/llm/client.ts';
 import { TafelquizController } from '../src/modes/tafelquiz/controller.ts';
 import { decodeWav, durationMs, encodeWav, resample, rms, toChannels, type Pcm } from '../src/voice/audio.ts';
-import { confirmReply, extractAnswer, isBuzz, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
+import { confirmReply, extractAnswer, isBuzz, isEcho, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
 import { VoiceBridge } from '../src/discord/voice-bridge.ts';
 import { LoopbackTransport } from '../src/voice/loopback.ts';
+import { createVoiceKit, voiceProblems } from '../src/voice/index.ts';
 import { gameOverLine, questionLine, revealLine, turnLine, verdictLine } from '../src/voice/narration.ts';
 import { cleanTranscript, WhisperServerStt, type SpeechToText } from '../src/voice/stt.ts';
-import type { VoiceHost } from '../src/voice/voice-host.ts';
+import { VoiceHost, type Attention } from '../src/voice/voice-host.ts';
 import type { Speaker, Utterance, VoiceTransport } from '../src/voice/transport.ts';
 import type { TextToSpeech } from '../src/voice/tts.ts';
 import { forSpeech } from '../src/voice/voice-host.ts';
@@ -369,13 +373,14 @@ describe('voice: reveal & rules', () => {
 // ───────────────────────────── review fixes ─────────────────────────────
 
 /** Bot + fake voice room + real controller on the fake page; every `!quiz voice` gets a new room. */
-function voiceSetup(game: Record<string, unknown> = {}, voice: Record<string, unknown> = {}, members: Speaker[] = [annaS, benS]) {
+/** `fast`: the kit gets a second (fast) model; `models` records which model heard what ("fast: …", "main: …"). */
+function voiceSetup(game: Record<string, unknown> = {}, voice: Record<string, unknown> = {}, members: Speaker[] = [annaS, benS], discord: Record<string, unknown> = {}, fast = false) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbvoice-'));
   const config = ConfigSchema.parse({
     game: { revealPauseSec: 0, answerTimeoutSec: 10, buzzWindowSec: 2, buzzAnswerTimeoutSec: 2, minPlayers: 2, ...game },
     judge: { cacheFile: path.join(tmp, 'cache.json'), strategy: 'fuzzy' },
     llm: { provider: 'none' },
-    discord: { dataDir: tmp },
+    discord: { dataDir: tmp, ...discord },
     voice: { ignoreWhileSpeaking: false, ...voice },
   });
   const texts = new Map<number, string>();
@@ -393,20 +398,35 @@ function voiceSetup(game: Record<string, unknown> = {}, voice: Record<string, un
     voiceMembers: () => members,
   };
   let session: FakeSession | null = null;
+  const kit = voiceKit(texts, [], prompts);
+  const models: string[] = [];
+  if (fast) {
+    const tagged = (tag: string, inner: SpeechToText): SpeechToText => ({
+      transcribe: async (p, prompt) => {
+        const text = await inner.transcribe(p, prompt);
+        if (prompt !== WAKE.join(', ') && !prompt?.startsWith('quizmaster,')) models.push(`${tag}: ${text}`);
+        return text;
+      },
+      close: async () => {},
+    });
+    const main = kit.stt;
+    kit.stt = tagged('main', main);
+    kit.fastStt = tagged('fast', main);
+  }
   const bot = new QuizBot({
     gateway: gw,
     config,
     store: new GuildStore(tmp),
     createSession: (cfg) => (session = new FakeSession(cfg)),
     listBoards: async (q) => ['Test Board'].filter((t) => !q || t.toLowerCase().includes(q.toLowerCase())),
-    voice: voiceKit(texts, [], prompts),
+    voice: kit,
   });
   let n = 0;
   const write = (who: Speaker, content: string, extra: Partial<ChatMessage> = {}) =>
     handler({ id: `m${++n}`, channelId: 'chan', guildId: 'guild', author: { ...who, isBot: false }, content, mentionsBot: false, mentions: [], canManage: false, voiceChannelId: 'vc', ...extra });
   const room = () => rooms.at(-1)!;
   const chat = (ch?: string) => sent.filter((m) => !ch || m.ch === ch).map((m) => m.text).join('\n');
-  return { bot, write, room, rooms, sent, chat, prompts, session: () => session!, config };
+  return { bot, write, room, rooms, sent, chat, prompts, models, session: () => session!, config };
 }
 const annaS: Speaker = { id: 'u-anna', username: 'anna', displayName: 'Anna' };
 const benS: Speaker = { id: 'u-ben', username: 'ben', displayName: 'Ben' };
@@ -423,7 +443,7 @@ describe('voice: commands (review fixes)', () => {
   it('ends the game only on whole, unambiguous phrases (F13)', () => {
     for (const s of ['kannst du aufhören zu reden', 'ist das die Schlussrunde?', 'wie ist der Stand zum Schluss', 'ich will noch nicht aufhören', 'aufhören'])
       expect(voiceCommand(s)?.name).not.toBe('ende');
-    for (const s of ['Spiel beenden', 'beende das Spiel', 'bitte das Spiel beenden', 'Quiz beenden', 'Schluss', 'ende', 'wir hören auf', 'Spiel beenden bitte'])
+    for (const s of ['Spiel beenden', 'beende das Spiel', 'bitte das Spiel beenden', 'Quiz beenden', 'ende', 'wir hören auf', 'Spiel beenden bitte', 'Spiel abbrechen'])
       expect(voiceCommand(s)?.name).toBe('ende');
     expect(voiceCommand('wie ist der Stand zum Schluss')?.name).toBe('stand');
   });
@@ -665,4 +685,418 @@ describe('voice: loopback room (F19)', () => {
     await a.close();
     expect(a.closed).toBe(true);
   });
+});
+
+// ───────────────────────────── findings from the live Discord test ─────────────────────────────
+
+describe('voice: commands (live test)', () => {
+  it('asks back on short stop words instead of "not understood", ends only on whole phrases', () => {
+    for (const s of ['Stop!', 'Stopp', 'Abbrechen!', 'aufhören', 'hör auf', 'Schluss', 'kannst du aufhören', 'Halt'])
+      expect(voiceCommand(s)?.name).toBe('ende?');
+    for (const s of ['Spiel abbrechen', 'Spiel beenden', 'stopp das Spiel', 'brich das Spiel ab', 'Schluss für heute'])
+      expect(voiceCommand(s)?.name).toBe('ende');
+    for (const s of ['kannst du aufhören zu reden', 'ist das die Schlussrunde?']) expect(voiceCommand(s)?.name ?? '').not.toMatch(/^ende/);
+  });
+
+  it('takes the last keyword and corrections inside one utterance', () => {
+    expect(extractAnswer('Meine Antwort ist, Nabu, Ach nein, Tatooine, meine Antwort ist Tatooine.')).toBe('Tatooine');
+    expect(extractAnswer('Meine Antwort ist Nabu, ach nein, Tatooine')).toBe('Tatooine');
+    expect(extractAnswer('Meine Antwort ist Nabu, nein, Tatooine.')).toBe('Tatooine');
+    expect(extractAnswer('Meine Antwort ist Nabu. Nein, warte, Tatooine')).toBe('Tatooine');
+    expect(extractAnswer('Meine Antwort ist Nabu, ich meine Tatooine')).toBe('Tatooine');
+    expect(extractAnswer('Meine Antwort ist Nabu, meine Antwort ist')).toBe('Nabu');
+    // Not corrections: the answer "Nein", a word that only contains "nein", an article in the answer.
+    expect(extractAnswer('Meine Antwort ist: Nein.')).toBe('Nein');
+    expect(extractAnswer('Meine Antwort ist Neinstedt')).toBe('Neinstedt');
+    expect(extractAnswer('Meine Antwort ist die Antwort auf alles')).toBe('die Antwort auf alles');
+    expect(confirmReply('Nein')).toBe('no');
+  });
+
+  it('tells its own voice coming back from a player repeating the example', () => {
+    const hint = 'Welche Karte? Sag zum Beispiel: Flaggen für 100.';
+    expect(isEcho('Sag zum Beispiel Flaggen für 100', hint)).toBe(true);
+    expect(isEcho('Flaggen für 100', hint)).toBe(false);
+    expect(isEcho('Ja', 'Tatooine?')).toBe(false);
+    expect(isEcho('Meine Antwort ist Paris', 'Sag: Meine Antwort ist, und dann deine Antwort.')).toBe(false);
+  });
+});
+
+/** Playback takes real time and can be cut; people start speaking (barge-in signal) before their utterance is complete. */
+class TimedRoom implements VoiceTransport {
+  label = 'timed';
+  played: string[] = [];
+  stops = 0;
+  private handlers: ((u: Utterance) => void)[] = [];
+  private startHandlers: ((s: Speaker) => void)[] = [];
+  private stopNow: (() => void) | null = null;
+  constructor(private texts: Map<number, string>, private ms = 400) {}
+  play(pcm: Pcm) {
+    this.played.push(this.texts.get(pcm.samples[0]!) ?? '?');
+    return new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, this.ms);
+      this.stopNow = () => (clearTimeout(t), resolve());
+    });
+  }
+  stop() {
+    this.stops++;
+    this.stopNow?.();
+  }
+  onUtterance(h: (u: Utterance) => void) {
+    this.handlers.push(h);
+  }
+  onSpeechStart(h: (s: Speaker) => void) {
+    this.startHandlers.push(h);
+  }
+  onClose() {}
+  async close() {}
+  startSpeaking(s: Speaker): number {
+    this.startHandlers.forEach((h) => h(s));
+    return Date.now();
+  }
+  utter(s: Speaker, text: string, startedAt: number) {
+    const id = 5000 + this.texts.size;
+    this.texts.set(id, text);
+    const samples = new Int16Array(8000).fill(4000);
+    samples[0] = id;
+    this.handlers.forEach((h) => h({ speaker: s, pcm: { rate: 16000, channels: 1, samples }, startedAt, endedAt: Date.now() }));
+  }
+}
+
+function bargeInHost(voice: Record<string, unknown> = {}) {
+  const texts = new Map<number, string>();
+  const room = new TimedRoom(texts);
+  const heard: string[] = [];
+  const kit = voiceKit(texts);
+  const host = new VoiceHost({
+    transport: room,
+    stt: kit.stt,
+    tts: kit.tts,
+    cfg: ConfigSchema.parse({ voice }).voice,
+    prompt: () => '',
+    onSpeech: (s, text) => void heard.push(`${s.displayName}: ${text}`),
+    mayInterrupt: (s) => s.id === annaS.id, // Anna is on turn
+  });
+  return { host, room, heard };
+}
+
+describe('voice: barge-in for the person on turn', () => {
+  it('stops a hint when the person on turn starts talking and takes what they say', async () => {
+    const { host, room, heard } = bargeInHost();
+    void host.say('Welche Karte? Sag zum Beispiel: Sport für 100.', { key: 'hint', interruptible: true });
+    await until(() => room.played.length === 1);
+    const t0 = room.startSpeaking(annaS);
+    expect(room.stops).toBe(1);
+    room.utter(annaS, 'Film für 200', t0);
+    await until(() => heard.length === 1);
+    expect(heard).toEqual(['Anna: Film für 200']);
+  });
+
+  it('keeps everybody else, questions and solutions under the echo protection', async () => {
+    const { host, room, heard } = bargeInHost();
+    void host.say('Welche Karte? Sag zum Beispiel: Sport für 100.', { interruptible: true });
+    await until(() => room.played.length === 1);
+    const t0 = room.startSpeaking(benS); // not on turn
+    room.utter(benS, 'Quizmaster, Stand', t0);
+    void host.say('Sport für 100. Wie viele Pins hat Bowling?'); // a question
+    await until(() => room.played.length === 2);
+    const t1 = room.startSpeaking(annaS);
+    room.utter(annaS, 'Meine Antwort ist zehn', t1);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(room.stops).toBe(0);
+    expect(heard).toEqual([]);
+  });
+
+  it('drops its own voice coming back, and can be switched off', async () => {
+    const a = bargeInHost();
+    void a.host.say('Welche Karte? Sag zum Beispiel: Sport für 100.', { interruptible: true });
+    await until(() => a.room.played.length === 1);
+    a.room.utter(annaS, 'Sag zum Beispiel Sport für 100', Date.now());
+    await new Promise((r) => setTimeout(r, 100));
+    expect(a.heard).toEqual([]);
+
+    const b = bargeInHost({ bargeIn: false });
+    void b.host.say('Welche Karte? Sag zum Beispiel: Sport für 100.', { interruptible: true });
+    await until(() => b.room.played.length === 1);
+    b.room.utter(annaS, 'Film für 200', b.room.startSpeaking(annaS));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(b.room.stops).toBe(0);
+    expect(b.heard).toEqual([]);
+  });
+
+  it('a reminder replaces a queued pick hint instead of stacking up behind it', async () => {
+    const { host, room } = bargeInHost();
+    const bus = new EventBus();
+    const bridge = new VoiceBridge(host, { scoresEvery: 0, extraTimeSec: 0, board: () => 'Test' });
+    bridge.attach(bus);
+    void host.say('Eine lange Ansage.');
+    void bridge.say('Welche Karte? Sag zum Beispiel: Sport für 100.', 'hint', { interruptible: true });
+    bus.emit('host:notice', { kind: 'reminder', text: '', player: 'Anna' });
+    await until(() => room.played.length === 2, 3000);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(room.played).toEqual(['Eine lange Ansage.', 'Anna, du bist noch dran. Sag zum Beispiel: Kategorie und Punkte.']);
+  });
+});
+
+describe('QuizBot voice (live test)', () => {
+  it('"Quizmaster, stopp" asks back, "Spiel abbrechen" ends', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    t.room().speak(annaS, 'Quizmaster, Stopp!');
+    await until(() => t.room().played.includes('Soll ich das Spiel beenden? Sag: Quizmaster, Spiel beenden.'));
+    expect(t.room().all()).not.toContain('nicht verstanden');
+    expect(t.bot.activeGame?.phase).toBe('running');
+    t.room().speak(annaS, 'Quizmaster, Spiel abbrechen');
+    await until(() => t.bot.activeGame === null);
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('takes the corrected answer of one utterance', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+    t.room().speak(annaS, 'Meine Antwort ist, zwölf, ach nein, zehn, meine Antwort ist zehn.');
+    await until(() => t.room().played.includes('zehn?'));
+    t.room().speak(annaS, 'Ja');
+    await until(() => t.chat().includes('„zehn“ ist richtig'));
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('answers "Quizmaster, start" in the lobby out loud: who is missing, or that it starts', async () => {
+    const t = voiceSetup({}, {}, [annaS, benS], { autoStart: false });
+    await t.write(annaS, '!quiz voice');
+    await until(() => t.room()?.all().includes('Quizmaster'));
+    await t.write(annaS, '!quiz neu Test Board');
+    await until(() => t.bot.activeGame?.phase === 'lobby' && t.bot.activeGame.lobbyPlayers.length === 2, 8000);
+    t.session().page.notReady.add('Ben');
+    await until(() => t.bot.activeGame?.canStart === false);
+    t.room().speak(annaS, 'Quizmaster, start');
+    await until(() => t.room().all().includes('Es fehlt noch: Ben.'));
+    t.session().page.notReady.clear();
+    await until(() => t.bot.activeGame?.canStart === true);
+    t.room().speak(annaS, 'Quizmaster, start');
+    await until(() => t.room().played.includes('Okay, wir starten!'));
+    await until(() => t.bot.activeGame?.phase === 'running', 8000);
+    await t.bot.shutdown();
+  }, 25000);
+
+  it('gives the pick hint only after the turn was announced – not between verdict and next turn – and once', async () => {
+    const t = voiceSetup({ revealPauseSec: 1 });
+    await voiceGame(t);
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+    t.room().speak(annaS, 'Meine Antwort ist zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    t.room().speak(annaS, 'Ja');
+    await until(() => t.chat().includes('„zehn“ ist richtig'));
+    // The old turn is still Anna's until the next one comes: her cheering is no pick attempt.
+    t.room().speak(annaS, 'Juhu, super');
+    await until(() => t.bot.activeGame?.turn?.player === 'Ben', 6000);
+    await until(() => t.room().all().includes('Ben, du bist dran'));
+    expect(t.room().all()).not.toContain('Welche Karte? Sag');
+    t.room().speak(benS, 'Ähm, keine Ahnung');
+    await until(() => t.room().all().includes('Welche Karte? Sag zum Beispiel: Film für 200.'));
+    t.room().speak(benS, 'Hmm, schwierig');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(t.room().played.filter((p) => p.startsWith('Welche Karte?'))).toHaveLength(1);
+    await t.bot.shutdown();
+  }, 25000);
+});
+
+describe('voice: Ctrl+C', () => {
+  const python = path.resolve('.qbhost/voice/venv/bin/python');
+  const model = path.resolve('.qbhost/voice/models/de_DE-thorsten-high.onnx');
+  const installed = (() => {
+    try {
+      return !!(statSync(python) && statSync(model));
+    } catch {
+      return false;
+    }
+  })();
+
+  it.skipIf(!installed)('the Piper worker ignores SIGINT (no traceback, the goodbye still works) and ends with its stdin', async () => {
+    const proc = spawn(python, [path.resolve('src/voice/piper_worker.py'), model, '1'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    proc.stdout.on('data', (d) => (out += d));
+    proc.stderr.on('data', (d) => (err += d));
+    await until(() => out.includes('"ready"'), 30000);
+    proc.kill('SIGINT'); // what the terminal sends to the whole process group on Ctrl+C
+    proc.stdin.write(JSON.stringify({ id: 1, text: 'Tschüss!' }) + '\n');
+    await until(() => out.includes('"id": 1'), 15000);
+    expect(out).toContain('"wav"');
+    const code = await new Promise<number | null>((resolve) => {
+      proc.once('exit', resolve);
+      proc.stdin.end();
+    });
+    expect(code).toBe(0);
+    expect(err).not.toContain('Traceback');
+  }, 60000);
+});
+
+describe('voice: Ctrl+C with a game browser open', () => {
+  const hasChromium = (() => {
+    try {
+      return existsSync(chromium.executablePath());
+    } catch {
+      return false;
+    }
+  })();
+  it.skipIf(!hasChromium)('leaves SIGINT/SIGTERM to the bot – Playwright would close the browser and exit(130) before the goodbye', async () => {
+    const before = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
+    const driver = new PlaywrightDriver({ profileDir: mkdtempSync(path.join(os.tmpdir(), 'qbprofile-')), headless: true });
+    await driver.open();
+    try {
+      expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before);
+    } finally {
+      await driver.close();
+    }
+  }, 30000);
+});
+
+describe('voice: Ctrl+C arrives twice (terminal + tsx)', () => {
+  it('shuts down once, ignores the duplicate and forces the exit only on a later Ctrl+C', async () => {
+    const exits: number[] = [];
+    let stops = 0;
+    let finish = () => {};
+    const off = onStopSignal(() => new Promise<void>((r) => ((stops++), (finish = r))), { graceMs: 200, exit: (c) => void exits.push(c) });
+    try {
+      process.emit('SIGINT' as any);
+      process.emit('SIGINT' as any); // the relayed copy, a few ms later
+      process.emit('SIGTERM' as any);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(stops).toBe(1);
+      expect(exits).toEqual([]); // the goodbye is still being said
+      await new Promise((r) => setTimeout(r, 250));
+      process.emit('SIGINT' as any); // pressed again
+      expect(exits).toEqual([130]);
+      finish();
+    } finally {
+      off();
+    }
+  });
+});
+
+// ───────────────────────────── two Whisper models + audio window (small servers) ─────────────────────────────
+
+describe('voice: fast and precise Whisper model', () => {
+  it('limits maxSpeechSec to the audio window', () => {
+    expect(ConfigSchema.parse({}).voice.maxSpeechSec).toBe(15);
+    expect(ConfigSchema.parse({ voice: { whisperAudioCtx: 512 } }).voice.maxSpeechSec).toBe(10);
+    expect(ConfigSchema.parse({ voice: { whisperAudioCtx: 512, maxSpeechSec: 8 } }).voice.maxSpeechSec).toBe(8);
+    expect(ConfigSchema.parse({ voice: { whisperAudioCtx: 1500 } }).voice.maxSpeechSec).toBe(15);
+    expect(() => ConfigSchema.parse({ voice: { whisperAudioCtx: 2000 } })).toThrow();
+  });
+
+  /** A fake whisper-server that answers with its own arguments. */
+  function argsWhisper() {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'qbwhisper-'));
+    mkdirSync(path.join(dir, 'models'));
+    writeFileSync(path.join(dir, 'models/main.bin'), 'x');
+    writeFileSync(path.join(dir, 'models/fast.bin'), 'x');
+    const bin = path.join(dir, 'fake-whisper-server.mjs');
+    writeFileSync(
+      bin,
+      [
+        '#!/usr/bin/env node',
+        "import http from 'node:http';",
+        "const port = Number(process.argv[process.argv.indexOf('--port') + 1]);",
+        "const args = process.argv.slice(2).map((a) => a.replace(/.*\\//, '')).join(' ');",
+        "http.createServer((req, res) => { req.resume(); req.on('end', () => res.end(req.url === '/inference' ? JSON.stringify({ text: args }) : 'ok')); }).listen(port, '127.0.0.1');",
+      ].join('\n'),
+    );
+    chmodSync(bin, 0o755);
+    return { dir, bin };
+  }
+
+  it('runs a second whisper-server for the fast model on the next port, both with -ac, and stops both', async () => {
+    const { dir, bin } = argsWhisper();
+    const port = 41000 + Math.floor(Math.random() * 2000) * 2;
+    const config = ConfigSchema.parse({ voice: { dir, whisperBin: bin, whisperModel: 'models/main.bin', whisperFastModel: 'models/fast.bin', whisperAudioCtx: 512, whisperPort: port } });
+    const kit = createVoiceKit(config);
+    const pcm: Pcm = { rate: 16000, channels: 1, samples: new Int16Array(1600) };
+    try {
+      expect(await kit.stt.transcribe(pcm)).toBe(`-m main.bin -l de --host 127.0.0.1 --port ${port} -nt -ac 512`);
+      expect(await kit.fastStt!.transcribe(pcm)).toBe(`-m fast.bin -l de --host 127.0.0.1 --port ${port + 1} -nt -ac 512`);
+    } finally {
+      await kit.close();
+    }
+    const up = (p: number) => fetch(`http://127.0.0.1:${p}`).then((r) => r.ok, () => false);
+    for (let i = 0; i < 60 && ((await up(port)) || (await up(port + 1))); i++) await new Promise((r) => setTimeout(r, 50));
+    expect([await up(port), await up(port + 1)]).toEqual([false, false]);
+    // Without the options nothing changes: one server, full window.
+    const plain = createVoiceKit(ConfigSchema.parse({ voice: { dir, whisperBin: bin, whisperModel: 'models/main.bin', whisperPort: port } }));
+    expect(plain.fastStt).toBeUndefined();
+    expect(plain.stt.args).not.toContain('-ac');
+  }, 20000);
+
+  it('voice-setup and doctor check both models', async () => {
+    const { dir, bin } = argsWhisper();
+    const config = ConfigSchema.parse({ voice: { dir, whisperBin: bin, tts: 'say', whisperModel: 'models/main.bin', whisperFastModel: 'models/missing.bin' } });
+    expect(await voiceProblems(config)).toEqual(['Whisper-Modell fehlt (models/missing.bin)']);
+  });
+
+  it('routes by attention: answers to the main model, everything else to the fast one', async () => {
+    const texts = new Map<number, string>();
+    const room = new FakeRoom(texts);
+    const used: string[] = [];
+    const stt = (tag: string, wrap = (t: string) => t): SpeechToText => ({
+      transcribe: async (p) => {
+        const t = texts.get(p.samples[0]!) ?? '';
+        used.push(`${tag}: ${t}`);
+        return wrap(t);
+      },
+      close: async () => {},
+    });
+    let attention: Attention = 'full';
+    const heard: string[] = [];
+    const kit = voiceKit(texts);
+    new VoiceHost({
+      transport: room,
+      stt: stt('main', (t) => t.replace('zehn', 'Zehn')), // the precise model writes it differently
+      fastStt: stt('fast'),
+      tts: kit.tts,
+      cfg: ConfigSchema.parse({}).voice,
+      prompt: () => '',
+      onSpeech: (_s, t) => void heard.push(t),
+      attention: () => attention,
+    });
+    const say = async (a: Attention, text: string) => {
+      attention = a;
+      used.length = 0;
+      const n = heard.length;
+      room.speak(annaS, text);
+      await until(() => heard.length > n || used.length > 0, 2000);
+      await new Promise((r) => setTimeout(r, 30));
+      return [...used];
+    };
+    expect(await say('full', 'Sport für 100')).toEqual(['fast: Sport für 100']);
+    expect(await say('answer', 'Meine Antwort ist zehn')).toEqual(['main: Meine Antwort ist zehn']);
+    expect(await say('confirm', 'Ja')).toEqual(['fast: Ja']);
+    expect(await say('confirm', 'Genau, meine Antwort ist zehn')).toEqual(['fast: Genau, meine Antwort ist zehn', 'main: Genau, meine Antwort ist zehn']);
+    expect(heard.at(-1)).toBe('Genau, meine Antwort ist Zehn'); // the main model's result counts
+    expect(await say('wake', 'Quizmaster, Stand')).toEqual(['fast: Quizmaster, Stand']);
+  });
+
+  it('the bot sends picks and "Ja" to the fast model and the answer to the main model', async () => {
+    const t = voiceSetup({}, {}, [annaS, benS], {}, true);
+    await voiceGame(t);
+    t.models.length = 0;
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+    t.room().speak(annaS, 'Meine Antwort ist zwölf');
+    await until(() => t.room().played.includes('zwölf?'));
+    t.room().speak(annaS, 'Genau, meine Antwort ist zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    t.room().speak(annaS, 'Ja');
+    await until(() => t.chat().includes('„zehn“ ist richtig'));
+    expect(t.models).toEqual([
+      'fast: Sport für hundert',
+      'main: Meine Antwort ist zwölf',
+      'fast: Genau, meine Antwort ist zehn',
+      'main: Genau, meine Antwort ist zehn',
+      'fast: Ja',
+    ]);
+    await t.bot.shutdown();
+  }, 20000);
 });

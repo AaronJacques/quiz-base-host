@@ -14,6 +14,27 @@ export const BUZZER_OPEN_LINE = 'Jetzt die anderen! Wer es weiß, ruft: Hier!';
 /** Said once at the start – spoken answers need the keyword and are confirmed. */
 export const ANSWER_HOW_LINE = 'Antwortet immer mit: Meine Antwort ist, und dann eure Antwort. Ich wiederhole sie kurz, ihr bestätigt mit Ja.';
 
+/** After a short "Quizmaster, stopp" / "abbrechen" – ending the game needs the whole phrase. */
+export const END_ASK_LINE = 'Soll ich das Spiel beenden? Sag: Quizmaster, Spiel beenden.';
+
+/** Right after "Quizmaster, los" – starting on quiz-base takes a few seconds. */
+export const START_LINE = 'Okay, wir starten!';
+
+/** "Quizmaster, los" while quiz-base cannot start yet. */
+export function startMissingLine(waiting: string[], inLobby: number): string {
+  if (!inLobby) return 'Es ist noch niemand in der Lobby.';
+  if (waiting.length) return `Es fehlt noch: ${joinList(waiting)}. Auf Quiz Base auf: Ich bin bereit, klicken.`;
+  return 'Quiz Base lässt das Spiel noch nicht starten.';
+}
+
+/** The person on turn said something that is no card. */
+export function pickHintLine(example?: BoardCell): string {
+  return `Welche Karte? Sag zum Beispiel: ${example ? `${example.category} für ${example.points}` : 'Kategorie und Punkte'}.`;
+}
+
+/** The person answering talked without the keyword – said once per game. */
+export const ANSWER_KEYWORD_LINE = 'Sag: Meine Antwort ist, und dann deine Antwort.';
+
 export function categoriesLine(categories: string[]): string {
   if (!categories.length) return '';
   return `Die Kategorien sind: ${joinList(categories)}.`;

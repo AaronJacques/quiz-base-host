@@ -108,9 +108,21 @@ export const ConfigSchema = z.object({
       /** Ordner für Modelle und Python-Umgebung. */
       dir: z.string().default('.qbhost/voice'),
       whisperBin: z.string().default('whisper-server'),
-      /** Relativ zu `dir`. */
+      /** Relativ zu `dir`. Das genaue Hauptmodell: hört gesprochene Antworten (und alles, wenn kein `whisperFastModel` gesetzt ist). */
       whisperModel: z.string().default('models/ggml-large-v3-turbo-q5_0.bin'),
+      /**
+       * Optionales zweites, schnelles Modell (relativ zu `dir`), z.B. `models/ggml-base-q5_1.bin`. Leer = aus.
+       * Es läuft als eigener whisper-server auf `whisperPort + 1` und hört alles, wobei keine gesprochene
+       * Antwort erwartet wird: Kartenwahl, Rufname-Prüfung, Befehle, Ja/Nein, „Hier!“. Für kleine Server.
+       */
+      whisperFastModel: z.string().default(''),
       whisperPort: z.number().int().default(8178),
+      /**
+       * Audiofenster des Whisper-Encoders (`-ac <n>` an whisper-server), 0 = volles Fenster (1500 = 30 s).
+       * Kleiner ist viel schneller (auf 1 vCPU: small-q5_1 ~12,5 s → ~4 s), hört aber nur n/50 Sekunden:
+       * 512 ≈ 10 s. `maxSpeechSec` wird deshalb auf dieses Fenster begrenzt.
+       */
+      whisperAudioCtx: z.number().int().min(0).max(1500).default(0),
       language: z.string().default('de'),
       /** `piper` (natürlich, lokal) oder `say` (macOS, ohne Einrichtung). */
       tts: z.enum(['piper', 'say']).default('piper'),
@@ -127,6 +139,13 @@ export const ConfigSchema = z.object({
       maxSpeechSec: z.number().default(15),
       /** Was jemand sagt, während der Bot spricht, wird ignoriert (Schutz vor Echo ohne Kopfhörer). */
       ignoreWhileSpeaking: z.boolean().default(true),
+      /**
+       * Barge-in: Wer gerade dran ist, darf Hinweise, Erinnerungen und Rückfragen des Bots unterbrechen
+       * („Welche Karte? …“, „Paris?“, „Anna, deine Antwort?“). Der Bot verstummt und wertet die Äußerung,
+       * außer sie klingt wie seine eigene Ansage (Echo). Fragen, Lösungen und alle anderen Personen bleiben
+       * beim Echo-Schutz. Discord unterdrückt Echo selbst; ohne Kopfhörer und Echo-Unterdrückung: `false`.
+       */
+      bargeIn: z.boolean().default(true),
       /** Rufname für Sprachbefehle („Quizmaster, Stand“). */
       wakeWords: z.array(z.string()).default(['quizmaster', 'quiz master', 'quizmeister', 'quizhost', 'quiz host']),
       /** Zusätzliche Sekunden für Antwort- und Buzzerzeit, solange der Bot spricht (Vorlesen braucht Zeit). Wird als `game.bonusTimeSec` gesetzt. */
@@ -134,6 +153,8 @@ export const ConfigSchema = z.object({
       /** Punktestand nach jeder n-ten Frage ansagen (0 = nie). */
       scoresEvery: z.number().int().default(3),
     })
+    // A smaller audio window hears only its first n/50 seconds – longer utterances would be cut off unheard.
+    .transform((v) => ({ ...v, maxSpeechSec: v.whisperAudioCtx > 0 ? Math.min(v.maxSpeechSec, audioCtxSeconds(v.whisperAudioCtx)) : v.maxSpeechSec }))
     .prefault({}),
 
   companion: z
@@ -146,6 +167,11 @@ export const ConfigSchema = z.object({
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
+
+/** Seconds of audio a Whisper encoder window of `n` frames covers (1500 frames = 30 s), rounded down. */
+export function audioCtxSeconds(n: number): number {
+  return Math.floor(n / 50);
+}
 
 type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] };
 

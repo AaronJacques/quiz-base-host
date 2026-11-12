@@ -261,7 +261,7 @@ sudo install -m 755 whisper.cpp/build/bin/whisper-server /usr/local/bin/
 
 Am einfachsten ist unter Linux das Docker-Image aus [DEPLOY.md](DEPLOY.md), dort ist alles schon enthalten.
 
-**Modellgröße:** Standard ist `large-v3-turbo` (550 MB, beste Erkennung, braucht eine schnelle CPU oder einen Apple-Chip). Auf schwachen Rechnern oder kleinen Servern ist `"voice": { "whisperModel": "models/ggml-small-q5_1.bin" }` (190 MB) deutlich schneller. `voice-setup` lädt jedes offizielle `ggml-*.bin`-Modell automatisch.
+**Modellgröße:** Standard ist `large-v3-turbo` (550 MB, beste Erkennung, braucht eine schnelle CPU oder einen Apple-Chip). Auf schwachen Rechnern oder kleinen Servern ist `"voice": { "whisperModel": "models/ggml-small-q5_1.bin" }` (190 MB) deutlich schneller. Noch schneller: ein zweites, kleines Modell für alles außer Antworten und ein kleineres Audiofenster (`whisperFastModel`, `whisperAudioCtx`, siehe [DEPLOY.md](DEPLOY.md#kleine-server)). `voice-setup` lädt jedes offizielle `ggml-*.bin`-Modell automatisch.
 
 Auf macOS:
 

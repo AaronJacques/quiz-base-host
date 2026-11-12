@@ -60,7 +60,8 @@ src/
 │
 ├── voice/                 "Wie spricht und hört der Host?"  (alles lokal)
 │   ├── transport.ts       VoiceTransport-Interface: play(pcm), onUtterance(pro Sprecher)
-│   ├── discord-voice.ts   @discordjs/voice: Opus empfangen/dekodieren, PCM abspielen (DAVE)
+│   ├── discord-voice.ts   @discordjs/voice: Opus empfangen/dekodieren, Sprache als Opus abspielen (DAVE)
+│   ├── opus.ts            eigene Anbindung an libopus (WASM aus opusscript): Decoder pro Sprecher, Encoder, Paketprüfung
 │   ├── loopback.ts        Voice-Raum per HTTP – Tests und Agenten-Spieler ohne Discord
 │   ├── stt.ts             whisper.cpp-Server (warm, startet nach Absturz neu), Halluzinationsfilter
 │   ├── children.ts        ein gemeinsamer Exit-Hook, der whisper-server/Piper mit dem Prozess beendet

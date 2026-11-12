@@ -96,6 +96,7 @@ switch (command) {
       console.error(`❌ ${(e as Error).message}`);
       process.exit(1);
     }
+    process.exit(0); // shut down cleanly – nothing may keep the process (or a helper) alive
     break;
 
   case 'boards': {

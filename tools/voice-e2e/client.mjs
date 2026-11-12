@@ -4,7 +4,7 @@
 //   node client.mjs listen <Anna|Ben>        wait for the host to speak, print what was heard
 //   node client.mjs say <Anna|Ben> "<text>"  say something into the voice room
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 
 const [cmd, name, ...rest] = process.argv.slice(2);
 const ROOM = 'http://127.0.0.1:4790';
@@ -22,9 +22,12 @@ async function status() {
 
 if (cmd === 'say') {
   const text = rest.join(' ');
-  const wav = `${DIR}/say-${name}.wav`;
+  // One file per call: two `say` at once (people talking over each other) must not overwrite each other's audio.
+  const wav = `${DIR}/say-${name}-${process.pid}.wav`;
   execFileSync('say', ['-v', VOICES[name], '-o', wav, '--file-format=WAVE', '--data-format=LEI16@16000', text]);
-  const r = await fetch(`${ROOM}/speak?id=u-${name.toLowerCase()}&name=${name}`, { method: 'POST', body: readFileSync(wav) });
+  const body = readFileSync(wav);
+  rmSync(wav, { force: true });
+  const r = await fetch(`${ROOM}/speak?id=u-${name.toLowerCase()}&name=${name}`, { method: 'POST', body });
   console.log(r.ok ? `(gesagt: "${text}")` : `FEHLER ${r.status}`);
 } else if (cmd === 'listen') {
   let seq = existsSync(stateFile) ? Number(readFileSync(stateFile, 'utf8')) : 0;

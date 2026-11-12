@@ -5,6 +5,7 @@ import http from 'node:http';
 import { appendFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { chromium, type Browser } from 'playwright';
 import { loadConfig } from '../../src/config.ts';
+import { onStopSignal } from '../../src/core/signals.ts';
 import { QuizBot } from '../../src/discord/bot.ts';
 import type { ChatGateway, ChatMessage } from '../../src/discord/gateway.ts';
 import { GuildStore } from '../../src/discord/store.ts';
@@ -15,10 +16,17 @@ import { LoopbackTransport } from '../../src/voice/loopback.ts';
 const DIR = '.qbhost/voice-e2e';
 mkdirSync(DIR, { recursive: true });
 const MAX_Q = Number(process.env.MAX_Q ?? 6);
+// The harness always tests voice, whatever qbhost.config.json says. AUTO_START=0: the lobby waits for "Quizmaster, los".
+// Small-server setup: FAST_MODEL=models/ggml-base-q5_1.bin AUDIO_CTX=512 (second whisper-server, smaller audio window).
 const config = loadConfig('qbhost.config.json', {
   browser: { headless: true, profileDir: `${DIR}/host-profile` },
-  discord: { dataDir: `${DIR}/discord`, channelIds: [] },
-  voice: { autoJoin: true },
+  discord: { dataDir: `${DIR}/discord`, channelIds: [], ...(process.env.AUTO_START === '0' ? { autoStart: false } : {}) },
+  voice: {
+    enabled: true,
+    autoJoin: true,
+    ...(process.env.FAST_MODEL ? { whisperFastModel: process.env.FAST_MODEL } : {}),
+    ...(process.env.AUDIO_CTX ? { whisperAudioCtx: Number(process.env.AUDIO_CTX) } : {}),
+  },
 } as any);
 
 const chatLog = `${DIR}/chat.log`;
@@ -66,7 +74,7 @@ const gw: ChatGateway = {
 };
 
 async function joinPlayers(url: string) {
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, handleSIGINT: false, handleSIGTERM: false }); // see PlaywrightDriver
   for (const name of Object.keys(people)) {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const page = await ctx.newPage();
@@ -128,11 +136,9 @@ await chat('Anna', '!quiz voice');
 status.phase = 'voice';
 saveStatus();
 
-const stop = async () => {
+onStopSignal(async () => {
   await bot.shutdown().catch(() => {});
   await kit.close().catch(() => {});
   await browser?.close().catch(() => {});
   process.exit(0);
-};
-process.on('SIGINT', stop);
-process.on('SIGTERM', stop);
+});

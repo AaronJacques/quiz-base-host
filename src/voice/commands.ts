@@ -31,9 +31,14 @@ export function stripWakeWord(text: string, wakeWords: string[]): string | null 
 
 /**
  * Ending the game is the one command that cannot be undone – only whole, unambiguous phrases count
- * ("Spiel beenden"), never a word inside a sentence ("kannst du aufhören zu reden", "Schlussrunde").
+ * ("Spiel beenden", "Spiel abbrechen"), never a word inside a sentence ("kannst du aufhören zu reden", "Schlussrunde").
  */
-const END_RE = /^(?:(?:das |dieses )?(?:spiel|quiz) (?:beenden|abbrechen|ende)|beende (?:das|dieses) (?:spiel|quiz)|wir beenden (?:das|dieses) (?:spiel|quiz)|(?:spiel|quiz) ist (?:zu ende|vorbei)|beenden|ende|schluss|schluss für heute|lass uns aufhören|wir hören auf)$/;
+const END_RE = /^(?:(?:das |dieses )?(?:spiel|quiz) (?:beenden|abbrechen|stoppen|ende)|(?:beende|stoppe?|stopp) (?:das|dieses) (?:spiel|quiz)|brich (?:das|dieses) (?:spiel|quiz) ab|wir beenden (?:das|dieses) (?:spiel|quiz)|(?:spiel|quiz) ist (?:zu ende|vorbei)|beenden|ende|schluss für heute|lass uns aufhören|wir hören auf)$/;
+/**
+ * Short words that may mean "end the game" – or "stop talking", "cancel that". They never end the game
+ * by themselves; the bot asks back (`ende?`).
+ */
+const MAYBE_END_RE = /^(?:stop|stopp|halt|abbrechen|abbruch|aufhören|hör auf|schluss)(?: jetzt| sofort)?$/;
 
 /** Maps a spoken instruction (after the wake word) to a bot command + args. */
 export function voiceCommand(rest: string): { name: string; args: string[] } | null {
@@ -41,6 +46,7 @@ export function voiceCommand(rest: string): { name: string; args: string[] } | n
   if (!s) return { name: 'hilfe', args: [] };
   let m: RegExpMatchArray | null;
   if (END_RE.test(s)) return { name: 'ende', args: [] };
+  if (MAYBE_END_RE.test(s)) return { name: 'ende?', args: [] };
   if ((m = s.match(/^(?:ein |eine )?(?:neues?|neue|neuen) (?:quiz|spiel|lobby|runde|board)(?: (?:mit|zu|zum thema|über))?(?: (.*))?$/))) return { name: 'neu', args: m[1] ? m[1].split(' ') : [] };
   if ((m = s.match(/^(?:lass uns (.+) spielen|wir spielen (.+))$/))) return { name: 'neu', args: (m[1] ?? m[2])!.split(' ') };
   if ((m = s.match(/^(?:ich bin|mein name ist|ich heiße) (.+)$/))) return { name: 'ich', args: m[1]!.split(' ') };
@@ -79,14 +85,59 @@ const ANSWER_KEY = String.raw`(?:(?:meine|unsere|die)\s+)?(?:(?:end)?gültige\s+
 const ANSWER_RE = new RegExp(String.raw`^\s*${ANSWER_LEAD}(?:${ANSWER_KEY})(?=[\s,.:;!?…–-]|$)[\s,.:;!…–-]*(.*)$`, 'isu');
 
 /**
+ * Later keywords in the same utterance – stricter (possessive or article *and* verb), so "die Antwort auf
+ * alles" stays part of an answer.
+ */
+const ANSWER_KEY_AGAIN = String.raw`(?:meine|unsere)\s+(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort\s+(?:ist|is|lautet|wäre|heißt|sei)|die\s+(?:(?:end)?gültige\s+|finale\s+|richtige\s+)?antwort\s+(?:ist|lautet|wäre)|ich antworte mit`;
+const ANSWER_AGAIN_RE = new RegExp(String.raw`(?:^|[\s,.;:!?…–-])(?:${ANSWER_KEY_AGAIN})(?=[\s,.:;!?…–-]|$)[\s,.:;!…–-]*`, 'giu');
+/**
+ * A correction inside the answer: "Nabu, ach nein, Tatooine", "Nabu – nein, Tatooine", "ich meine Tatooine".
+ * A bare "nein" only counts after a pause (comma, dash …), so the answer "Nein" stays an answer.
+ */
+const CORRECTION_RE = new RegExp(
+  String.raw`(?:^|[\s,.;:!?…–-])(?:(?:ach|oh|äh|ähm|oder|nee|halt|nein)\s+nein|ich mein(?:e|te)?|besser gesagt|korrektur|quatsch)(?=[\s,.:;!?…–-]|$)` +
+    String.raw`|[,.;:!?…–-]\s*(?:nein|nee|nö|ne)(?=[\s,.:;!?…–-]|$)`,
+  'giu',
+);
+/** Stalling right after a correction: "nein, warte, Tatooine". */
+const AFTER_CORRECTION = /^[\s,.:;!…–-]*(?:(?:warte|moment|äh+m*|ähm|also|doch|sorry)[\s,.:;!…–-]+)*/iu;
+
+/**
  * Spoken answers need the keyword, so thinking aloud and discussing never counts:
  * "Okay, meine Antwort ist Paris." → "Paris". null without keyword; '' if nothing follows.
+ * Within one utterance the last keyword and the last correction count: "Meine Antwort ist Nabu, ach nein,
+ * Tatooine" and "Meine Antwort ist Nabu … meine Antwort ist Tatooine" are both "Tatooine".
  * The answer keeps its original spelling – it is repeated back word for word.
  */
 export function extractAnswer(text: string): string | null {
   const m = text.match(ANSWER_RE);
   if (!m) return null;
-  return m[1]!.replace(/[.!?…,;:\s]+$/u, '').trim();
+  let answer = m[1]!;
+  const last = [...answer.matchAll(ANSWER_AGAIN_RE)].at(-1);
+  if (last) {
+    const rest = answer.slice(last.index! + last[0].length);
+    if (/[\p{L}\p{N}]/u.test(rest)) answer = rest;
+    else answer = answer.slice(0, last.index!); // "… Tatooine, meine Antwort ist." – the keyword came last
+  }
+  const corr = [...answer.matchAll(CORRECTION_RE)].at(-1);
+  if (corr) {
+    const rest = answer.slice(corr.index! + corr[0].length).replace(AFTER_CORRECTION, '');
+    if (/[\p{L}\p{N}]/u.test(rest)) answer = rest;
+  }
+  return answer.replace(/[.!?…,;:\s–-]+$/u, '').trim();
+}
+
+/**
+ * Someone "said" a sentence of the bot: its own voice came back through their microphone (speakers, no
+ * headphones). Most words are the bot's, and they cover a good part of its sentence – a player who
+ * repeats the example card ("Flaggen für 100") is not an echo.
+ */
+export function isEcho(heard: string, said: string): boolean {
+  const h = speechNorm(heard).split(' ').filter(Boolean);
+  const s = new Set(speechNorm(said).split(' ').filter(Boolean));
+  if (!h.length || !s.size) return false;
+  const hits = h.filter((w) => s.has(w)).length;
+  return hits / h.length >= 0.8 && hits / s.size >= 0.5;
 }
 
 /** The reply to "Paris?" – yes, no, or something else (null). */

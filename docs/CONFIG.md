@@ -110,8 +110,10 @@ Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennu
 | `autoJoin` | `true` | Bei `!quiz neu` automatisch in den Voice-Channel der Spielleitung kommen. |
 | `dir` | `.qbhost/voice` | Ordner für Modelle und die Python-Umgebung. |
 | `whisperBin` | `whisper-server` | Pfad zum whisper.cpp-Server. |
-| `whisperModel` | `models/ggml-large-v3-turbo-q5_0.bin` | Whisper-Modell, relativ zu `dir`. |
-| `whisperPort` | `8178` | Port des lokalen Whisper-Servers. |
+| `whisperModel` | `models/ggml-large-v3-turbo-q5_0.bin` | Whisper-Modell, relativ zu `dir`. Das genaue Hauptmodell: hört gesprochene Antworten, ohne `whisperFastModel` alles. |
+| `whisperFastModel` | leer (aus) | Zweites, schnelles Modell, relativ zu `dir`, z.B. `models/ggml-base-q5_1.bin`. Läuft als eigener whisper-server auf `whisperPort + 1` und hört alles, wobei keine Antwort erwartet wird (Kartenwahl, Rufname, Befehle, Ja/Nein, „Hier!“). Siehe [VOICE.md](VOICE.md#zwei-modelle-für-langsame-rechner). |
+| `whisperPort` | `8178` | Port des lokalen Whisper-Servers (das schnelle Modell nimmt den nächsten). |
+| `whisperAudioCtx` | `0` | Audiofenster des Whisper-Encoders (`-ac <n>`), `0` = volles Fenster (1500 = 30 s). `512` ≈ 10 s ist auf kleinen Servern etwa dreimal schneller. `maxSpeechSec` wird auf das Fenster begrenzt (n/50 Sekunden). |
 | `language` | `de` | Sprache der Spracherkennung. |
 | `tts` | `piper` | `piper` (natürlich, lokal, muss eingerichtet werden) oder `say` (nur macOS, ohne Einrichtung). |
 | `piperVoice` | `models/de_DE-thorsten-high.onnx` | Piper-Stimme, relativ zu `dir`. |
@@ -120,8 +122,9 @@ Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennu
 | `silenceMs` | `900` | Sprechpause, nach der eine Äußerung als beendet gilt. |
 | `minSpeechMs` | `350` | Kürzere Geräusche werden verworfen (Husten, Klicks). |
 | `minRms` | `250` | Leisere Geräusche werden verworfen. |
-| `maxSpeechSec` | `15` | Obergrenze für eine Äußerung in Sekunden. |
+| `maxSpeechSec` | `15` | Obergrenze für eine Äußerung in Sekunden. Mit `whisperAudioCtx` höchstens dessen Fenster (512 → 10 s). |
 | `ignoreWhileSpeaking` | `true` | Was jemand sagt, während der Bot spricht, wird ignoriert (Schutz vor Echo ohne Kopfhörer). |
+| `bargeIn` | `true` | Wer gerade dran ist, darf Hinweise, Erinnerungen und Rückfragen des Bots unterbrechen. Der Bot verstummt und wertet die Äußerung, außer sie klingt wie seine eigene Ansage. Fragen, Lösungen und alle anderen Personen bleiben beim Echo-Schutz. `false` = wie früher. |
 | `wakeWords` | `quizmaster`, `quiz master`, `quizmeister`, `quizhost`, `quiz host` | Rufnamen für Sprachbefehle. |
 | `extraTimeSec` | `10` | Zusätzliche Antwort- und Buzzerzeit, solange der Bot spricht. |
 | `scoresEvery` | `3` | Punktestand nach jeder n-ten Frage ansagen. `0` = nie. |

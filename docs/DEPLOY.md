@@ -72,6 +72,24 @@ docker compose -f app/deploy/compose.yml exec bot node_modules/.bin/tsx src/cli.
 
 - **Deploy während eines Spiels:** Ein laufendes Spiel wird beim Neustart beendet (der Bot hat 40 s, es auf quiz-base sauber zu schließen). Pushes auf `main` also nicht mitten in einer Runde.
 - **Rollback von Hand:** `mv app app.bad && mv app.prev app && docker image tag quizmaster:prev quizmaster:latest && docker compose -f app/deploy/compose.yml up -d --no-build`
-- **Kleine Server:** Mit 1–2 vCPU ist das Standardmodell `large-v3-turbo` zu langsam. Die Vorlage nutzt deshalb `ggml-small-q5_1.bin` (190 MB). Auf stärkeren Servern kann `whisperModel` wieder auf `models/ggml-large-v3-turbo-q5_0.bin` gesetzt werden. Danach `data/voice/.ready` löschen, damit das neue Modell geladen wird.
+- **Kleine Server:** siehe [unten](#kleine-server). Nach einer Änderung von `qbhost.config.json` prüft der Container beim nächsten Start die Sprachmodelle und lädt neue nach (vorhandene werden übersprungen). Erzwingen: `data/voice/.ready` löschen.
 - **Sprachsteuerung aus:** `QBHOST_VOICE_SETUP=off` in die `.env` (keine Modell-Downloads) und `"voice": { "enabled": false }` in die Konfiguration.
 - **Updates des Servers:** Sicherheitsupdates laufen automatisch (unattended-upgrades). Neue Versionen von Chromium, whisper.cpp und Claude CLI kommen über `deploy/Dockerfile`: Version anheben, pushen.
+
+## Kleine Server
+
+Mit 1–2 vCPU ist das Standardmodell `large-v3-turbo` für die Spracherkennung zu langsam. Gemessen auf 1 vCPU mit whisper-server v1.9.5, warm, je 2–3 s Sprache:
+
+| Modell | Audiofenster | Zeit pro Äußerung | Erkennung |
+|---|---|---|---|
+| `small-q5_1` | voll (`whisperAudioCtx: 0`) | ~12,5 s | gut |
+| `small-q5_1` | `-ac 512` | ~4 s | gut |
+| `base-q5_1` | `-ac 512` | ~1,1 s | Befehle und Karten gut, Namen schlecht („George Washington“ → „Deutsch-Warschimtung“) |
+
+Die Vorlage `deploy/qbhost.config.server.example.json` kombiniert deshalb zwei Modelle: `base-q5_1` (60 MB) hört alles außer Antworten, also Kartenwahl, „Quizmaster …“, Ja/Nein und „Hier!“. `small-q5_1` (190 MB) hört nur gesprochene Antworten. Beide laufen mit `whisperAudioCtx: 512`, eine Äußerung darf dann höchstens ~10 s lang sein (Details: [VOICE.md](VOICE.md#zwei-modelle-für-langsame-rechner)):
+
+```json
+"voice": { "enabled": true, "whisperModel": "models/ggml-small-q5_1.bin", "whisperFastModel": "models/ggml-base-q5_1.bin", "whisperAudioCtx": 512 }
+```
+
+Auf stärkeren Servern `whisperFastModel` und `whisperAudioCtx` weglassen und `whisperModel` wieder auf `models/ggml-large-v3-turbo-q5_0.bin` setzen.

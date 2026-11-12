@@ -10,6 +10,8 @@ export interface FakeQuestion {
   images?: string[];
   /** YouTube title of the question's audio; null = audio without title. Omitted = no audio. */
   audio?: string | null;
+  /** Multiple-choice options as quiz-base shows them (letter, text, correct one flagged). */
+  options?: { letter: string; label: string; correct: boolean }[];
 }
 
 /**
@@ -25,6 +27,8 @@ export class FakeTafelquizPage implements TafelquizPort {
   buzzer: QuestionState['buzzer'] = { status: 'locked', buzzedBy: null };
   turn = 0;
   log: string[] = [];
+  /** Lobby players who have not clicked "Ich bin bereit!" yet (quiz-base cannot start then). */
+  notReady = new Set<string>();
 
   constructor(names: string[], board: FakeQuestion[][]) {
     this.players = names.map((name, i) => ({ name, score: 0, isTurn: i === 0, hasBuzzed: false }));
@@ -43,9 +47,9 @@ export class FakeTafelquizPage implements TafelquizPort {
       phase: this.phase,
       url: 'fake://host',
       lobbyCode: 'TEST01',
-      players: this.players.map((p, i) => ({ ...p, isTurn: this.phase !== 'lobby' && i === (this.shownTurn ?? this.turn), hasBuzzed: p.name === this.buzzer.buzzedBy, ready: true })),
-      ready: this.phase === 'lobby' ? { ready: this.players.length, total: this.players.length } : null,
-      canStart: this.phase === 'lobby',
+      players: this.players.map((p, i) => ({ ...p, isTurn: this.phase !== 'lobby' && i === (this.shownTurn ?? this.turn), hasBuzzed: p.name === this.buzzer.buzzedBy, ready: !this.notReady.has(p.name) })),
+      ready: this.phase === 'lobby' ? { ready: this.players.length - this.notReady.size, total: this.players.length } : null,
+      canStart: this.phase === 'lobby' && !this.notReady.size,
       boards: { count: 1, active: 1 },
       grid: this.phase === 'board' ? this.cells.map(({ q: _q, ...c }) => c) : [],
       question: this.open
@@ -53,7 +57,7 @@ export class FakeTafelquizPage implements TafelquizPort {
             points: this.open.points,
             text: this.open.q.text,
             note: this.open.q.note,
-            options: [],
+            options: this.open.q.options ?? [],
             imageUrls: this.open.q.images ?? [],
             imagesLoaded: (this.open.q.images ?? []).map(() => true),
             audio: this.open.q.audio !== undefined ? { present: true, title: this.open.q.audio, playing: false } : { present: false, title: null, playing: false },
@@ -106,10 +110,12 @@ export class FakeTafelquizPage implements TafelquizPort {
   /** Test hook: how long the stale "Am Zug" survives opening the next card (0 = it corrects itself at once). */
   staleAfterOpenMs = 0;
   private shownTurn: number | null = null;
+  /** Test hook: like quiz-base (seen live 12.11.2026), show the results by itself once the last card is closed. */
+  autoResults = false;
   closeQuestion = () => {
     if (this.open) this.open.answered = true;
     this.open = null;
-    this.phase = 'board';
+    this.phase = this.autoResults && this.cells.every((c) => c.answered) ? 'results' : 'board';
     if (this.staleTurnDisplay) this.shownTurn = this.turn;
     this.turn = (this.turn + 1) % this.players.length;
     return this.ok('close');

@@ -35,6 +35,9 @@ export class VoiceBridge {
   private solved = false;
   private _buzzerOpen = false;
   private questionOpen = false;
+  /** Fresh turns so far, and whether the current one has been announced ("…, du bist dran. Welche Karte?"). */
+  private turnSeq = 0;
+  private _turnAnnounced = false;
 
   constructor(readonly host: VoiceHost, private opts: { scoresEvery: number; extraTimeSec: number; board: () => string }) {}
 
@@ -42,8 +45,17 @@ export class VoiceBridge {
     return this._buzzerOpen;
   }
 
-  say(text: string, key?: string): Promise<void> {
-    return this.host.say(text, { key });
+  /**
+   * The bot has asked for a card in this turn – only after that is "Welche Karte? …" a useful hint.
+   * Between a verdict and the next turn (and while the turn is being announced) it is not.
+   */
+  get turnAnnounced(): boolean {
+    return this._turnAnnounced && !this.questionOpen;
+  }
+
+  /** `interruptible`: the person on turn may talk over it (hints, reminders, prompts – see `VoiceHost.say`). */
+  say(text: string, key?: string, opts: { interruptible?: boolean } = {}): Promise<void> {
+    return this.host.say(text, { key, ...opts });
   }
 
   /**
@@ -70,7 +82,8 @@ export class VoiceBridge {
           void this.say(`Los geht's mit ${this.opts.board()}! ${this.rules ? `${rulesLine(this.rules)} ` : ''}${ANSWER_HOW_LINE}`);
           break;
         case 'reminder':
-          if (n.player) void this.say(reminderLine(n.player, this.turn?.open[0]), 'turn');
+          // Same key as the pick hint: a hint and a reminder never queue up behind each other.
+          if (n.player) void this.say(reminderLine(n.player, this.turn?.open[0]), 'hint', { interruptible: true });
           break;
         case 'buzzer-open':
           this._buzzerOpen = true;
@@ -98,11 +111,16 @@ export class VoiceBridge {
       if (!fresh) return;
       const first = this.announcedBoard !== t.board.active;
       this.announcedBoard = t.board.active;
-      void this.say(turnLine(t, first), 'turn');
+      const seq = ++this.turnSeq;
+      this._turnAnnounced = false;
+      void this.say(turnLine(t, first), 'turn').then(() => {
+        if (this.turnSeq === seq) this._turnAnnounced = true;
+      });
     });
     on('host:question', (q) => {
       this.lastQuestion = q;
       this.questionOpen = true;
+      this._turnAnnounced = false;
       this.solved = false;
       this._buzzerOpen = false;
       this.questions++;
@@ -110,7 +128,7 @@ export class VoiceBridge {
     });
     on('host:await-answer', (a) => {
       this.lastAsk = a;
-      void this.say(a.viaBuzzer ? `${a.player} war am schnellsten. Deine Antwort?` : askLine(a), 'ask');
+      void this.say(a.viaBuzzer ? `${a.player} war am schnellsten. Deine Antwort?` : askLine(a), 'ask', { interruptible: true });
     });
     on('host:verdict', (v) => {
       if (v.correct) this.solved = true;
@@ -119,6 +137,7 @@ export class VoiceBridge {
     on('host:reveal', ({ answer }) => {
       this._buzzerOpen = false;
       this.questionOpen = false;
+      this._turnAnnounced = false; // the old turn is over; the next host:turn announces a new one
       const parts = [this.solved ? '' : revealLine(answer)];
       if (this.opts.scoresEvery > 0 && this.questions % this.opts.scoresEvery === 0) parts.push(scoresLine(this.players));
       const text = parts.filter(Boolean).join(' ');
@@ -141,6 +160,7 @@ export class VoiceBridge {
     this.announcedBoard = 0;
     this.questions = 0;
     this._buzzerOpen = false;
+    this._turnAnnounced = false;
   }
 
   /** "Quizmaster, wiederholen" – the question (and the pending ask), or whose turn it is. */

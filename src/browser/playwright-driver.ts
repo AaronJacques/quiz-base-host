@@ -20,6 +20,11 @@ export class PlaywrightDriver implements BrowserDriver {
       headless: this.opts.headless,
       viewport: this.opts.headless ? { width: 1440, height: 1000 } : null,
       args: LAUNCH_ARGS,
+      // Our own shutdown ends the game on quiz-base and closes the browser. Playwright's handlers would
+      // close it first and, on SIGINT, call process.exit(130) – no clean end of the game, no goodbye.
+      // (The browser still dies with the process: Playwright's exit hook stays.)
+      handleSIGINT: false,
+      handleSIGTERM: false,
     });
     this.page = this.context.pages()[0] ?? (await this.context.newPage());
     if (url) await this.goto(url);

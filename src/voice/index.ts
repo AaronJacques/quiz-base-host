@@ -25,26 +25,42 @@ const PIPER_VOICE_BASE = 'https://huggingface.co/rhasspy/piper-voices/resolve/ma
 const PIPER_VERSION = 'piper-tts==1.3.0';
 
 export interface VoiceKitImpl {
+  /** The precise main model – spoken answers. */
   stt: WhisperServerStt;
+  /** The fast second model (`voice.whisperFastModel`) for everything else; undefined = the main model hears all. */
+  fastStt?: WhisperServerStt;
   tts: ReturnType<typeof createTts>;
   warmup(): Promise<void>;
   close(): Promise<void>;
 }
 
+/** The fast model's own whisper-server, next to the main one. */
+export function fastWhisperPort(v: Config['voice']): number {
+  return v.whisperPort + 1;
+}
+
 /** Shared STT/TTS for all voice sessions; servers start lazily on first use. */
 export function createVoiceKit(config: Config): VoiceKitImpl {
-  const stt = new WhisperServerStt(config.voice);
-  const tts = createTts(config.voice);
+  const v = config.voice;
+  const stt = new WhisperServerStt(v);
+  const fastStt = v.whisperFastModel ? new WhisperServerStt(v, { model: v.whisperFastModel, port: fastWhisperPort(v) }) : undefined;
+  const tts = createTts(v);
   return {
     stt,
+    fastStt,
     tts,
     warmup: async () => {
-      await Promise.all([stt.start(), tts.synth('Hallo.')]);
+      await Promise.all([stt.start(), fastStt?.start(), tts.synth('Hallo.')]);
     },
     close: async () => {
-      await Promise.all([stt.close(), tts.close()]);
+      await Promise.all([stt.close(), fastStt?.close(), tts.close()]);
     },
   };
+}
+
+/** The configured Whisper models: the main one and, if set, the fast one. */
+function whisperModels(v: Config['voice']): string[] {
+  return [v.whisperModel, ...(v.whisperFastModel ? [v.whisperFastModel] : [])];
 }
 
 /** What is missing for voice; empty = ready. */
@@ -56,7 +72,7 @@ export async function voiceProblems(config: Config): Promise<string[]> {
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') out.push(`${v.whisperBin} fehlt (${whisperInstallHint()})`);
   }
-  if (!existsSync(path.resolve(v.dir, v.whisperModel))) out.push(`Whisper-Modell fehlt (${v.whisperModel})`);
+  for (const m of whisperModels(v)) if (!existsSync(path.resolve(v.dir, m))) out.push(`Whisper-Modell fehlt (${m})`);
   if (v.tts === 'piper') {
     if (!existsSync(path.resolve(v.dir, 'venv/bin/python'))) out.push('Piper-Umgebung fehlt');
     if (!existsSync(path.resolve(v.dir, v.piperVoice))) out.push(`Piper-Stimme fehlt (${v.piperVoice})`);
@@ -101,10 +117,12 @@ export async function setupVoice(config: Config): Promise<void> {
       throw new Error(`whisper.cpp konnte nicht installiert werden (${(e as Error).message.split('\n')[0]}). Manuell: brew install whisper.cpp`);
     });
   }
-  const model = path.resolve(v.dir, v.whisperModel);
-  const modelName = path.basename(v.whisperModel);
-  if (/^ggml-[\w.-]+\.bin$/.test(modelName)) await download(WHISPER_MODEL_BASE + modelName, model);
-  else if (!existsSync(model)) throw new Error(`Eigenes Whisper-Modell ${model} fehlt.`);
+  for (const m of whisperModels(v)) {
+    const model = path.resolve(v.dir, m);
+    const modelName = path.basename(m);
+    if (/^ggml-[\w.-]+\.bin$/.test(modelName)) await download(WHISPER_MODEL_BASE + modelName, model);
+    else if (!existsSync(model)) throw new Error(`Eigenes Whisper-Modell ${model} fehlt.`);
+  }
 
   if (v.tts === 'piper') {
     const py = path.resolve(v.dir, 'venv/bin/python');
@@ -127,9 +145,12 @@ export async function setupVoice(config: Config): Promise<void> {
   const kit = createVoiceKit(config);
   try {
     const pcm = await kit.tts.synth('Willkommen zum Tafelquiz. Anna, du bist dran.');
-    const text = await kit.stt.transcribe(pcm);
-    log.info(`Erkannt: „${text}“`);
-    if (!/tafelquiz/i.test(text)) log.warn('Die Erkennung klingt ungewöhnlich – Modell/Stimme prüfen.');
+    for (const [label, stt] of [['Hauptmodell', kit.stt], ['schnelles Modell', kit.fastStt]] as const) {
+      if (!stt) continue;
+      const text = await stt.transcribe(pcm);
+      log.info(`Erkannt (${label}): „${text}“`);
+      if (!/tafel\s?quiz/i.test(text)) log.warn(`Die Erkennung (${label}) klingt ungewöhnlich – Modell/Stimme prüfen.`);
+    }
   } finally {
     await kit.close();
   }

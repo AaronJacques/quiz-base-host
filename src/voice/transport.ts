@@ -25,6 +25,8 @@ export interface VoiceTransport {
   play(pcm: Pcm): Promise<void>;
   stop(): void;
   onUtterance(handler: (u: Utterance) => void): void;
+  /** Someone started to speak (before the utterance is complete) – for barge-in. Optional: transports without it deliver whole utterances only. */
+  onSpeechStart?(handler: (s: Speaker) => void): void;
   /** Called when the connection is gone for good (kicked, channel deleted, network). */
   onClose(handler: () => void): void;
   close(): Promise<void>;

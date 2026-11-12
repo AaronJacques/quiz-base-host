@@ -43,6 +43,7 @@ export function cleanTranscript(raw: string): string {
 /**
  * whisper.cpp's `whisper-server`, started once and kept warm (model loading takes seconds).
  * If it dies (crash, `pkill`), the next `transcribe` starts it again – like Piper.
+ * `model`/`port` default to `whisperModel`/`whisperPort`; the fast second model gets its own instance.
  */
 export class WhisperServerStt implements SpeechToText {
   private proc: ChildProcess | null = null;
@@ -50,18 +51,28 @@ export class WhisperServerStt implements SpeechToText {
   private adoptedPid: number | null = null;
   private ready: Promise<void> | null = null;
   private readonly url: string;
+  private readonly model: string;
+  readonly port: number;
 
-  constructor(private cfg: Config['voice']) {
-    this.url = `http://127.0.0.1:${cfg.whisperPort}`;
+  constructor(private cfg: Config['voice'], opts: { model?: string; port?: number } = {}) {
+    this.model = opts.model ?? cfg.whisperModel;
+    this.port = opts.port ?? cfg.whisperPort;
+    this.url = `http://127.0.0.1:${this.port}`;
   }
 
   get modelPath(): string {
-    return path.resolve(this.cfg.dir, this.cfg.whisperModel);
+    return path.resolve(this.cfg.dir, this.model);
+  }
+
+  /** Arguments for whisper-server – `-ac` only with a reduced audio window (`voice.whisperAudioCtx`). */
+  get args(): string[] {
+    const ac = this.cfg.whisperAudioCtx > 0 ? ['-ac', String(this.cfg.whisperAudioCtx)] : [];
+    return ['-m', this.modelPath, '-l', this.cfg.language, '--host', '127.0.0.1', '--port', String(this.port), '-nt', ...ac];
   }
 
   /** Remembers which server we started, so a later run can take an orphan over and stop it. */
   private get pidFile(): string {
-    return path.resolve(this.cfg.dir, `whisper-server-${this.cfg.whisperPort}.pid`);
+    return path.resolve(this.cfg.dir, `whisper-server-${this.port}.pid`);
   }
 
   start(): Promise<void> {
@@ -69,11 +80,11 @@ export class WhisperServerStt implements SpeechToText {
     this.ready = (async () => {
       if (await this.alive()) {
         this.adoptedPid = this.proc ? null : this.orphanPid();
-        return void log.info(`whisper-server läuft bereits auf ${this.url}${this.adoptedPid ? ` (aus einem früheren Lauf, PID ${this.adoptedPid} – wird beim Beenden gestoppt)` : ''}`);
+        return void log.info(`whisper-server (${path.basename(this.model)}) läuft bereits auf ${this.url}${this.adoptedPid ? ` (aus einem früheren Lauf, PID ${this.adoptedPid} – wird beim Beenden gestoppt)` : ''}`);
       }
       if (!existsSync(this.modelPath)) throw new Error(`Whisper-Modell fehlt: ${this.modelPath} – \`npx qbhost voice-setup\` ausführen`);
-      log.info('Starte whisper-server …');
-      const proc = spawn(this.cfg.whisperBin, ['-m', this.modelPath, '-l', this.cfg.language, '--host', '127.0.0.1', '--port', String(this.cfg.whisperPort), '-nt'], { stdio: ['ignore', 'ignore', 'pipe'] });
+      log.info(`Starte whisper-server (${path.basename(this.model)}, Port ${this.port}) …`);
+      const proc = spawn(this.cfg.whisperBin, this.args, { stdio: ['ignore', 'ignore', 'pipe'] });
       this.proc = proc;
       this.adoptedPid = null;
       killOnExit(proc); // never leave an orphaned server behind
@@ -86,7 +97,8 @@ export class WhisperServerStt implements SpeechToText {
         this.proc = null;
         this.ready = null;
         rmSync(this.pidFile, { force: true });
-        log.warn(`whisper-server beendet (${code ?? signal}) – starte ihn bei der nächsten Erkennung neu`);
+        // Code 0: an orderly stop (Ctrl+C reaches it with the whole process group) – no reason to worry.
+        (code === 0 ? log.info : log.warn)(`whisper-server beendet (${code ?? signal}) – starte ihn bei der nächsten Erkennung neu`);
       });
       const exited = new Promise<never>((_, reject) => {
         proc.once('error', (e) => reject(new Error(`whisper-server nicht startbar (${e.message}) – \`brew install whisper-cpp\``)));
@@ -129,7 +141,7 @@ export class WhisperServerStt implements SpeechToText {
       if (!pid) return null;
       const [ppid = '', ...cmd] = execFileSync('ps', ['-p', String(pid), '-o', 'ppid=,command='], { encoding: 'utf8' }).trim().split(/\s+/);
       const command = cmd.join(' ');
-      return ppid === '1' && command.includes('whisper-server') && command.includes(`--port ${this.cfg.whisperPort}`) ? pid : null;
+      return ppid === '1' && command.includes('whisper-server') && command.includes(`--port ${this.port}`) ? pid : null;
     } catch {
       return null;
     }
@@ -173,7 +185,7 @@ export class WhisperServerStt implements SpeechToText {
     if (!res.ok) throw new Error(`whisper-server ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const raw = String(((await res.json()) as { text?: string }).text ?? '');
     const text = cleanTranscript(raw);
-    log.debug(`STT ${Date.now() - t0} ms: "${raw.trim()}"${text !== raw.trim() ? ` → "${text}"` : ''}`);
+    log.debug(`STT ${Date.now() - t0} ms (${path.basename(this.model, '.bin').replace(/^ggml-/, '')}): "${raw.trim()}"${text !== raw.trim() ? ` → "${text}"` : ''}`);
     return text;
   }
 

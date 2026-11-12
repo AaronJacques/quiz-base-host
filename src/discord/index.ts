@@ -1,5 +1,6 @@
 import type { Config } from '../config.ts';
 import { createLogger } from '../core/logger.ts';
+import { onStopSignal } from '../core/signals.ts';
 import { GameSession, fetchPublicBoards } from '../session.ts';
 import { QuizBot } from './bot.ts';
 import { DiscordGateway } from './discord-gateway.ts';
@@ -36,14 +37,12 @@ export async function runDiscordBot(config: Config): Promise<void> {
   log.info(`Bereit. Befehle mit "${config.discord.prefix} hilfe" oder @Mention.${voice ? ' Sprachsteuerung: an.' : ''}`);
 
   await new Promise<void>((resolve) => {
-    const stop = async () => {
-      log.info('Fahre herunter …');
+    onStopSignal(async () => {
+      log.info('Fahre herunter … (noch einmal Strg+C erzwingt das Beenden)');
       await bot.shutdown().catch(() => {});
       await voice?.close().catch(() => {});
       await gateway.destroy();
       resolve();
-    };
-    process.once('SIGINT', stop);
-    process.once('SIGTERM', stop);
+    });
   });
 }

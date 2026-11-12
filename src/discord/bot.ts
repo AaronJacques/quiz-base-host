@@ -11,7 +11,7 @@ import { formatBoard, parsePick, parsePickWithContext } from './pick-parser.ts';
 import type { GuildStore } from './store.ts';
 import { VoiceBridge } from './voice-bridge.ts';
 import { confirmReply, extractAnswer, isBuzz, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
-import { gameOverLine, VOICE_HELP } from '../voice/narration.ts';
+import { ANSWER_KEYWORD_LINE, END_ASK_LINE, gameOverLine, pickHintLine, START_LINE, startMissingLine, VOICE_HELP } from '../voice/narration.ts';
 import type { SpeechToText } from '../voice/stt.ts';
 import type { Speaker } from '../voice/transport.ts';
 import type { TextToSpeech } from '../voice/tts.ts';
@@ -42,7 +42,10 @@ export interface BotDeps {
 }
 
 export interface VoiceKit {
+  /** The precise main model (spoken answers). */
   stt: SpeechToText;
+  /** Optional fast model for everything else (`voice.whisperFastModel`). */
+  fastStt?: SpeechToText;
   tts: TextToSpeech;
   /** Loads the models up front so the first sentence is not delayed. */
   warmup(): Promise<void>;
@@ -387,12 +390,19 @@ export class QuizBot {
     if (!game || game.phase !== 'lobby') return this.reply(msg, 'Es gibt keine offene Lobby.');
     if (!this.isLeader(msg, game)) return this.notLeader(msg);
     if (!game.canStart) {
-      const ready = game.lobbyPlayers.filter((p) => p.ready).length;
-      return this.reply(msg, `Noch nicht alle sind in quiz-base bereit (${ready}/${game.lobbyPlayers.length}).`);
+      const waiting = game.lobbyPlayers.filter((p) => !p.ready).map((p) => p.name);
+      const ready = game.lobbyPlayers.length - waiting.length;
+      return this.reply(
+        msg,
+        `Noch nicht alle sind in quiz-base bereit (${ready}/${game.lobbyPlayers.length}).${waiting.length ? ` Es fehlt noch: ${waiting.join(', ')}.` : ''}`,
+        startMissingLine(waiting, game.lobbyPlayers.length),
+      );
     }
     const unlinked = game.lobbyPlayers.filter((p) => !this.userFor(game, p.name)).map((p) => p.name);
     if (unlinked.length) await this.reply(msg, `⚠️ Nicht verknüpft: ${unlinked.join(', ')}. Sie können nicht per Chat wählen oder antworten (die Spielleitung kann mit \`${this.prefix} nimm\` helfen).`);
     this.requestStart(game);
+    // Starting on quiz-base takes a few seconds – say right away that it was heard.
+    if (msg.viaVoice) void this.speak(START_LINE);
   }
 
   private async cmdRules(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
@@ -557,7 +567,7 @@ export class QuizBot {
         return this.submitAnswer(game, name, answer, true);
       }
       game.pending = { player: name, answer: answer.slice(0, 200) };
-      void this.speak(`${answer}?`, 'confirm');
+      void this.speak(`${answer}?`, 'confirm', true);
       return;
     }
     const reply = game.pending?.player === name ? confirmReply(text) : null;
@@ -565,13 +575,13 @@ export class QuizBot {
       this.transcript(name, text);
       if (reply === 'yes') return this.submitAnswer(game, name, game.pending!.answer, true);
       game.pending = null;
-      return void this.speak('Okay. Deine Antwort?', 'confirm');
+      return void this.speak('Okay. Deine Antwort?', 'confirm', true);
     }
     // Thinking aloud. Remind once per game, in case someone forgets the keyword.
     const hint = `answer-keyword:${name}`;
     if (!game.pending && !game.hinted.has(hint) && text.split(/\s+/).length <= 5 && !text.trim().endsWith('?')) {
       game.hinted.add(hint);
-      void this.speak('Sag: Meine Antwort ist, und dann deine Antwort.', 'confirm');
+      void this.speak(ANSWER_KEYWORD_LINE, 'confirm', true);
     }
   }
 
@@ -606,11 +616,14 @@ export class QuizBot {
       case 'invalid':
         return this.reply(msg, `🤔 ${res.hint}`);
       case 'none': {
-        const ex = game.turn!.open[0];
+        if (!verbose) return;
+        // Spoken: only once per turn, and only after the bot asked for a card – not between a verdict
+        // and the next turn, not while the turn is being announced.
         const once = `pick-hint:${game.turn!.player}:${game.turn!.open.length}`;
-        if (msg.viaVoice && game.hinted.has(once)) return;
+        if (game.hinted.has(once) || !this.voice?.bridge.turnAnnounced) return;
         game.hinted.add(once);
-        if (verbose) await this.reply(msg, '🤔 Welche Karte? Z.B. `Nintendo 200`.', `Welche Karte? Sag zum Beispiel: ${ex ? `${ex.category} für ${ex.points}` : 'Kategorie und Punkte'}.`);
+        await this.say(msg.channelId, '🤔 Welche Karte? Z.B. `Nintendo 200`.');
+        void this.speak(pickHintLine(game.turn!.open[0]), 'hint', true);
       }
     }
   }
@@ -963,8 +976,9 @@ export class QuizBot {
     return this.voice?.guildId === guildId ? this.speak(text) : Promise.resolve();
   }
 
-  private speak(text: string, key?: string): Promise<void> {
-    return this.voice ? this.voice.bridge.say(text, key).catch((e) => log.warn(`Sprechen: ${(e as Error).message}`)) : Promise.resolve();
+  /** `interruptible`: hints and prompts the person on turn may talk over (barge-in). */
+  private speak(text: string, key?: string, interruptible = false): Promise<void> {
+    return this.voice ? this.voice.bridge.say(text, key, { interruptible }).catch((e) => log.warn(`Sprechen: ${(e as Error).message}`)) : Promise.resolve();
   }
 
   private async cmdVoice(msg: ChatMessage, args: string[]): Promise<void> {
@@ -995,11 +1009,13 @@ export class QuizBot {
       const host = new VoiceHost({
         transport,
         stt: kit.stt,
+        fastStt: kit.fastStt,
         tts: kit.tts,
         cfg: vc,
         prompt: () => this.voicePrompt(),
         onSpeech: (speaker, text) => this.onSpeech(speaker, text),
         attention: (speaker) => this.attention(speaker.id),
+        mayInterrupt: (speaker) => this.onTurn(speaker.id),
         onClose: () => {
           // The room went away by itself (Discord disconnect, kick): give the extra time back and stop narrating.
           const v = this.voice;
@@ -1076,14 +1092,29 @@ export class QuizBot {
     if (!g) return this.menu?.askedBy === userId ? 'full' : 'wake';
     if (g.phase !== 'running') return 'wake';
     const name = this.nameFor(g, userId);
-    const expected = (n: string) => (g.awaiting ? g.awaiting.player === n : !!g.turn && !g.questionOpen && g.turn.player === n);
+    const now = this.expectedPlayer(g);
     if (!name) {
       // Unlinked: listen only if the expected speaker is unlinked too – it might be them (→ hint).
-      const now = g.awaiting?.player ?? (g.turn && !g.questionOpen ? g.turn.player : null);
       return now && !this.userFor(g, now) ? 'full' : 'wake';
     }
     if (this.voice?.bridge.buzzerOpen) return 'full';
-    return expected(name) ? 'full' : 'wake';
+    if (now !== name) return 'wake';
+    // The answerer needs the precise model – except for "Ja"/"Nein" after "Paris?" (the host checks for a new answer).
+    if (g.awaiting?.player === name) return g.pending?.player === name ? 'confirm' : 'answer';
+    return 'full'; // picking a card
+  }
+
+  /** Whose input the game waits for: the answerer, or who picks the next card. */
+  private expectedPlayer(g: ActiveGame): string | null {
+    return g.awaiting?.player ?? (g.turn && !g.questionOpen ? g.turn.player : null);
+  }
+
+  /** The person on turn – the only one who may talk over the bot's hints and prompts (barge-in). */
+  private onTurn(userId: string): boolean {
+    const g = this.voiceGame();
+    if (!g || g.phase !== 'running') return false;
+    const name = this.nameFor(g, userId);
+    return !!name && this.expectedPlayer(g) === name;
   }
 
   private async onSpeech(speaker: Speaker, text: string): Promise<void> {
@@ -1115,6 +1146,8 @@ export class QuizBot {
       transcript();
       const cmd = voiceCommand(rest);
       if (!cmd) return void this.speak('Das habe ich nicht verstanden. Sag: Quizmaster, Hilfe.');
+      // "Quizmaster, stopp" may mean "stop talking" – ending the game takes the whole phrase.
+      if (cmd.name === 'ende?') return g ? this.reply(msg, `🛑 Spiel beenden? Sag „Quizmaster, Spiel beenden“ oder schreib \`${this.prefix} ende\`.`, END_ASK_LINE) : this.reply(msg, 'Gerade läuft kein Spiel.');
       if (cmd.name === 'wiederholen') return v.bridge.repeat();
       if (cmd.name === 'brett' && g?.turn) return v.bridge.freeCards();
       if (cmd.name === 'stand' && g) return v.bridge.scores();

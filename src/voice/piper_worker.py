@@ -2,14 +2,21 @@
 
 Request:  {"id": 1, "text": "Hallo"}
 Response: {"id": 1, "wav": "<base64 WAV>"}  or  {"id": 1, "error": "..."}
-"""
-import base64
-import io
-import json
-import sys
-import wave
 
-from piper import PiperVoice, SynthesisConfig
+Ctrl+C in the terminal reaches the whole process group. The worker ignores SIGINT, so the bot can
+still say goodbye while it shuts down; it ends when its stdin closes (the bot exits, or closes it).
+"""
+import signal
+
+signal.signal(signal.SIGINT, signal.SIG_IGN)  # before the slow imports below
+
+import base64  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+import sys  # noqa: E402
+import wave  # noqa: E402
+
+from piper import PiperVoice, SynthesisConfig  # noqa: E402
 
 
 def main() -> None:
@@ -32,4 +39,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:  # the bot is gone – nothing to report to
+        sys.exit(0)
