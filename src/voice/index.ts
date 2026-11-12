@@ -12,7 +12,15 @@ import { createTts } from './tts.ts';
 const log = createLogger('voice');
 const run = promisify(execFile);
 
-const WHISPER_MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin';
+/** Official whisper.cpp models ("ggml-<name>.bin") – any of them can be configured as `voice.whisperModel`. */
+const WHISPER_MODEL_BASE = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/';
+
+/** How to get whisper-server on this system. */
+function whisperInstallHint(): string {
+  return process.platform === 'darwin'
+    ? 'brew install whisper.cpp'
+    : 'whisper.cpp bauen (cmake --build … --target whisper-server) oder das Docker-Image nutzen, siehe docs/INSTALL.md';
+}
 const PIPER_VOICE_BASE = 'https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high';
 const PIPER_VERSION = 'piper-tts==1.3.0';
 
@@ -46,7 +54,7 @@ export async function voiceProblems(config: Config): Promise<string[]> {
   try {
     await run(v.whisperBin, ['--help']);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') out.push(`${v.whisperBin} fehlt (brew install whisper-cpp)`);
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') out.push(`${v.whisperBin} fehlt (${whisperInstallHint()})`);
   }
   if (!existsSync(path.resolve(v.dir, v.whisperModel))) out.push(`Whisper-Modell fehlt (${v.whisperModel})`);
   if (v.tts === 'piper') {
@@ -78,7 +86,7 @@ async function download(url: string, file: string): Promise<void> {
   renameSync(`${file}.part`, file);
 }
 
-/** `qbhost voice-setup`: installs whisper.cpp (Homebrew), downloads models, creates the Piper venv. */
+/** `qbhost voice-setup`: installs whisper.cpp (Homebrew on macOS), downloads models, creates the Piper venv. */
 export async function setupVoice(config: Config): Promise<void> {
   const v = config.voice;
   mkdirSync(v.dir, { recursive: true });
@@ -87,18 +95,24 @@ export async function setupVoice(config: Config): Promise<void> {
     await run(v.whisperBin, ['--help']);
     log.info('whisper.cpp ✓');
   } catch {
-    log.info('Installiere whisper.cpp (brew install whisper-cpp) …');
-    await run('brew', ['install', 'whisper-cpp'], { maxBuffer: 64 * 1024 * 1024 }).catch((e) => {
-      throw new Error(`whisper.cpp konnte nicht installiert werden (${(e as Error).message.split('\n')[0]}). Manuell: brew install whisper-cpp`);
+    if (process.platform !== 'darwin') throw new Error(`${v.whisperBin} fehlt: ${whisperInstallHint()}`);
+    log.info('Installiere whisper.cpp (brew install whisper.cpp) …');
+    await run('brew', ['install', 'whisper.cpp'], { maxBuffer: 64 * 1024 * 1024 }).catch((e) => {
+      throw new Error(`whisper.cpp konnte nicht installiert werden (${(e as Error).message.split('\n')[0]}). Manuell: brew install whisper.cpp`);
     });
   }
-  await download(WHISPER_MODEL_URL, path.resolve(v.dir, v.whisperModel));
+  const model = path.resolve(v.dir, v.whisperModel);
+  const modelName = path.basename(v.whisperModel);
+  if (/^ggml-[\w.-]+\.bin$/.test(modelName)) await download(WHISPER_MODEL_BASE + modelName, model);
+  else if (!existsSync(model)) throw new Error(`Eigenes Whisper-Modell ${model} fehlt.`);
 
   if (v.tts === 'piper') {
     const py = path.resolve(v.dir, 'venv/bin/python');
     if (!existsSync(py)) {
       log.info('Erstelle Python-Umgebung für Piper …');
-      await run('python3', ['-m', 'venv', path.resolve(v.dir, 'venv')]);
+      await run('python3', ['-m', 'venv', path.resolve(v.dir, 'venv')]).catch((e) => {
+        throw new Error(`Python-venv nicht möglich (${(e as Error).message.split('\n')[0]}). Debian/Ubuntu: sudo apt install python3-venv`);
+      });
     }
     log.info(`Installiere ${PIPER_VERSION} …`);
     await run(py, ['-m', 'pip', 'install', '-q', PIPER_VERSION], { maxBuffer: 64 * 1024 * 1024 });

@@ -1,38 +1,74 @@
 {
+  "baseUrl": "https://www.quiz-base.de",
   "browser": {
     "driver": "playwright",
-    "headless": true
+    "headless": true,
+    "profileDir": ".qbhost/profile",
+    "pollMs": 500
   },
   "game": {
     "publicBoard": "Allgemeinwissen Quiz v1",
-    "autoStart": true,
     "minPlayers": 2,
+    "autoStart": false,
+    "pickReminderSec": 45,
     "answerTimeoutSec": 45,
     "buzzerOnWrong": true,
     "buzzWindowSec": 15,
-    "autoplayAudio": true,
-    "revealPauseSec": 4,
+    "buzzAnswerTimeoutSec": 25,
+    "bonusTimeSec": 0,
     "correctFactor": 1,
     "wrongFactor": 0.5,
     "buzzerCorrectFactor": 1,
-    "buzzerWrongFactor": 0.5
+    "buzzerWrongFactor": 0.5,
+    "autoplayAudio": true,
+    "revealPauseSec": 4,
+    "autoEnd": true
   },
   "judge": {
     "strategy": "cascade",
-    "solveMissingNotes": true
+    "acceptThreshold": 0.86,
+    "rejectThreshold": 0.35,
+    "solveMissingNotes": true,
+    "cacheFile": ".qbhost/judge-cache.json"
   },
   "llm": {
     "provider": "claude-cli",
-    "model": "haiku"
+    "model": "haiku",
+    "claudeBin": "claude",
+    "timeoutMs": 30000
+  },
+  "discord": {
+    "tokenEnv": "DISCORD_TOKEN",
+    "channelIds": [],
+    "prefix": "!quiz",
+    "lobbyTimeoutMin": 20,
+    "autoStart": true,
+    "dataDir": ".qbhost/discord"
+  },
+  "voice": {
+    "enabled": true,
+    "autoJoin": true,
+    "dir": ".qbhost/voice",
+    "whisperBin": "whisper-server",
+    "whisperModel": "models/ggml-large-v3-turbo-q5_0.bin",
+    "whisperPort": 8178,
+    "language": "de",
+    "tts": "piper",
+    "piperVoice": "models/de_DE-thorsten-high.onnx",
+    "piperLengthScale": 0.95,
+    "sayVoice": "Anna",
+    "silenceMs": 900,
+    "minSpeechMs": 350,
+    "minRms": 250,
+    "maxSpeechSec": 15,
+    "ignoreWhileSpeaking": true,
+    "wakeWords": ["quizmaster", "quiz master", "quizmeister", "quizhost", "quiz host"],
+    "extraTimeSec": 10,
+    "scoresEvery": 3
   },
   "companion": {
     "enabled": true,
-    "port": 4747
-  },
-  "discord": {
-    "channelIds": [],
-    "prefix": "!quiz",
-    "autoStart": true,
-    "lobbyTimeoutMin": 20
+    "port": 4747,
+    "host": "0.0.0.0"
   }
 }

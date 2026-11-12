@@ -1,10 +1,32 @@
 {
   "name": "quiz-base-host",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Lässt Claude auf quiz-base.de die Host-Rolle (Gamemaster) übernehmen – deterministische Spiel-Engine, LLM nur zum Bewerten von Antworten.",
   "type": "module",
   "private": true,
   "license": "MIT",
+  "author": "Aaron Jacques",
+  "homepage": "https://github.com/AaronJacques/quiz-base-host#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AaronJacques/quiz-base-host.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AaronJacques/quiz-base-host/issues"
+  },
+  "keywords": [
+    "quiz",
+    "quiz-base",
+    "tafelquiz",
+    "discord",
+    "discord-bot",
+    "claude",
+    "anthropic",
+    "voice",
+    "whisper",
+    "piper",
+    "playwright"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -32,5 +54,10 @@
     "tsx": "^4.23.15",
     "typescript": "5.9",
     "vitest": "^5.1.0"
+  },
+  "overrides": {
+    "prism-media": {
+      "opusscript": "$opusscript"
+    }
   }
 }

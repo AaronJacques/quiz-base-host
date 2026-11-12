@@ -1,8 +1,15 @@
 # quiz-base-host 🎙️
 
+[![CI/CD](https://github.com/AaronJacques/quiz-base-host/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/AaronJacques/quiz-base-host/actions/workflows/ci-cd.yml)
+[![Lizenz: MIT](https://img.shields.io/badge/Lizenz-MIT-blue.svg)](LICENSE)
+
 Ein Discord-Bot, der auf [quiz-base.de](https://www.quiz-base.de) die Rolle des **Hosts / Gamemasters** übernimmt. Dann muss niemand aus der Runde die Antworten kennen, und alle spielen mit. Auf Wunsch moderiert er **per Stimme im Voice-Channel** und versteht, was ihr sagt – komplett lokal.
 
 Unterstützt: **Tafelquiz** (inkl. 2 Boards, Bild- und Audiofragen, Buzzer). Weitere Formate: siehe [Roadmap](docs/ROADMAP.md).
+
+> **English summary:** qbhost is a Discord bot (German UI) that hosts a *Tafelquiz* round on quiz-base.de. A deterministic engine drives the normal host page in a browser; Claude (Haiku by default) only judges unclear answers and solves image questions without a note. Optional voice control runs locally (whisper.cpp + Piper). Requires Node ≥ 22. Setup: [docs/INSTALL.md](docs/INSTALL.md). Config reference: [docs/CONFIG.md](docs/CONFIG.md). Docs are in German.
+
+> **Hinweis:** qbhost ist **nicht offiziell** mit quiz-base.de verbunden. Es bedient nur die normale Weboberfläche, wie ein Mensch am Host-Bildschirm. Respektiere die Nutzungsbedingungen von quiz-base und schließe Test-Lobbys nach dem Gebrauch. Details: [Disclaimer](#disclaimer).
 
 ```
 Discord-Channel                         qbhost (läuft auf deinem Rechner)              quiz-base.de
@@ -25,20 +32,43 @@ Discord-Channel                         qbhost (läuft auf deinem Rechner)      
 - **Fair:** Die Lösung erscheint nie vor der Auflösung im Channel. Unsichere Fälle entscheidet die Spielleitung, die die Lösung per DM bekommt.
 - **Erweiterbar:** saubere Schichten (Browser · Seite · Spielmodus · Bewertung · Kanäle), siehe [Architektur](docs/ARCHITECTURE.md).
 
+## Voraussetzungen
+
+- **Node.js ≥ 22** und **Git**
+- **Ein Claude-Zugang**, eine dieser Optionen:
+  - [Claude Code](https://claude.com/claude-code), eingeloggt. Bewertung über dein Abo, keine Kosten pro Aufruf.
+  - `ANTHROPIC_API_KEY`. Bezahlung pro Aufruf, mit Ausgabenlimit empfohlen.
+  - **Ohne LLM** (`"llm": { "provider": "none" }`). Das Spiel läuft, unklare Antworten entscheidet die Spielleitung.
+- **Ein Discord-Account** und ein Server, auf dem du den Bot einladen darfst.
+- **Optional, Sprache:** whisper.cpp und Piper, lokal. `qbhost voice-setup` richtet alles ein. Auf macOS installiert es whisper.cpp per Homebrew, unter Linux baust du `whisper-server` einmal selbst oder nimmst das Docker-Image. Unter Windows nur über WSL2. Details: [docs/VOICE.md](docs/VOICE.md) und [docs/INSTALL.md](docs/INSTALL.md#9-sprachsteuerung-optional).
+
+Getestet wurde auf macOS. Linux (Ubuntu/Debian) funktioniert für Bot und Spiel, Windows nur über WSL2.
+
 ## Schnellstart (Discord)
 
-Voraussetzungen: Node ≥ 22 und eines davon:
-- [Claude Code](https://claude.com/claude-code), eingeloggt (Bewertung über dein Abo)
-- `ANTHROPIC_API_KEY`
-
 ```bash
-git clone <repo> && cd quiz-base-host
-npm install
-npx playwright install chromium
-cp .env.example .env              # DISCORD_TOKEN eintragen → docs/DISCORD.md
-npm run doctor
+git clone https://github.com/AaronJacques/quiz-base-host.git
+cd quiz-base-host
+npm ci
+npx playwright install chromium   # Browser für quiz-base, ca. 150 MB
+cp .env.example .env              # DISCORD_TOKEN eintragen, Anleitung: docs/DISCORD.md
+npm run doctor                    # prüft Node, Token, Claude, Browser
 npx qbhost discord
 ```
+
+Die ausführliche Anleitung für macOS, Linux und Windows (WSL2), inklusive Fehlerbehebung: **[docs/INSTALL.md](docs/INSTALL.md)**.
+
+Weitere Dokumente:
+
+| Thema | Datei |
+|---|---|
+| Installation, Schritt für Schritt | [docs/INSTALL.md](docs/INSTALL.md) |
+| Discord-Bot anlegen und bedienen | [docs/DISCORD.md](docs/DISCORD.md) |
+| Alle Einstellungen | [docs/CONFIG.md](docs/CONFIG.md) |
+| Sprachsteuerung | [docs/VOICE.md](docs/VOICE.md) |
+| Server-Betrieb (Docker) | [docs/DEPLOY.md](docs/DEPLOY.md) |
+| Aufbau des Codes | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Mitmachen | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 Dann im Discord-Channel:
 
@@ -57,10 +87,12 @@ Bot-Einrichtung im Developer Portal, alle Befehle und Regeln: **[docs/DISCORD.md
 ### Mit Sprache
 
 ```bash
-npx qbhost voice-setup    # einmalig: whisper.cpp, Modelle (~700 MB), Piper
+npx qbhost voice-setup    # einmalig: Modelle (~700 MB), Piper; auf macOS auch whisper.cpp
 ```
 
 Dann im Voice-Channel sitzen und `!quiz neu` (oder `!quiz voice`) tippen – ab da geht alles per Stimme: „Quizmaster, neues Quiz Allgemeinwissen“, „Sport für 200“, „Hier!“. Details: **[docs/VOICE.md](docs/VOICE.md)**.
+
+**Datenschutz:** Während der Bot im Voice-Channel ist, hört er zu und erkennt Sprache lokal auf deinem Rechner. Er speichert keine Aufnahmen. Gepostet wird nur, worauf er reagiert. Alle Mitspielenden sollten wissen, dass er zuhört. Der Bot sagt das beim Beitritt an.
 
 ## Ohne Discord: Terminal + Spieler-Pult
 
@@ -80,7 +112,7 @@ Browser-Varianten (für beide Modi):
 
 ## Konfiguration
 
-Defaults stehen in [`src/config.ts`](src/config.ts). Für Anpassungen `qbhost.config.example.json` nach `qbhost.config.json` kopieren.
+Defaults stehen in [`src/config.ts`](src/config.ts). Für Anpassungen `qbhost.config.example.json` nach `qbhost.config.json` kopieren. Jede Option mit Default und Erklärung: **[docs/CONFIG.md](docs/CONFIG.md)**. Die Spielregeln (Punkte, Zeiten) kannst du zusätzlich im Discord-Chat ändern.
 
 | Bereich | Wichtige Optionen |
 |---|---|
@@ -119,3 +151,19 @@ Für KI-Agenten und Mitwirkende: [AGENTS.md](AGENTS.md) · [Architektur](docs/AR
 - Ein Neustart des Bots **mitten in einer Frage** stellt die Frage erneut. Zwischen Fragen ist ein Neustart unproblematisch.
 - Ist ein Fragebild auf quiz-base selbst kaputt, nutzt Claude nur den Dateinamen als Hinweis. Ist das zu unsicher, entscheidet die Spielleitung.
 - quiz-base hat keine offizielle API. qbhost bedient die normale Host-Oberfläche. Ändert sich das Layout, muss nur `src/site/tafelquiz/probe.browser.js` angepasst werden.
+
+## Disclaimer
+
+- qbhost ist ein inoffizielles Projekt. Es ist **nicht mit quiz-base.de verbunden** und nicht von dessen Betreibern unterstützt.
+- Das Programm bedient nur die normale Weboberfläche von quiz-base, wie ein Mensch es täte. Es nutzt keine interne API.
+- **Respektiere die Nutzungsbedingungen von quiz-base.de.** Du bist selbst dafür verantwortlich, wie du das Programm einsetzt.
+- **Schließe Test-Lobbys** und beende Spiele, die du nicht mehr brauchst. Es sind echte Lobbys auf einer fremden Plattform.
+- Die Software wird ohne jede Garantie bereitgestellt (siehe [LICENSE](LICENSE)).
+
+## Mitmachen
+
+Beiträge sind willkommen. Die Regeln, Checks (`npm test`, `npm run typecheck`) und die Live-Test-Etikette stehen in **[CONTRIBUTING.md](CONTRIBUTING.md)**. Sicherheitsprobleme bitte privat melden, siehe [SECURITY.md](SECURITY.md). Verhaltensregeln: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Änderungen stehen im [CHANGELOG.md](CHANGELOG.md).
+
+## Lizenz
+
+[MIT](LICENSE), © 2026 Aaron Jacques

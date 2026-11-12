@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Sicherheitsproblem melden
+    url: https://github.com/AaronJacques/quiz-base-host/security/advisories/new
+    about: Lösungs-Leaks, Token-Leaks und andere Sicherheitsprobleme bitte privat melden, nicht als öffentliches Issue.
+  - name: Fragen und Hilfe
+    url: https://github.com/AaronJacques/quiz-base-host/blob/main/docs/INSTALL.md
+    about: Installation und Fehlerbehebung stehen in der Anleitung. Erst dort nachschauen.

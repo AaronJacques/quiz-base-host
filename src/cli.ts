@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { parseArgs } from 'node:util';
 import { runHost } from './app.ts';
@@ -139,14 +141,30 @@ switch (command) {
       if (!process.env[config.discord.tokenEnv]) throw new Error(`${config.discord.tokenEnv} fehlt (nur für "qbhost discord" nötig)`);
       return 'gesetzt';
     });
-    await check('Claude CLI', async () => (await run(config.llm.claudeBin, ['--version'])).stdout.trim());
-    await check('Orca CLI', async () => (await run(config.browser.orcaBin, ['--version'])).stdout.trim().split('\n')[0]!);
+    const configFile = path.resolve(values.config ?? 'qbhost.config.json');
+    console.log(existsSync(configFile) ? `ℹ️  Konfiguration: ${configFile}` : `ℹ️  Keine ${path.basename(configFile)} gefunden – es gelten die Standardwerte (Vorlage: qbhost.config.example.json)`);
+    if (config.llm.provider === 'claude-cli') {
+      await check('Claude CLI', async () => {
+        try {
+          return (await run(config.llm.claudeBin, ['--version'])).stdout.trim();
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`"${config.llm.claudeBin}" nicht gefunden – Claude Code installieren und einloggen, oder llm.provider "anthropic" (ANTHROPIC_API_KEY) bzw. "none" setzen`);
+          throw e;
+        }
+      });
+    }
+    if (config.browser.driver === 'orca') await check('Orca CLI', async () => (await run(config.browser.orcaBin, ['--version'])).stdout.trim().split('\n')[0]!);
     await check('Playwright Chromium', async () => {
       const { chromium } = await import('playwright');
-      const b = await chromium.launch({ headless: true });
-      const v = b.version();
-      await b.close();
-      return v;
+      try {
+        const b = await chromium.launch({ headless: true });
+        const v = b.version();
+        await b.close();
+        return v;
+      } catch (e) {
+        if (/Executable doesn't exist|npx playwright install/.test((e as Error).message)) throw new Error('Chromium fehlt → npx playwright install chromium');
+        throw e;
+      }
     });
     await check('Sprachsteuerung (STT/TTS lokal)', async () => {
       const problems = await voiceProblems(config);
