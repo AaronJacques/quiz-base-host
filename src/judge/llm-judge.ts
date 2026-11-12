@@ -12,6 +12,9 @@ const SolveSchema = z.object({
   confidence: z.number().min(0).max(1),
 });
 
+/** Bump when JUDGE_SYSTEM changes meaningfully – invalidates cached verdicts. */
+export const JUDGE_RULES_VERSION = 2;
+
 // Kept short and stable on purpose: it is the bulk of every judging request.
 const JUDGE_SYSTEM = `Du bist ein fairer, lockerer Quizmaster bei einem Spieleabend unter Freunden.
 Entscheide, ob die Spielerantwort als richtig gilt.
@@ -20,7 +23,7 @@ Regeln:
 - Der Kern zählt: Bei Personen reicht meist der bekannte Name (Nachname oder Rufname), außer die Frage verlangt ausdrücklich den vollen Namen.
 - Zusätzliche Wörter sind ok, solange sie nichts Falsches behaupten.
 - Fragt die Frage nach X "und/oder" Y, reicht eines davon.
-- Zahlen/Jahre müssen stimmen (Einheiten egal). Nur bei Schätzfragen ("ca.") ist etwas Toleranz ok.
+- Zahlen/Jahre müssen stimmen (Einheiten egal). Nur bei Schätzfragen ("ca.") ist etwas Toleranz ok. Übliche Rundungen bekannter Werte (z.B. "42 km" für 42,195 km beim Marathon) gelten, wenn die Frage nicht ausdrücklich exakt fragt.
 - Mehrere widersprüchliche Antworten auf einmal ("A oder B") sind falsch.
 - Die Lösung des Hosts kann zusätzliche Erklärungen oder Links enthalten – bewerte nur gegen den Kern.
 Antworte nur im geforderten JSON.`;
@@ -36,9 +39,10 @@ export class LlmJudge implements AnswerJudge {
     private meter: UsageMeter,
   ) {}
 
-  async judge({ question, reference, answer, hints }: JudgeInput): Promise<JudgeResult> {
+  async judge({ question, reference, answer, hints, spoken }: JudgeInput): Promise<JudgeResult> {
     const lines = [`Frage: ${question}`, `Lösung laut Host: ${reference ?? '(keine hinterlegt – nutze dein Wissen)'}`];
     if (hints?.length) lines.push(`Hinweise: ${hints.join(' | ')}`);
+    if (spoken) lines.push('Die Antwort wurde GESPROCHEN und automatisch transkribiert: Werte nach dem Klang, nicht nach der Schreibweise. Klingt sie eindeutig wie die Lösung (z.B. „Preaking Bat“ für „Breaking Bad“, „Tschingis Kan“ für „Dschingis Khan“), ist sie richtig.');
     lines.push(`Antwort des Spielers: ${answer}`);
     const res = await this.llm.completeJson({ system: JUDGE_SYSTEM, prompt: lines.join('\n'), schema: VerdictSchema, purpose: 'judge' });
     this.meter.record('judge', res.costUsd);

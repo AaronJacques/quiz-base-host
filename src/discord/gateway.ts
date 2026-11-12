@@ -1,3 +1,5 @@
+import type { Speaker, VoiceTransport } from '../voice/transport.ts';
+
 /**
  * The bot's view of a chat platform. `DiscordGateway` implements it with
  * discord.js; tests use an in-memory fake. Keeping this tiny is what makes the
@@ -15,6 +17,10 @@ export interface ChatMessage {
   mentions: string[];
   /** Author may manage the server (admins can always lead games). */
   canManage: boolean;
+  /** Voice channel the author is in right now, if any. */
+  voiceChannelId?: string | null;
+  /** Synthesised from speech in a voice channel (not typed). */
+  viaVoice?: boolean;
 }
 
 export interface ChatGateway {
@@ -24,6 +30,10 @@ export interface ChatGateway {
   /** Direct message – used for secrets like the solution when the leader must decide. */
   sendDirect(userId: string, text: string): Promise<void>;
   react(msg: ChatMessage, emoji: string): Promise<void>;
+  /** Joins a voice channel (optional – platforms/tests without voice leave it out). */
+  joinVoice?(guildId: string, channelId: string, opts: { silenceMs: number; maxSpeechSec: number }): Promise<VoiceTransport>;
+  /** People currently in a voice channel (for automatic name linking). */
+  voiceMembers?(guildId: string, channelId: string): Speaker[];
 }
 
 export const mention = (userId: string) => `<@${userId}>`;

@@ -58,6 +58,17 @@ src/
 │   ├── store.ts           pro Server: Verknüpfungen + Regeln (.qbhost/discord/)
 │   └── format.ts          Hilfe-/Regeltexte
 │
+├── voice/                 "Wie spricht und hört der Host?"  (alles lokal)
+│   ├── transport.ts       VoiceTransport-Interface: play(pcm), onUtterance(pro Sprecher)
+│   ├── discord-voice.ts   @discordjs/voice: Opus empfangen/dekodieren, PCM abspielen (DAVE)
+│   ├── loopback.ts        Voice-Raum per HTTP – Tests und Agenten-Spieler ohne Discord
+│   ├── stt.ts             whisper.cpp-Server (warm), Halluzinationsfilter
+│   ├── tts.ts             Piper (Python-Worker, warm) oder macOS say, mit Cache
+│   ├── voice-host.ts      Sprechwarteschlange (nächster Satz wird vorab erzeugt), Echo-Schutz, Lautstärke-/Längenfilter
+│   ├── commands.ts        Rufname „Quizmaster“, Sprachbefehle, „Buzzer!“, gesprochene Zahlen
+│   ├── narration.ts       Moderationstexte (reine Funktionen)
+│   └── index.ts           VoiceKit-Fabrik, `qbhost voice-setup`
+│
 └── channels/              "Wie reden Menschen mit dem Host?"
     ├── channel.ts         Channel-Interface
     ├── terminal.ts        Operator-Konsole
@@ -91,11 +102,25 @@ Jeder Warteschritt läuft über `whilePage()`: Ändert ein Mensch im Browser den
 | eine **andere Chat-Plattform** (Slack, Matrix, Twitch) | `ChatGateway` implementieren und `QuizBot` damit starten – Bot-Logik bleibt gleich. |
 | eine **neue Spielregel** per Discord einstellbar machen | Feld in `config.ts` `game` + Eintrag in `RULES` (`rules.ts`) – `!quiz regel` kennt sie dann automatisch. |
 | einen **neuen Eingabekanal** (Sprache) | Klasse mit `Channel`-Interface, die `host:*` rendert und `player:pick`/`player:answer` emittiert. In `app.ts` registrieren. Kein Controller-Code nötig. |
-| eine **Sprachausgabe** (TTS ins Discord) | Channel, der `host:say` / `host:question` an z. B. macOS `say` oder ElevenLabs gibt. |
+| eine **andere Stimme / STT** | `TextToSpeech` bzw. `SpeechToText` implementieren (`src/voice/tts.ts`, `stt.ts`) und in `createVoiceKit` wählen. |
+| eine **andere Sprachplattform** (z.B. TeamSpeak, Mumble) | `VoiceTransport` implementieren – `VoiceHost` und alles darüber bleiben gleich. |
 | **eigene Hausregeln** | `rules.ts` und neue Felder in `config.ts`. |
 | einen **anderen Browser** | `BrowserDriver` implementieren (nur `evaluate(expression)` ist wirklich nötig). |
 | ein **anderes Bewertungsverfahren** | `AnswerJudge` implementieren und in `judge/index.ts` in die Kaskade hängen. |
 | **Claude als interaktiven Host** (MCP) | MCP-Server, der den EventBus als Tools exponiert (`wait_for_event`, `pick`, `judge`). Der Controller bleibt unverändert, nur der Judge/Channel wird ein MCP-Adapter. |
+
+## Sprache
+
+```
+Discord-Voice ─Opus pro Sprecher─► DiscordVoiceTransport ─PCM─► VoiceHost ─(Filter: Länge, Lautstärke, Echo)─► whisper.cpp
+                                                                   ▲                                              │ Text
+                                   Piper ◄─ Satz ─ VoiceBridge ◄─ host:* (Bus)                                     ▼
+                                                                                  QuizBot.onSpeech → Rufname? → Befehl
+                                                                                                   → Buzzer? → player:buzz
+                                                                                                   → wer ist dran? → wie eine Chat-Nachricht (Karte/Antwort)
+```
+
+Gesprochenes wird zu einer synthetischen Chat-Nachricht (`viaVoice: true`) und läuft durch dieselbe Logik wie getippter Text – Kartenparser, Antworten, Menüs, Befehle. Antworten auf gesprochene Eingaben gehen in den Chat **und** in den Voice-Channel. Der Controller kennt Sprache nicht; einzige Ergänzung ist das Event `player:buzz`, das mit dem quiz-base-Buzzer um die Wette läuft.
 
 ## Warum keine direkte Supabase-Anbindung?
 

@@ -39,7 +39,7 @@ export class FakeTafelquizPage implements TafelquizPort {
       phase: this.phase,
       url: 'fake://host',
       lobbyCode: 'TEST01',
-      players: this.players.map((p, i) => ({ ...p, isTurn: this.phase !== 'lobby' && i === this.turn, hasBuzzed: p.name === this.buzzer.buzzedBy, ready: true })),
+      players: this.players.map((p, i) => ({ ...p, isTurn: this.phase !== 'lobby' && i === (this.shownTurn ?? this.turn), hasBuzzed: p.name === this.buzzer.buzzedBy, ready: true })),
       ready: this.phase === 'lobby' ? { ready: this.players.length, total: this.players.length } : null,
       canStart: this.phase === 'lobby',
       boards: { count: 1, active: 1 },
@@ -76,6 +76,7 @@ export class FakeTafelquizPage implements TafelquizPort {
   passSoundGate = () => this.ok('passSoundGate');
   selectBoard = (n: number) => this.ok(`selectBoard ${n}`);
   openCell = (col: number, row: number) => {
+    this.shownTurn = null;
     this.open = this.cells.find((c) => c.col === col && c.row === row) ?? null;
     this.phase = 'question';
     this.buzzer = { status: 'locked', buzzedBy: null };
@@ -94,10 +95,14 @@ export class FakeTafelquizPage implements TafelquizPort {
   stopTimer = () => this.ok('stopTimer');
   playAudio = () => this.ok('playAudio');
   stopAudio = () => this.ok('stopAudio');
+  /** Test hook: like quiz-base sometimes, keep showing "Am Zug" at the previous player until the next card opens. */
+  staleTurnDisplay = false;
+  private shownTurn: number | null = null;
   closeQuestion = () => {
     if (this.open) this.open.answered = true;
     this.open = null;
     this.phase = 'board';
+    if (this.staleTurnDisplay) this.shownTurn = this.turn;
     this.turn = (this.turn + 1) % this.players.length;
     return this.ok('close');
   };

@@ -11,10 +11,15 @@
 - Kartenwahl in natürlicher Sprache mit Prüfung frei/schon weg, Antworten im Chat
 - Punkteregeln per Chat (`!quiz regel …`), Spielleitung mit Overrides, Lösungen nur per DM vor der Auflösung
 
+## ✅ v0.3 – Sprache im Voice-Channel
+- Bot moderiert per Stimme (Piper, lokal) und versteht Karten, Antworten, „Buzzer!“ und „Quizmaster, …“-Befehle (whisper.cpp, lokal)
+- Quiz-Auswahl, Verknüpfung und Spielleitung auch per Sprache; Echo-Schutz, Füllwort-Filter, Kölner Phonetik für Hörfehler
+- End-to-End getestet mit zwei Haiku-Agenten als Spieler gegen das echte quiz-base (Loopback-Voice-Raum)
+
 ## Als Nächstes
 1. **Slash-Commands** (`/quiz neu`) mit Autocomplete für Boards, zusätzlich zum Präfix.
-2. **Sprachausgabe**: Fragen/Urteile per TTS vorlesen (macOS `say` → virtuelles Audiogerät → Discord).
-3. **Spracheingabe**: Voice-Channel mitschneiden, lokal transkribieren (whisper.cpp), Antworten des Spielers am Zug erkennen. Damit entfällt das Tippen.
+2. **Barge-in**: Bot verstummt, wenn jemand dazwischenredet (statt Echo-Schutz per Ignorieren) – braucht Echo-Erkennung.
+3. **Musikfragen im Voice-Channel**: Audio direkt in Discord abspielen statt nur auf quiz-base.
 4. **Punktejagd**: rein mechanisch (aufdecken → auflösen → weiter), kein LLM nötig. Notizen in SITE-NOTES.md.
 5. **Eagle Eye**: Buzzer + Bewertung wie Tafelquiz, Lösung steht im Host-Board.
 6. **Board-Generator**: Claude erstellt aus einem Thema ein komplettes Tafelquiz-Board (mit Lösungen) und trägt es im Board-Editor ein.

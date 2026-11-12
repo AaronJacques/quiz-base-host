@@ -9,6 +9,13 @@ import { helpText, medal, rulesText } from './format.ts';
 import { mention, type ChatGateway, type ChatMessage } from './gateway.ts';
 import { formatBoard, parsePick } from './pick-parser.ts';
 import type { GuildStore } from './store.ts';
+import { VoiceBridge } from './voice-bridge.ts';
+import { isBuzz, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
+import { gameOverLine, VOICE_HELP } from '../voice/narration.ts';
+import type { SpeechToText } from '../voice/stt.ts';
+import type { Speaker } from '../voice/transport.ts';
+import type { TextToSpeech } from '../voice/tts.ts';
+import { forSpeech, VoiceHost } from '../voice/voice-host.ts';
 
 const log = createLogger('discord');
 
@@ -30,7 +37,30 @@ export interface BotDeps {
   createSession: (config: Config) => SessionLike;
   /** Public Tafelquiz boards; with a query via quiz-base's own search. */
   listBoards: (query?: string) => Promise<string[]>;
+  /** Local speech recognition + synthesis; without it the voice commands report "not set up". */
+  voice?: VoiceKit | null;
 }
+
+export interface VoiceKit {
+  stt: SpeechToText;
+  tts: TextToSpeech;
+  /** Loads the models up front so the first sentence is not delayed. */
+  warmup(): Promise<void>;
+}
+
+interface VoiceSession {
+  host: VoiceHost;
+  bridge: VoiceBridge;
+  guildId: string;
+  textChannelId: string;
+  voiceChannelId: string;
+  idleTimer?: NodeJS.Timeout;
+  seq: number;
+}
+
+const VOICE_IDLE_MS = 20 * 60_000;
+/** Answers that are really "wait a second". */
+const STALLING = /^(äh+m*|ähm|hm+|mh+|moment|einen moment|warte|wart mal|lass mich (kurz )?(überlegen|nachdenken)|ich überlege|gute frage|ok|okay|also)$/;
 
 /** A numbered board list shown in a channel. With `askedBy`, that user's next message answers it. */
 interface BoardMenu {
@@ -83,11 +113,13 @@ export class QuizBot {
   private menu: BoardMenu | null = null;
   private outbox = new Map<string, { lines: string[]; timer?: NodeJS.Timeout }>();
   private commands: Record<string, Handler>;
+  private voice: VoiceSession | null = null;
+  private voiceJoining: Promise<void> | null = null;
 
   constructor(private d: BotDeps) {
     const c = this.commands = {} as Record<string, Handler>;
     const alias = (names: string[], h: Handler) => names.forEach((n) => (c[n] = h));
-    alias(['hilfe', 'help', '?'], (m) => this.say(m.channelId, helpText(this.prefix)));
+    alias(['hilfe', 'help', '?'], (m) => this.reply(m, helpText(this.prefix), VOICE_HELP));
     alias(['boards', 'karten', 'liste'], (m, a) => this.cmdBoards(m, a));
     alias(['neu', 'new', 'lobby-neu', 'erstellen'], (m, a, g) => this.cmdNew(m, a, g));
     alias(['ich', 'name', 'bin'], (m, a, g) => this.cmdMe(m, a, g));
@@ -104,6 +136,8 @@ export class QuizBot {
     alias(['skip', 'weiter'], (m, _a, g) => this.cmdOverride(m, g, 'skip'));
     alias(['korrektur', 'korrigiere'], (m, a, g) => this.cmdCorrect(m, a, g));
     alias(['ende', 'stop', 'beenden', 'abbrechen'], (m, _a, g) => this.cmdEnd(m, g));
+    alias(['voice', 'sprache', 'stimme', 'vc'], (m, a) => this.cmdVoice(m, a));
+    alias(['wiederholen', 'nochmal', 'repeat'], (m, _a, g) => this.cmdRepeat(m, g));
     d.gateway.onMessage((m) => this.onMessage(m).catch((e) => log.error(`Nachricht: ${(e as Error).stack ?? e}`)));
   }
 
@@ -127,16 +161,18 @@ export class QuizBot {
       if (handler) return handler(msg, cmd.args, game);
       // "@Bot Waluigi" during a game = an answer / pick, not an unknown command.
       if (game && msg.channelId === game.channelId) return this.onGameInput(msg, game, [cmd.name, ...cmd.args].join(' '));
-      return this.say(msg.channelId, `Kenne ich nicht: \`${cmd.name}\`. \`${this.prefix} hilfe\` zeigt alle Befehle.`);
+      return this.reply(msg, `Kenne ich nicht: \`${cmd.name}\`. \`${this.prefix} hilfe\` zeigt alle Befehle.`);
     }
     if (game && msg.channelId === game.channelId) return this.onGameInput(msg, game, msg.content);
     const menu = this.menu;
     if (!game && menu?.askedBy === msg.author.id && menu.channelId === msg.channelId && Date.now() < menu.expires) {
-      const text = msg.content.trim();
+      const raw = msg.content.trim();
+      const n = msg.viaVoice ? spokenNumber(raw) : null;
+      const text = n !== null ? String(n) : raw;
       if (!text || text.startsWith('//')) return;
       if (/^(abbrechen|abbruch|stop|cancel|nein)$/i.test(text)) {
         this.menu = null;
-        return this.say(msg.channelId, 'Okay, keine neue Lobby.');
+        return this.reply(msg, 'Okay, keine neue Lobby.');
       }
       await this.chooseBoard(msg, text);
     }
@@ -158,9 +194,9 @@ export class QuizBot {
     const query = args.join(' ').trim();
     const list = await this.getBoards(msg.channelId, query);
     if (!list) return;
-    if (!list.length) return this.say(msg.channelId, this.notFound(query, await this.suggest(query)));
+    if (!list.length) return this.reply(msg, this.notFound(query, await this.suggest(query)));
     this.menu = { channelId: msg.channelId, options: list.slice(0, MENU_SIZE), askedBy: null, expires: Date.now() + MENU_TTL_MS };
-    await this.say(msg.channelId, [
+    await this.reply(msg, [
       query ? `**📚 Boards zu „${query}“** (${list.length})` : `**📚 Tafelquiz-Boards** (Auswahl von quiz-base; \`${this.prefix} boards <suche>\` findet mehr)`,
       ...this.numbered(this.menu.options),
       list.length > MENU_SIZE ? `… und ${list.length - MENU_SIZE} weitere – genauer suchen.` : '',
@@ -169,19 +205,19 @@ export class QuizBot {
   }
 
   private async cmdNew(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
-    if (game) return this.say(msg.channelId, `Es läuft schon ein Spiel in <#${game.channelId}>. Die Spielleitung kann es mit \`${this.prefix} ende\` beenden.`);
+    if (game) return this.reply(msg, `Es läuft schon ein Spiel in <#${game.channelId}>. Die Spielleitung kann es mit \`${this.prefix} ende\` beenden.`);
     const text = args.join(' ').trim();
     if (text) return this.chooseBoard(msg, text);
     // No board named → ask instead of picking one.
     const list = await this.getBoards(msg.channelId);
     if (!list) return;
     this.menu = { channelId: msg.channelId, options: list.slice(0, 10), askedBy: msg.author.id, expires: Date.now() + MENU_TTL_MS };
-    await this.say(msg.channelId, [
+    await this.reply(msg, [
       `🎲 ${mention(msg.author.id)}, **welches Quiz** wollt ihr spielen? Schreib den Namen (oder einen Teil davon), ich suche auf quiz-base.`,
       'Oder nimm eins der beliebten Boards per Nummer:',
       ...this.numbered(this.menu.options),
       '`abbrechen` bricht ab.',
-    ].join('\n'));
+    ].join('\n'), `Welches Quiz wollt ihr spielen? Sag den Namen oder eine Nummer. Zum Beispiel: ${this.spokenMenu(this.menu.options, 4)}`);
   }
 
   /** Resolves a board from a number or a name and creates the lobby – or asks back when it is not unambiguous. */
@@ -191,24 +227,38 @@ export class QuizBot {
       const options = menu?.options ?? (await this.getBoards(msg.channelId));
       if (!options) return;
       const board = options[Number(text) - 1];
-      if (!board) return this.say(msg.channelId, `Nummer ${text} gibt es nicht${options.length ? ` (1–${options.length})` : ''}. Schreib sonst den Namen des Quiz.`);
+      if (!board) return this.reply(msg, `Nummer ${text} gibt es nicht${options.length ? ` (1–${options.length})` : ''}. Schreib sonst den Namen des Quiz.`);
       return this.createGame(msg, board);
     }
-    const query = text.replace(/^["„“']+|["„“']+$/g, '').trim();
-    const results = await this.getBoards(msg.channelId, query);
+    const query = text.replace(/^["„“']+|["„“']+$/g, '').replace(/[.!?]+$/, '').trim();
+    if (msg.viaVoice) void this.speak(`Ich suche ${query}.`);
+    let results = await this.getBoards(msg.channelId, query);
     if (!results) return;
+    if (!results.length && query.includes(' ')) {
+      // Spoken/typed titles rarely match exactly ("Allgemeinwissen-Quiz V1") – retry with the most telling word.
+      const word = query.split(/[\s\-–]+/).filter((w) => w.length >= 4).sort((a, b) => b.length - a.length)[0];
+      if (word) results = (await this.getBoards(msg.channelId, word)) ?? [];
+      const close = results.filter((t) => similarity(normalize(t), normalize(query)) >= 0.8);
+      if (close.length === 1) return this.createGame(msg, close[0]!);
+    }
     const exact = results.filter((t) => normalize(t) === normalize(query));
     if (exact.length === 1) return this.createGame(msg, exact[0]!);
     if (results.length === 1) return this.createGame(msg, results[0]!);
 
     const options = results.length ? results.slice(0, MENU_SIZE) : await this.suggest(query);
     this.menu = { channelId: msg.channelId, options, askedBy: msg.author.id, expires: Date.now() + MENU_TTL_MS };
-    if (!results.length) return this.say(msg.channelId, this.notFound(query, options) + ' Schreib einen anderen Namen oder `abbrechen`.');
-    await this.say(msg.channelId, [
+    if (!results.length) {
+      return this.reply(
+        msg,
+        this.notFound(query, options) + ' Schreib einen anderen Namen oder `abbrechen`.',
+        `Zu ${query} habe ich kein Board gefunden. ${options.length ? `Meinst du vielleicht: ${this.spokenMenu(options, 3)} Sag die Nummer oder einen anderen Namen.` : 'Sag einen anderen Namen.'}`,
+      );
+    }
+    await this.reply(msg, [
       `🤔 Zu „${query}“ passen ${results.length} Boards. Welches meinst du? Antworte mit der **Nummer** (oder genauerem Namen, \`abbrechen\`):`,
       ...this.numbered(options),
       results.length > MENU_SIZE ? `… und ${results.length - MENU_SIZE} weitere.` : '',
-    ].filter(Boolean).join('\n'));
+    ].filter(Boolean).join('\n'), `Dazu passen ${results.length} Boards. ${this.spokenMenu(options, 5)} Welche Nummer?`);
   }
 
   private async createGame(msg: ChatMessage, board: string): Promise<void> {
@@ -225,12 +275,16 @@ export class QuizBot {
     };
     this.game = g;
     this.attach(g);
+    if (msg.voiceChannelId && !this.voice && this.voiceReady && this.d.config.voice.autoJoin) {
+      void this.joinVoice(msg.guildId!, msg.voiceChannelId, msg.channelId).catch((e) => this.say(msg.channelId, `⚠️ Voice: ${(e as Error).message}`));
+    }
     await this.say(msg.channelId, `⏳ Erstelle eine Tafelquiz-Lobby mit **${board}** …`);
+    void this.speak(`Alles klar, ich erstelle eine Lobby mit ${board}.`);
     try {
       g.lobby = await session.createLobby(board);
     } catch (e) {
       log.error(`Lobby: ${(e as Error).message}`);
-      await this.say(msg.channelId, `⚠️ Lobby konnte nicht erstellt werden: ${(e as Error).message}`);
+      await this.reply(msg, `⚠️ Lobby konnte nicht erstellt werden: ${(e as Error).message}`, 'Die Lobby konnte ich leider nicht erstellen. Details stehen im Chat.');
       return this.finish(g);
     }
     g.phase = 'lobby';
@@ -242,6 +296,7 @@ export class QuizBot {
       `2. Hier \`${this.prefix} ich <dein quiz-base-Name>\` schreiben, falls ich dich nicht automatisch erkenne.`,
       'Sobald alle bereit und verknüpft sind, geht es los.',
     ].join('\n'));
+    void this.speak('Die Lobby ist offen! Den Link findet ihr im Chat. Gebt auf quiz-base euren Namen ein und klickt auf: Ich bin bereit.');
     g.lobbyTimeout = setTimeout(() => {
       if (this.game === g && g.phase === 'lobby') {
         void this.say(g.channelId, `⌛ Die Lobby wurde nicht innerhalb von ${this.d.config.discord.lobbyTimeoutMin} Minuten gestartet und wird geschlossen.`);
@@ -261,7 +316,7 @@ export class QuizBot {
     const name = args.join(' ').trim();
     if (!name) {
       const current = this.d.store.get(msg.guildId!).links[msg.author.id];
-      return this.say(msg.channelId, current ? `Du bist mit **${current}** verknüpft.` : `Schreib \`${this.prefix} ich <dein Name in quiz-base>\`.`);
+      return this.reply(msg, current ? `Du bist mit **${current}** verknüpft.` : `Schreib \`${this.prefix} ich <dein Name in quiz-base>\`.`);
     }
     await this.link(msg, msg.author.id, name, game);
   }
@@ -270,7 +325,7 @@ export class QuizBot {
     if (!this.isLeader(msg, game)) return this.notLeader(msg);
     const target = msg.mentions[0];
     const name = args.filter((a) => !/^<@!?\d+>$/.test(a)).join(' ').trim();
-    if (!target || !name) return this.say(msg.channelId, `So geht's: \`${this.prefix} link @user <quiz-base-Name>\``);
+    if (!target || !name) return this.reply(msg, `So geht's: \`${this.prefix} link @user <quiz-base-Name>\``);
     await this.link(msg, target, name, game);
   }
 
@@ -284,7 +339,7 @@ export class QuizBot {
     guild.links[userId] = name;
     this.d.store.save(msg.guildId!);
     const note = game && !canonical ? ` (Noch nicht in der Lobby – gerade drin: ${inLobby.join(', ') || 'niemand'}.)` : '';
-    await this.say(msg.channelId, `🔗 ${mention(userId)} = **${name}**${note}`);
+    await this.reply(msg, `🔗 ${mention(userId)} = **${name}**${note}`);
     if (game?.phase === 'lobby') {
       this.scheduleLobbyStatus(game, true);
       this.maybeAutoStart(game);
@@ -292,20 +347,20 @@ export class QuizBot {
   }
 
   private async cmdStatus(msg: ChatMessage, game: ActiveGame | null): Promise<void> {
-    if (!game) return this.say(msg.channelId, `Gerade läuft kein Spiel. \`${this.prefix} neu\` startet eins.`);
-    if (game.phase === 'lobby') return this.say(msg.channelId, this.lobbyStatus(game));
+    if (!game) return this.reply(msg, `Gerade läuft kein Spiel. \`${this.prefix} neu\` startet eins.`);
+    if (game.phase === 'lobby') return this.reply(msg, this.lobbyStatus(game));
     return this.cmdScores(msg, game);
   }
 
   private async cmdStart(msg: ChatMessage, game: ActiveGame | null): Promise<void> {
-    if (!game || game.phase !== 'lobby') return this.say(msg.channelId, 'Es gibt keine offene Lobby.');
+    if (!game || game.phase !== 'lobby') return this.reply(msg, 'Es gibt keine offene Lobby.');
     if (!this.isLeader(msg, game)) return this.notLeader(msg);
     if (!game.canStart) {
       const ready = game.lobbyPlayers.filter((p) => p.ready).length;
-      return this.say(msg.channelId, `Noch nicht alle sind in quiz-base bereit (${ready}/${game.lobbyPlayers.length}).`);
+      return this.reply(msg, `Noch nicht alle sind in quiz-base bereit (${ready}/${game.lobbyPlayers.length}).`);
     }
     const unlinked = game.lobbyPlayers.filter((p) => !this.userFor(game, p.name)).map((p) => p.name);
-    if (unlinked.length) await this.say(msg.channelId, `⚠️ Nicht verknüpft: ${unlinked.join(', ')}. Sie können nicht per Chat wählen oder antworten (die Spielleitung kann mit \`${this.prefix} nimm\` helfen).`);
+    if (unlinked.length) await this.reply(msg, `⚠️ Nicht verknüpft: ${unlinked.join(', ')}. Sie können nicht per Chat wählen oder antworten (die Spielleitung kann mit \`${this.prefix} nimm\` helfen).`);
     this.requestStart(game);
   }
 
@@ -316,65 +371,68 @@ export class QuizBot {
       guild.rules = {};
       this.d.store.save(msg.guildId!);
       if (game) Object.assign(game.session.rules, this.d.config.game);
-      return this.say(msg.channelId, '📏 Regeln auf Standard zurückgesetzt.\n' + rulesText(this.currentRules(msg.guildId!), this.prefix));
+      return this.reply(msg, '📏 Regeln auf Standard zurückgesetzt.\n' + rulesText(this.currentRules(msg.guildId!), this.prefix));
     }
     if (args.length >= 2) return this.cmdRule(msg, args, game);
-    await this.say(msg.channelId, rulesText(game ? game.session.rules : this.currentRules(msg.guildId!), this.prefix));
+    await this.reply(msg, rulesText(game ? game.session.rules : this.currentRules(msg.guildId!), this.prefix));
   }
 
   private async cmdRule(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
     if (game && !this.isLeader(msg, game)) return this.notLeader(msg, 'Während eines Spiels darf nur die Spielleitung Regeln ändern.');
     const [name = '', ...rest] = args;
     const spec = findRule(name);
-    if (!spec || !rest.length) return this.say(msg.channelId, `So geht's: \`${this.prefix} regel <name> <wert>\` – Namen siehst du mit \`${this.prefix} regeln\`.`);
+    if (!spec || !rest.length) return this.reply(msg, `So geht's: \`${this.prefix} regel <name> <wert>\` – Namen siehst du mit \`${this.prefix} regeln\`.`);
     const guild = this.d.store.get(msg.guildId!);
     const rules = this.currentRules(msg.guildId!);
     const err = applyRule(rules, spec, rest.join(''));
-    if (err) return this.say(msg.channelId, `⚠️ ${err}`);
+    if (err) return this.reply(msg, `⚠️ ${err}`);
     (guild.rules as any)[spec.key] = rules[spec.key];
     this.d.store.save(msg.guildId!);
     if (game) (game.session.rules as any)[spec.key] = rules[spec.key];
-    await this.say(msg.channelId, `📏 ${spec.label}: **${formatRuleValue(rules, spec)}**${game ? ' (gilt ab der nächsten Frage)' : ''}`);
+    await this.reply(msg, `📏 ${spec.label}: **${formatRuleValue(rules, spec)}**${game ? ' (gilt ab der nächsten Frage)' : ''}`);
   }
 
   private async cmdBoard(msg: ChatMessage, game: ActiveGame | null): Promise<void> {
-    if (!game?.turn) return this.say(msg.channelId, 'Gerade ist kein Brett offen.');
-    await this.say(msg.channelId, this.turnText(game, game.turn));
+    if (!game?.turn) return this.reply(msg, 'Gerade ist kein Brett offen.');
+    await this.reply(msg, this.turnText(game, game.turn));
   }
 
   private async cmdScores(msg: ChatMessage, game: ActiveGame | null): Promise<void> {
-    if (!game?.players.length) return this.say(msg.channelId, 'Noch keine Punkte.');
-    await this.say(msg.channelId, '📊 ' + this.scoreLine(game));
+    if (!game?.players.length) return this.reply(msg, 'Noch keine Punkte.');
+    await this.reply(msg, '📊 ' + this.scoreLine(game));
   }
 
   private async cmdPickFor(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
-    if (!game?.turn || game.questionOpen) return this.say(msg.channelId, 'Gerade wird keine Karte gewählt.');
+    if (!game?.turn || game.questionOpen) return this.reply(msg, 'Gerade wird keine Karte gewählt.');
     if (!this.isLeader(msg, game)) return this.notLeader(msg);
     await this.handlePick(msg, game, args.join(' '), '@operator', true);
   }
 
   private async cmdOverride(msg: ChatMessage, game: ActiveGame | null, command: 'r' | 'f' | 'skip'): Promise<void> {
-    if (!game || game.phase !== 'running') return this.say(msg.channelId, 'Gerade läuft keine Frage.');
+    if (!game || game.phase !== 'running') return this.reply(msg, 'Gerade läuft keine Frage.');
     if (!this.isLeader(msg, game)) return this.notLeader(msg);
     game.session.bus.emit('operator:command', { command, args: [] });
     await this.d.gateway.react(msg, '👍');
   }
 
   private async cmdCorrect(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
-    if (!game || game.phase !== 'running') return this.say(msg.channelId, 'Gerade läuft kein Spiel.');
+    if (!game || game.phase !== 'running') return this.reply(msg, 'Gerade läuft kein Spiel.');
     if (!this.isLeader(msg, game)) return this.notLeader(msg);
     const delta = Number(args[args.length - 1]?.replace('+', ''));
     const raw = args.slice(0, -1).join(' ');
     const name = game.players.find((p) => normalize(p.name) === normalize(raw))?.name;
-    if (!name || !Number.isFinite(delta)) return this.say(msg.channelId, `So geht's: \`${this.prefix} korrektur <Name> <±Punkte>\``);
+    if (!name || !Number.isFinite(delta)) return this.reply(msg, `So geht's: \`${this.prefix} korrektur <Name> <±Punkte>\``);
     game.session.bus.emit('operator:command', { command: 'punkte', args: [name, String(delta)] });
-    await this.say(msg.channelId, `✏️ ${name}: ${delta > 0 ? '+' : ''}${delta}`);
+    await this.reply(msg, `✏️ ${name}: ${delta > 0 ? '+' : ''}${delta}`);
   }
 
   private async cmdEnd(msg: ChatMessage, game: ActiveGame | null): Promise<void> {
-    if (!game) return this.say(msg.channelId, 'Gerade läuft kein Spiel.');
+    if (!game) return this.reply(msg, 'Gerade läuft kein Spiel.');
     if (!this.isLeader(msg, game)) return this.notLeader(msg);
     await this.say(msg.channelId, '🛑 Spiel wird beendet …');
+    this.voice?.bridge.detach(); // no more "…, du bist dran" while the game shuts down
+    this.voice?.host.clear();
+    void this.speak('Okay, wir hören hier auf.');
     await game.session.endGame().catch(() => {});
     if (game.phase !== 'running') await this.finish(game);
   }
@@ -390,21 +448,29 @@ export class QuizBot {
       const relevant = (game.awaiting && !this.userFor(game, game.awaiting.player)) || (game.turn && parsePick(trimmed, game.turn.grid).kind !== 'none');
       if (relevant && !game.hinted.has(msg.author.id)) {
         game.hinted.add(msg.author.id);
-        await this.say(msg.channelId, `${mention(msg.author.id)} du bist noch nicht verknüpft: \`${this.prefix} ich <dein quiz-base-Name>\``);
+        await this.reply(
+          msg,
+          `${mention(msg.author.id)} du bist noch nicht verknüpft: \`${this.prefix} ich <dein quiz-base-Name>\``,
+          `${msg.author.displayName}, ich weiß noch nicht, wer du auf quiz-base bist. Sag: Quizmaster, ich bin, und deinen Namen.`,
+        );
       }
       return;
     }
 
     if (game.awaiting && game.awaiting.player === name) {
-      game.session.bus.emit('player:answer', { player: name, answer: trimmed.slice(0, 200) });
+      const answer = msg.viaVoice ? cleanSpokenAnswer(trimmed) : trimmed;
+      if (!answer) return; // "ähm, Moment …" – keep listening
+      game.session.bus.emit('player:answer', { player: name, answer: answer.slice(0, 200), spoken: !!msg.viaVoice });
       game.awaiting = null;
+      if (msg.viaVoice) this.voice?.bridge.markVoiceAnswer();
       await this.d.gateway.react(msg, '📝');
       return;
     }
 
     if (game.turn && !game.questionOpen) {
-      if (game.turn.player === name) return this.handlePick(msg, game, trimmed, name, false);
-      if (parsePick(trimmed, game.turn.grid).kind !== 'none') await this.say(msg.channelId, `Gerade ist **${game.turn.player}** am Zug.`);
+      if (game.turn.player === name) return this.handlePick(msg, game, msg.viaVoice ? spokenToDigits(trimmed) : trimmed, name, !!msg.viaVoice);
+      // Over voice, others discuss cards all the time – only correct typed attempts.
+      if (!msg.viaVoice && parsePick(trimmed, game.turn.grid).kind !== 'none') await this.reply(msg, `Gerade ist **${game.turn.player}** am Zug.`);
     }
   }
 
@@ -417,13 +483,18 @@ export class QuizBot {
         return;
       case 'taken': {
         const free = game.turn!.grid.filter((c) => c.col === res.cell.col && !c.answered).map((c) => c.points);
-        return this.say(msg.channelId, `❌ **${res.cell.category} ${res.cell.points}** ist schon weg. ${free.length ? `In ${res.cell.category} noch frei: ${free.join(', ')}.` : `${res.cell.category} ist leer.`}`);
+        return this.reply(msg, `❌ **${res.cell.category} ${res.cell.points}** ist schon weg. ${free.length ? `In ${res.cell.category} noch frei: ${free.join(', ')}.` : `${res.cell.category} ist leer.`}`);
       }
       case 'ambiguous':
       case 'invalid':
-        return this.say(msg.channelId, `🤔 ${res.hint}`);
-      case 'none':
-        if (verbose) await this.say(msg.channelId, '🤔 Welche Karte? Z.B. `Nintendo 200`.');
+        return this.reply(msg, `🤔 ${res.hint}`);
+      case 'none': {
+        const ex = game.turn!.open[0];
+        const once = `pick-hint:${game.turn!.player}:${game.turn!.open.length}`;
+        if (msg.viaVoice && game.hinted.has(once)) return;
+        game.hinted.add(once);
+        if (verbose) await this.reply(msg, '🤔 Welche Karte? Z.B. `Nintendo 200`.', `Welche Karte? Sag zum Beispiel: ${ex ? `${ex.category} für ${ex.points}` : 'Kategorie und Punkte'}.`);
+      }
     }
   }
 
@@ -432,8 +503,12 @@ export class QuizBot {
   private attach(g: ActiveGame): void {
     const on = <K extends keyof HostEvents>(e: K, h: (p: HostEvents[K]) => void) => g.offs.push(g.session.bus.on(e, h));
     const ch = g.channelId;
+    this.voice?.bridge.attach(g.session.bus, g.session.rules);
 
     on('host:lobby', (l) => {
+      const before = new Set(g.lobbyPlayers.map((p) => p.name));
+      const joined = l.players.filter((p) => !before.has(p.name)).map((p) => p.name);
+      if (joined.length && g.phase === 'lobby') void this.speak(`${joined.join(' und ')} ${joined.length > 1 ? 'sind' : 'ist'} da.`);
       g.lobbyPlayers = l.players;
       g.canStart = l.canStart;
       this.autoLink(g);
@@ -480,7 +555,8 @@ export class QuizBot {
     on('host:question', (q) => {
       g.questionOpen = true;
       const extras = [q.hasImage ? '🖼 Bild auf quiz-base' : '', q.hasAudio ? '🎵 Audio läuft auf quiz-base' : ''].filter(Boolean).join(' · ');
-      this.queue(ch, `❔ **${q.category || 'Frage'} · ${q.points} Punkte**\n> ${q.text}${extras ? `\n${extras}` : ''}`);
+      const opts = q.options.length ? '\n' + q.options.map((o, i) => `**${'ABCDEFGH'[i] ?? i + 1}**) ${o}`).join('   ') : '';
+      this.queue(ch, `❔ **${q.category || 'Frage'} · ${q.points} Punkte**\n> ${q.text}${opts}${extras ? `\n${extras}` : ''}`);
     });
     on('host:await-answer', (a) => {
       g.awaiting = a;
@@ -539,6 +615,9 @@ export class QuizBot {
   /** Link quiz-base names to Discord users whose display name matches and who wrote in the channel. */
   private autoLink(g: ActiveGame): void {
     const guild = this.d.store.get(g.guildId);
+    if (this.voice && this.voice.guildId === g.guildId) {
+      for (const m of this.d.gateway.voiceMembers?.(g.guildId, this.voice.voiceChannelId) ?? []) if (!g.seen.has(m.id)) g.seen.set(m.id, m);
+    }
     let changed = false;
     for (const p of g.lobbyPlayers) {
       if (this.userFor(g, p.name)) continue;
@@ -557,7 +636,12 @@ export class QuizBot {
   private maybeAutoStart(g: ActiveGame): void {
     if (!this.d.config.discord.autoStart || g.phase !== 'lobby' || g.startRequested || !g.canStart) return;
     if (g.lobbyPlayers.length < this.d.config.game.minPlayers) return;
-    if (g.lobbyPlayers.every((p) => this.userFor(g, p.name))) this.requestStart(g);
+    const unlinked = g.lobbyPlayers.filter((p) => !this.userFor(g, p.name)).map((p) => p.name);
+    if (!unlinked.length) return this.requestStart(g);
+    if (this.voice && g.lobbyPlayers.every((p) => p.ready) && !g.hinted.has(`voice-unlinked:${unlinked.join()}`)) {
+      g.hinted.add(`voice-unlinked:${unlinked.join()}`);
+      void this.speak(`Alle sind bereit, aber ich weiß noch nicht, wer ${unlinked.join(' und ')} ist. Sagt: Quizmaster, ich bin, und euren Namen.`);
+    }
   }
 
   private requestStart(g: ActiveGame): void {
@@ -592,7 +676,7 @@ export class QuizBot {
   }
 
   private notLeader(msg: ChatMessage, text = 'Das darf nur die Spielleitung (wer die Lobby erstellt hat) oder ein Server-Admin.'): Promise<void> {
-    return this.say(msg.channelId, `🔒 ${text}`);
+    return this.reply(msg, `🔒 ${text}`);
   }
 
   private currentRules(guildId: string): GameRules {
@@ -634,6 +718,10 @@ export class QuizBot {
     return suggestions.length ? [`${base} Meintest du (Nummer antworten):`, ...this.numbered(suggestions)].join('\n') : base;
   }
 
+  private spokenMenu(list: string[], max: number): string {
+    return list.slice(0, max).map((t, i) => `${i + 1}: ${t}.`).join(' ');
+  }
+
   private numbered(list: string[]): string[] {
     return list.map((t, i) => `\`${i + 1}\` ${t}`);
   }
@@ -644,10 +732,13 @@ export class QuizBot {
     if (g.phase === 'running' && g.players.length) {
       const ranking = [...g.players].sort((a, b) => b.score - a.score).map((p, i) => `${medal(i)} ${this.who(g, p.name)} — **${p.score}**`);
       this.queue(g.channelId, ['🏁 **Spiel beendet.** Endstand:', ...ranking].join('\n'));
+      void this.speak(gameOverLine(g.players));
     }
     clearTimeout(g.lobbyTimeout);
     clearTimeout(g.lobbyStatusTimer);
     g.offs.forEach((off) => off());
+    this.voice?.bridge.detach();
+    this.touchVoice();
     await g.session.close().catch(() => {});
     await this.flush(g.channelId);
   }
@@ -694,5 +785,195 @@ export class QuizBot {
       await this.game.session.endGame().catch(() => {});
       await this.finish(this.game);
     }
+    await this.leaveVoice(null, 'Ich muss leider los. Tschüss!');
   }
+
+  // ───────────────────────────── voice ─────────────────────────────
+
+  private get voiceReady(): boolean {
+    return !!this.d.voice && !!this.d.gateway.joinVoice && this.d.config.voice.enabled;
+  }
+
+  /** Chat reply; if the message was spoken, also answer by voice (`spoken` or a speakable version of `text`). */
+  private async reply(msg: ChatMessage, text: string, spoken?: string): Promise<void> {
+    await this.say(msg.channelId, text);
+    if (msg.viaVoice) void this.speak(spoken ?? briefSpeech(text));
+  }
+
+  private speak(text: string, key?: string): Promise<void> {
+    return this.voice ? this.voice.bridge.say(text, key) : Promise.resolve();
+  }
+
+  private async cmdVoice(msg: ChatMessage, args: string[]): Promise<void> {
+    if (/^(aus|off|stop|raus|leave|verlassen)$/i.test(args[0] ?? '')) {
+      if (!this.voice) return this.reply(msg, 'Ich bin in keinem Voice-Channel.');
+      return this.leaveVoice(msg.channelId, 'Okay, ich gehe. Bis zum nächsten Quiz!');
+    }
+    if (!this.voiceReady) return this.reply(msg, '🔇 Die Sprachsteuerung ist auf diesem Rechner nicht eingerichtet: `npx qbhost voice-setup` (siehe docs/VOICE.md).');
+    if (!msg.voiceChannelId) return this.reply(msg, '🎧 Geh zuerst in einen Voice-Channel, dann komme ich dazu.');
+    try {
+      await this.joinVoice(msg.guildId!, msg.voiceChannelId, msg.channelId);
+    } catch (e) {
+      await this.reply(msg, `⚠️ Voice: ${(e as Error).message}`);
+    }
+  }
+
+  private async joinVoice(guildId: string, voiceChannelId: string, textChannelId: string): Promise<void> {
+    if (this.voiceJoining) return this.voiceJoining;
+    if (this.voice?.voiceChannelId === voiceChannelId) return;
+    this.voiceJoining = (async () => {
+      if (this.voice) await this.leaveVoice(null);
+      const kit = this.d.voice!;
+      const vc = this.d.config.voice;
+      await this.say(textChannelId, '⏳ Komme in den Voice-Channel …');
+      const [transport] = await Promise.all([this.d.gateway.joinVoice!(guildId, voiceChannelId, { silenceMs: vc.silenceMs, maxSpeechSec: vc.maxSpeechSec }), kit.warmup()]);
+      const host = new VoiceHost({
+        transport,
+        stt: kit.stt,
+        tts: kit.tts,
+        cfg: vc,
+        prompt: () => this.voicePrompt(),
+        onSpeech: (speaker, text) => this.onSpeech(speaker, text),
+        onClose: () => {
+          if (this.voice?.host === host) {
+            clearTimeout(this.voice.idleTimer);
+            this.voice = null;
+          }
+        },
+      });
+      const bridge = new VoiceBridge(host, { scoresEvery: vc.scoresEvery, extraTimeSec: vc.extraTimeSec, board: () => this.game?.board ?? 'dem Quiz' });
+      this.voice = { host, bridge, guildId, textChannelId, voiceChannelId, seq: 0 };
+      if (this.game) {
+        bridge.attach(this.game.session.bus, this.game.session.rules);
+        this.autoLink(this.game);
+      }
+      this.touchVoice();
+      await this.say(textChannelId, `🎙️ Ich bin im Voice-Channel <#${voiceChannelId}> und höre zu, solange ich drin bin. Aufnahmen werden nicht gespeichert, nur Erkanntes, auf das ich reagiere, schreibe ich hier mit. Sprachbefehle: „Quizmaster, Hilfe“.`);
+      void this.speak(
+        this.game
+          ? 'Hallo! Ich bin euer Quizmaster und höre ab jetzt zu.'
+          : 'Hallo! Ich bin euer Quizmaster und höre ab jetzt zu. Sagt: Quizmaster, neues Quiz, und den Namen des Quiz.',
+      );
+    })().finally(() => (this.voiceJoining = null));
+    return this.voiceJoining;
+  }
+
+  private async leaveVoice(textChannelId: string | null, goodbye?: string): Promise<void> {
+    const v = this.voice;
+    if (!v) return;
+    this.voice = null;
+    clearTimeout(v.idleTimer);
+    v.bridge.detach();
+    if (goodbye) await v.host.say(goodbye).catch(() => {});
+    await v.host.close().catch(() => {});
+    if (textChannelId) await this.say(textChannelId, '👋 Voice-Channel verlassen.');
+  }
+
+  /** Leaves an idle voice channel after a while without a game or speech. */
+  private touchVoice(): void {
+    const v = this.voice;
+    if (!v) return;
+    clearTimeout(v.idleTimer);
+    v.idleTimer = setTimeout(() => {
+      if (this.voice === v && !this.game) void this.leaveVoice(v.textChannelId, 'Hier ist es still geworden. Ich verabschiede mich!');
+      else this.touchVoice();
+    }, VOICE_IDLE_MS);
+  }
+
+  /** Vocabulary hints for the recogniser – categories, names, board titles. Never solutions. */
+  private voicePrompt(): string {
+    const g = this.game;
+    const words = ['Quizmaster', 'Buzzer'];
+    if (g?.turn) words.push(...g.turn.categories);
+    if (g) words.push(...this.knownNames(g));
+    if (!g && this.menu) words.push(...this.menu.options.slice(0, 6));
+    return words.join(', ').slice(0, 400);
+  }
+
+  private async onSpeech(speaker: Speaker, text: string): Promise<void> {
+    const v = this.voice;
+    if (!v) return;
+    this.touchVoice();
+    const msg: ChatMessage = {
+      id: `voice-${++v.seq}`,
+      channelId: v.textChannelId,
+      guildId: v.guildId,
+      author: { id: speaker.id, username: speaker.username, displayName: speaker.displayName, isBot: false },
+      content: text,
+      mentionsBot: false,
+      mentions: [],
+      canManage: false,
+      voiceChannelId: v.voiceChannelId,
+      viaVoice: true,
+    };
+    const g = this.game;
+    const transcript = () => {
+      log.info(`🎙 ${speaker.displayName}: „${text}“`);
+      this.queue(v.textChannelId, `-# 🎙️ ${speaker.displayName}: „${text}“`);
+    };
+
+    // 1) "Quizmaster, …" commands.
+    const rest = stripWakeWord(text, this.d.config.voice.wakeWords);
+    if (rest !== null) {
+      transcript();
+      const cmd = voiceCommand(rest);
+      if (!cmd) return void this.speak('Das habe ich nicht verstanden. Sag: Quizmaster, Hilfe.');
+      if (cmd.name === 'wiederholen') return v.bridge.repeat();
+      if (cmd.name === 'brett' && g?.turn) return v.bridge.freeCards();
+      if (cmd.name === 'stand' && g) return v.bridge.scores();
+      if (cmd.name === 'hilfe') return void this.speak(VOICE_HELP);
+      if (g && msg.channelId === g.channelId) g.seen.set(speaker.id, speaker);
+      return this.commands[cmd.name]?.(msg, cmd.args, g);
+    }
+
+    // 2) Buzzer by voice.
+    if (g?.phase === 'running' && v.bridge.buzzerOpen && isBuzz(text)) {
+      const name = this.nameFor(g, speaker.id);
+      if (!name) return;
+      transcript();
+      g.session.bus.emit('player:buzz', { player: name });
+      return;
+    }
+
+    // 3) Picks, answers and menu replies – only from the person who is expected to speak.
+    if (g) {
+      const name = this.nameFor(g, speaker.id);
+      const expected = !!name && ((g.awaiting && g.awaiting.player === name) || (g.turn && !g.questionOpen && g.turn.player === name));
+      if (!expected) {
+        if (!name && g.phase === 'running') return this.onMessage(msg); // unlinked → hint once
+        return;
+      }
+      transcript();
+      return this.onMessage(msg);
+    }
+    if (this.menu?.askedBy === speaker.id) {
+      transcript();
+      return this.onMessage(msg);
+    }
+  }
+
+  private async cmdRepeat(msg: ChatMessage, game: ActiveGame | null): Promise<void> {
+    this.voice?.bridge.repeat();
+    if (!msg.viaVoice && game?.turn) await this.reply(msg, this.turnText(game, game.turn));
+  }
+}
+
+/** Strips spoken fillers ("Ähm, ich glaube das ist …"); '' if it was only stalling. */
+export function cleanSpokenAnswer(text: string): string {
+  const prefix = /^\s*(äh+m*|ähm|hm+|also|okay|ok|ja|na ja|naja|ich (glaube|denke|würde sagen|sage|tippe auf|tippe)|meine antwort ist|die antwort ist|das ist|das sind|das war|es ist|ist es)([,.!…:\s]+|$)/i;
+  let t = text.trim();
+  for (let prev = ''; prev !== t && prefix.test(t) && t.replace(prefix, '').trim(); ) {
+    prev = t;
+    t = t.replace(prefix, '').trim();
+  }
+  t = t.replace(/[.!…]+$/, '').trim();
+  return STALLING.test(t.toLowerCase().replace(/[,.!?…]/g, '').trim()) ? '' : t;
+}
+
+/** A speakable short version of a chat message: first lines, no markdown, max ~280 chars. */
+function briefSpeech(text: string): string {
+  const s = forSpeech(text.split('\n').slice(0, 3).join('\n'));
+  if (s.length <= 280) return s;
+  const cut = s.slice(0, 280);
+  return cut.slice(0, Math.max(cut.lastIndexOf('. '), 120)) + '.';
 }

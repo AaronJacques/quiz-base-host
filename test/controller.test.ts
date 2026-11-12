@@ -107,3 +107,24 @@ describe('TafelquizController', () => {
     expect(page.players.find((p) => p.name === 'Anna')!.score).toBe(-100);
   }, 10000);
 });
+
+describe('TafelquizController – stale turn marker', () => {
+  it('announces the next player by rotation when quiz-base still shows the previous one', async () => {
+    const { bus, page, controller } = setup({ buzzerOnWrong: false });
+    page.staleTurnDisplay = true;
+    const turns: string[] = [];
+    bus.on('host:turn', ({ player, open }) => {
+      turns.push(player);
+      if (!open.length) return void page.endGame();
+      setTimeout(() => bus.emit('player:pick', { player, col: open[0]!.col, row: open[0]!.row }), 5);
+    });
+    const answered: string[] = [];
+    bus.on('host:await-answer', ({ player }) => {
+      answered.push(player);
+      setTimeout(() => bus.emit('player:answer', { player, answer: answered.length === 1 ? 'zehn' : 'tatooine' }), 5);
+    });
+    await controller.run(new AbortController().signal);
+    expect(turns.slice(0, 2)).toEqual(['Anna', 'Ben']);
+    expect(answered).toEqual(['Anna', 'Ben']); // the one who picked is the one who answers
+  }, 20000);
+});

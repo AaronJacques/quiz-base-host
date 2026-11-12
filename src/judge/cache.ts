@@ -25,8 +25,12 @@ export class JudgeCache {
     }
   }
 
-  static verdictKey(question: string, reference: string | null, answer: string): string {
-    return [normalize(question), normalize(reference ?? ''), normalize(answer)].join('␟');
+  /**
+   * Bump `JUDGE_RULES_VERSION` (llm-judge.ts) when the judging rules change – old verdicts then no longer match.
+   * Spoken answers are judged by sound, so they get their own entries.
+   */
+  static verdictKey(question: string, reference: string | null, answer: string, opts: { spoken?: boolean; version?: number } = {}): string {
+    return [`v${opts.version ?? 1}${opts.spoken ? 's' : ''}`, normalize(question), normalize(reference ?? ''), normalize(answer)].join('␟');
   }
 
   static questionKey(question: string, imageUrl?: string): string {

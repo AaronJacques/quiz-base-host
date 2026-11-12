@@ -1,0 +1,124 @@
+import { execFile } from 'node:child_process';
+import { createWriteStream, existsSync, mkdirSync, renameSync } from 'node:fs';
+import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { promisify } from 'node:util';
+import type { Config } from '../config.ts';
+import { createLogger } from '../core/logger.ts';
+import { WhisperServerStt } from './stt.ts';
+import { createTts } from './tts.ts';
+
+const log = createLogger('voice');
+const run = promisify(execFile);
+
+const WHISPER_MODEL_URL = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin';
+const PIPER_VOICE_BASE = 'https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high';
+const PIPER_VERSION = 'piper-tts==1.3.0';
+
+export interface VoiceKitImpl {
+  stt: WhisperServerStt;
+  tts: ReturnType<typeof createTts>;
+  warmup(): Promise<void>;
+  close(): Promise<void>;
+}
+
+/** Shared STT/TTS for all voice sessions; servers start lazily on first use. */
+export function createVoiceKit(config: Config): VoiceKitImpl {
+  const stt = new WhisperServerStt(config.voice);
+  const tts = createTts(config.voice);
+  return {
+    stt,
+    tts,
+    warmup: async () => {
+      await Promise.all([stt.start(), tts.synth('Hallo.')]);
+    },
+    close: async () => {
+      await Promise.all([stt.close(), tts.close()]);
+    },
+  };
+}
+
+/** What is missing for voice; empty = ready. */
+export async function voiceProblems(config: Config): Promise<string[]> {
+  const v = config.voice;
+  const out: string[] = [];
+  try {
+    await run(v.whisperBin, ['--help']);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') out.push(`${v.whisperBin} fehlt (brew install whisper-cpp)`);
+  }
+  if (!existsSync(path.resolve(v.dir, v.whisperModel))) out.push(`Whisper-Modell fehlt (${v.whisperModel})`);
+  if (v.tts === 'piper') {
+    if (!existsSync(path.resolve(v.dir, 'venv/bin/python'))) out.push('Piper-Umgebung fehlt');
+    if (!existsSync(path.resolve(v.dir, v.piperVoice))) out.push(`Piper-Stimme fehlt (${v.piperVoice})`);
+  }
+  return out;
+}
+
+async function download(url: string, file: string): Promise<void> {
+  if (existsSync(file)) return;
+  mkdirSync(path.dirname(file), { recursive: true });
+  log.info(`Lade ${path.basename(file)} …`);
+  const res = await fetch(url);
+  if (!res.ok || !res.body) throw new Error(`Download ${url}: HTTP ${res.status}`);
+  const total = Number(res.headers.get('content-length') ?? 0);
+  let done = 0;
+  let lastPct = -10;
+  const body = Readable.fromWeb(res.body as never);
+  body.on('data', (c: Buffer) => {
+    done += c.length;
+    const pct = total ? Math.floor((done / total) * 100) : 0;
+    if (pct >= lastPct + 10) {
+      lastPct = pct;
+      log.info(`  ${path.basename(file)}: ${pct} %`);
+    }
+  });
+  await pipeline(body, createWriteStream(`${file}.part`));
+  renameSync(`${file}.part`, file);
+}
+
+/** `qbhost voice-setup`: installs whisper.cpp (Homebrew), downloads models, creates the Piper venv. */
+export async function setupVoice(config: Config): Promise<void> {
+  const v = config.voice;
+  mkdirSync(v.dir, { recursive: true });
+
+  try {
+    await run(v.whisperBin, ['--help']);
+    log.info('whisper.cpp ✓');
+  } catch {
+    log.info('Installiere whisper.cpp (brew install whisper-cpp) …');
+    await run('brew', ['install', 'whisper-cpp'], { maxBuffer: 64 * 1024 * 1024 }).catch((e) => {
+      throw new Error(`whisper.cpp konnte nicht installiert werden (${(e as Error).message.split('\n')[0]}). Manuell: brew install whisper-cpp`);
+    });
+  }
+  await download(WHISPER_MODEL_URL, path.resolve(v.dir, v.whisperModel));
+
+  if (v.tts === 'piper') {
+    const py = path.resolve(v.dir, 'venv/bin/python');
+    if (!existsSync(py)) {
+      log.info('Erstelle Python-Umgebung für Piper …');
+      await run('python3', ['-m', 'venv', path.resolve(v.dir, 'venv')]);
+    }
+    log.info(`Installiere ${PIPER_VERSION} …`);
+    await run(py, ['-m', 'pip', 'install', '-q', PIPER_VERSION], { maxBuffer: 64 * 1024 * 1024 });
+    const voice = path.resolve(v.dir, v.piperVoice);
+    if (v.piperVoice === 'models/de_DE-thorsten-high.onnx') {
+      await download(`${PIPER_VOICE_BASE}.onnx`, voice);
+      await download(`${PIPER_VOICE_BASE}.onnx.json`, `${voice}.json`);
+    } else if (!existsSync(voice)) throw new Error(`Eigene Piper-Stimme ${voice} fehlt.`);
+  }
+
+  log.info('Selbsttest: Sprechen → Erkennen …');
+  const kit = createVoiceKit(config);
+  try {
+    const pcm = await kit.tts.synth('Willkommen zum Tafelquiz. Anna, du bist dran.');
+    const text = await kit.stt.transcribe(pcm);
+    log.info(`Erkannt: „${text}“`);
+    if (!/tafelquiz/i.test(text)) log.warn('Die Erkennung klingt ungewöhnlich – Modell/Stimme prüfen.');
+  } finally {
+    await kit.close();
+  }
+  log.info('Sprachsteuerung ist eingerichtet ✓');
+}
+

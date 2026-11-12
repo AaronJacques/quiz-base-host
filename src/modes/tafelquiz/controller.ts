@@ -11,7 +11,7 @@ import { scoreFor } from './rules.ts';
 
 const log = createLogger('tafelquiz');
 
-type AnswerOutcome = { kind: 'answer'; answer: string } | { kind: 'override'; correct: boolean } | { kind: 'skip' } | { kind: 'timeout' };
+type AnswerOutcome = { kind: 'answer'; answer: string; spoken?: boolean } | { kind: 'override'; correct: boolean } | { kind: 'skip' } | { kind: 'timeout' };
 
 export interface TafelquizDeps {
   page: TafelquizPort;
@@ -33,6 +33,8 @@ export class TafelquizController implements GameMode {
   readonly name = 'Tafelquiz';
   private lastPick: (BoardCell & { player: string }) | null = null;
   private finishedBoards = new Set<number>();
+  /** After we closed a question with "Nächster Spieler": who quiz-base must show next, and who it showed before. */
+  private rotation: { from: string; to: string; waited?: boolean } | null = null;
   private playerSig = '';
   private lobbySig = '';
   private codeAnnounced = false;
@@ -128,14 +130,39 @@ export class TafelquizController implements GameMode {
       return;
     }
 
-    const current = s.players.find((p) => p.isTurn) ?? s.players[0];
+    let current = s.players.find((p) => p.isTurn) ?? s.players[0];
     if (!current) return void (await sleep(this.d.pollMs));
+    // quiz-base sometimes keeps showing "Am Zug" at the previous player although "Nächster Spieler"
+    // already passed the turn on (it corrects itself when the next card opens). Wait a bit, then trust the order.
+    const rot = this.rotation;
+    let staleName: string | null = null;
+    if (rot && current.name === rot.from) {
+      let shown: string | undefined = current.name;
+      if (!rot.waited) {
+        rot.waited = true;
+        const fresh = await this.d.page.waitFor((x) => x.phase !== 'board' || x.players.find((p) => p.isTurn)?.name !== rot.from, 6000, 300);
+        if (fresh && fresh.phase !== 'board') return;
+        shown = fresh?.players.find((p) => p.isTurn)?.name ?? shown;
+      }
+      if (shown === rot.from) {
+        const next = s.players.find((p) => p.name === rot.to);
+        if (next) {
+          log.warn(`quiz-base zeigt „Am Zug“ noch bei ${rot.from} – laut Reihenfolge ist ${rot.to} dran`);
+          staleName = rot.from;
+          current = next;
+        }
+      } else return; // the page caught up – next loop reads the right player
+    } else this.rotation = null; // page shows someone else → quiz-base is in charge again
     const categories = [...new Set(s.grid.map((c) => c.category))];
     this.d.bus.emit('host:turn', { player: current.name, open, grid: s.grid, categories, board: s.boards });
     this.status('board', `${current.name} ist am Zug – wähle Kategorie und Punkte.`);
 
+    const turnName = current.name;
     const pick = await this.whilePage(
-      (x) => x.phase === 'board' && x.players.find((p) => p.isTurn)?.name === current.name,
+      (x) => {
+        const shown = x.players.find((p) => p.isTurn)?.name;
+        return x.phase === 'board' && (shown === turnName || (!!staleName && shown === staleName));
+      },
       (signal) =>
         this.d.bus.waitFor(
           'player:pick',
@@ -151,6 +178,7 @@ export class TafelquizController implements GameMode {
       return;
     }
     const cell = open.find((c) => c.col === pick.col && c.row === pick.row)!;
+    this.rotation = null;
     this.lastPick = { ...cell, player: current.name };
     this.say(`${current.name} nimmt ${cell.category} für ${cell.points}.`);
     await this.d.page.openCell(cell.col, cell.row);
@@ -171,6 +199,7 @@ export class TafelquizController implements GameMode {
       text: q.text,
       hasImage: q.imageUrls.length > 0,
       hasAudio: q.audio.present,
+      options: q.options.map((o) => o.label),
     });
     if (q.audio.present && this.d.game.autoplayAudio) await this.d.page.playAudio();
 
@@ -196,7 +225,11 @@ export class TafelquizController implements GameMode {
     await sleep(this.d.game.revealPauseSec * 1000);
     const before = await this.d.page.state();
     const prevTurn = before.players.find((p) => p.isTurn)?.name;
-    if (before.phase === 'question') await this.d.page.closeQuestion();
+    if (before.phase === 'question') {
+      await this.d.page.closeQuestion();
+      const order = before.players.map((p) => p.name);
+      if (prevTurn && order.length >= 2) this.rotation = { from: prevTurn, to: order[(order.indexOf(prevTurn) + 1) % order.length]! };
+    }
     // quiz-base rotates "Am Zug" a moment after the board reappears – wait for it,
     // otherwise the next pick would be attributed to the previous player.
     await this.d.page.waitFor(
@@ -238,7 +271,7 @@ export class TafelquizController implements GameMode {
       case 'answer': {
         answerText = outcome.answer;
         const reference = await referencePromise;
-        result = await this.d.judge.judge.judge({ question: q.text, reference, answer: outcome.answer, hints });
+        result = await this.d.judge.judge.judge({ question: q.text, reference, answer: outcome.answer, hints, spoken: outcome.spoken });
       }
     }
 
@@ -246,7 +279,12 @@ export class TafelquizController implements GameMode {
     const delta = scoreFor(q.points, correct, viaBuzzer, this.d.game);
     if (result.verdict === 'unsure') log.warn('Keine sichere Entscheidung – werte als falsch ohne Abzug');
     const appliedDelta = result.verdict === 'unsure' ? 0 : delta;
-    if (appliedDelta !== 0) await this.d.page.award(player, appliedDelta);
+    if (appliedDelta !== 0) {
+      const before = (await this.d.page.state()).players.find((p) => p.name === player)?.score;
+      await this.d.page.award(player, appliedDelta);
+      // quiz-base shows new scores with a delay – wait so the next score announcement is current.
+      if (before !== undefined) await this.d.page.waitFor((x) => x.players.find((p) => p.name === player)?.score === before + appliedDelta, 3000, 150);
+    }
     await this.d.page.animate(correct ? 'Richtig' : 'Falsch');
     this.d.bus.emit('host:verdict', { player, answer: answerText, correct, delta: appliedDelta, reason: result.reason });
     this.say(`${correct ? '✅' : '❌'} ${player}: "${answerText}" ist ${correct ? 'richtig' : 'falsch'}${appliedDelta ? ` (${appliedDelta > 0 ? '+' : ''}${appliedDelta})` : ''}.`);
@@ -269,12 +307,19 @@ export class TafelquizController implements GameMode {
       this.notice('buzzer-open', `Buzzer frei! Wer es weiß, drückt auf quiz-base den Buzzer (${this.d.game.buzzWindowSec} s).`);
       this.status('question', 'Buzzer frei');
 
-      const buzzed = await this.d.page.waitFor(
-        (x) => x.phase !== 'question' || (x.question?.buzzer.status === 'buzzed' && !!x.question.buzzer.buzzedBy),
-        this.d.game.buzzWindowSec * 1000,
-        250,
-      );
-      const who = buzzed?.question?.buzzer.buzzedBy;
+      // Whoever is first: the quiz-base buzzer or a buzz claimed by voice (player:buzz).
+      const voice = new AbortController();
+      const viaBus = this.d.bus
+        .waitFor('player:buzz', (b) => !tried.has(b.player), this.d.game.buzzWindowSec * 1000, voice.signal)
+        .then((b) => b?.player ?? null);
+      const viaPage = this.d.page
+        .waitFor((x) => x.phase !== 'question' || (x.question?.buzzer.status === 'buzzed' && !!x.question.buzzer.buzzedBy), this.d.game.buzzWindowSec * 1000, 250)
+        .then((x) => x?.question?.buzzer.buzzedBy ?? null);
+      const first = await Promise.race([viaBus.then((p) => ({ src: 'bus', p })), viaPage.then((p) => ({ src: 'page', p }))]);
+      // Voice window timed out → the page wait ends at the same moment; take its result.
+      const who = first.p ?? (first.src === 'bus' ? await viaPage : null);
+      voice.abort();
+      if (who && (await this.d.page.state()).question?.buzzer.status === 'open') await this.d.page.resetBuzzer(); // lock the page buzzer for the others
       if (!who) {
         this.say('Niemand hat gebuzzert.');
         this.notice('no-buzz', 'Niemand hat gebuzzert.');
@@ -335,7 +380,7 @@ export class TafelquizController implements GameMode {
     outer.addEventListener('abort', onAbort);
     const answerP = this.d.bus
       .waitFor('player:answer', (a) => a.player === player || a.player === '@operator', timeoutMs, ac.signal)
-      .then((a): AnswerOutcome | null => (a ? { kind: 'answer', answer: a.answer } : null));
+      .then((a): AnswerOutcome | null => (a ? { kind: 'answer', answer: a.answer, spoken: a.spoken } : null));
     const opP = this.d.bus
       .waitFor('operator:command', (c) => ['richtig', 'falsch', 'r', 'f', 'skip'].includes(c.command), timeoutMs, ac.signal)
       .then((c: HostEvents['operator:command'] | null): AnswerOutcome | null =>

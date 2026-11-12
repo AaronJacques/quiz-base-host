@@ -15,7 +15,7 @@ export interface HostEvents {
   'host:turn': { player: string; open: BoardCell[]; grid: BoardCell[]; categories: string[]; board: { active: number; count: number } };
   /** Short structured game notices that chat channels may render (the terminal uses host:say). */
   'host:notice': { kind: 'buzzer-open' | 'buzzed' | 'no-buzz' | 'reminder' | 'board-switch' | 'operator-needed' | 'started'; player?: string; text: string; /** Private detail (may contain the solution) – only for the game leader. */ detail?: string };
-  'host:question': { player: string; category: string; points: number; text: string; hasImage: boolean; hasAudio: boolean };
+  'host:question': { player: string; category: string; points: number; text: string; hasImage: boolean; hasAudio: boolean; /** Multiple-choice labels (without the correct flag). */ options: string[] };
   'host:await-answer': { player: string; timeoutSec: number; viaBuzzer: boolean };
   'host:verdict': { player: string; answer: string; correct: boolean; delta: number; reason?: string };
   'host:reveal': { answer: string | null };
@@ -25,7 +25,10 @@ export interface HostEvents {
 
   // ── world → host ─────────────────────────────────────────────
   'player:pick': { player: string; col: number; row: number };
-  'player:answer': { player: string; answer: string };
+  /** `spoken` = transcribed from speech, so it may contain recognition errors. */
+  'player:answer': { player: string; answer: string; spoken?: boolean };
+  /** A buzz claimed outside quiz-base (e.g. someone shouts "Buzzer!" in voice chat). */
+  'player:buzz': { player: string };
   'operator:command': { command: string; args: string[] };
 }
 

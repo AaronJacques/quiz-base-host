@@ -98,3 +98,42 @@ export function referenceVariants(note: string): string[] {
   for (const part of withoutParens.split(/\s*(?:\/|;|\boder\b|\bor\b|\|)\s*/i)) if (part.trim()) variants.add(part.trim());
   return [...variants].filter((v) => normalize(v).length > 0);
 }
+
+/**
+ * Kölner Phonetik – German sound code: words that sound alike get the same code
+ * ("Flaggen"/"Flecken" → 3546, "Meyer"/"Maier" → 67). Used to forgive speech-recognition
+ * and spelling mix-ups when matching category names.
+ */
+export function colognePhonetic(word: string): string {
+  const s = word
+    .toLowerCase()
+    .replace(/ä/g, 'a').replace(/ö/g, 'o').replace(/ü/g, 'u').replace(/ß/g, 's')
+    .replace(/[^a-z]/g, '');
+  let codes = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    const prev = s[i - 1] ?? '';
+    const next = s[i + 1] ?? '';
+    let code = '';
+    if ('aeijouy'.includes(c)) code = '0';
+    else if (c === 'h') code = '';
+    else if (c === 'b') code = '1';
+    else if (c === 'p') code = next === 'h' ? '3' : '1';
+    else if (c === 'd' || c === 't') code = 'csz'.includes(next) && next ? '8' : '2';
+    else if ('fvw'.includes(c)) code = '3';
+    else if ('gkq'.includes(c)) code = '4';
+    else if (c === 'c') {
+      if (i === 0) code = 'ahkloqrux'.includes(next) && next ? '4' : '8';
+      else code = 'sz'.includes(prev) && prev ? '8' : 'ahkoqux'.includes(next) && next ? '4' : '8';
+    } else if (c === 'x') code = 'ckq'.includes(prev) && prev ? '8' : '48';
+    else if (c === 'l') code = '5';
+    else if (c === 'm' || c === 'n') code = '6';
+    else if (c === 'r') code = '7';
+    else if ('sz'.includes(c)) code = '8';
+    codes += code;
+  }
+  let out = '';
+  for (const ch of codes) if (ch !== out.at(-1)) out += ch;
+  return out ? out[0] + out.slice(1).replace(/0/g, '') : '';
+}
+

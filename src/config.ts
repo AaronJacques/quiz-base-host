@@ -82,8 +82,7 @@ export const ConfigSchema = z.object({
     .object({
       /** Token kommt aus der Umgebung (DISCORD_TOKEN bzw. .env), nie aus der Config-Datei. */
       tokenEnv: z.string().default('DISCORD_TOKEN'),
-      /** Überwachte Channel-IDs: dort reichen `!quiz …`-Befehle. Leer = Befehle mit Präfix überall. Ein @Mention funktioniert immer. */
-      /** Channels the bot works in (prefix and @mention). Empty = every channel it can see. */
+      /** Nur in diesen Channels reagiert der Bot (Präfix und @Mention). Leer = überall, wo er lesen kann. */
       channelIds: z.array(z.string()).default([]),
       prefix: z.string().default('!quiz'),
       /** Lobby wird geschlossen, wenn das Spiel nach so vielen Minuten nicht gestartet ist. */
@@ -91,6 +90,43 @@ export const ConfigSchema = z.object({
       /** Automatisch starten, sobald alle in quiz-base bereit UND mit Discord verknüpft sind. */
       autoStart: z.boolean().default(true),
       dataDir: z.string().default('.qbhost/discord'),
+    })
+    .prefault({}),
+
+  /** Sprachsteuerung im Discord-Voice-Channel. Alles lokal: whisper.cpp (STT) + Piper (TTS). Einrichtung: `qbhost voice-setup`. */
+  voice: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Bei `!quiz neu` automatisch in den Voice-Channel der Spielleitung kommen. */
+      autoJoin: z.boolean().default(true),
+      /** Ordner für Modelle und Python-Umgebung. */
+      dir: z.string().default('.qbhost/voice'),
+      whisperBin: z.string().default('whisper-server'),
+      /** Relativ zu `dir`. */
+      whisperModel: z.string().default('models/ggml-large-v3-turbo-q5_0.bin'),
+      whisperPort: z.number().int().default(8178),
+      language: z.string().default('de'),
+      /** `piper` (natürlich, lokal) oder `say` (macOS, ohne Einrichtung). */
+      tts: z.enum(['piper', 'say']).default('piper'),
+      /** Relativ zu `dir`. */
+      piperVoice: z.string().default('models/de_DE-thorsten-high.onnx'),
+      /** >1 = langsamer, <1 = schneller. */
+      piperLengthScale: z.number().default(0.95),
+      sayVoice: z.string().default('Anna'),
+      /** Sprechpause, nach der eine Äußerung als beendet gilt. */
+      silenceMs: z.number().int().default(900),
+      /** Kürzere/leisere Äußerungen werden verworfen (Husten, Klicks, Rauschen). */
+      minSpeechMs: z.number().int().default(350),
+      minRms: z.number().default(250),
+      maxSpeechSec: z.number().default(15),
+      /** Was jemand sagt, während der Bot spricht, wird ignoriert (Schutz vor Echo ohne Kopfhörer). */
+      ignoreWhileSpeaking: z.boolean().default(true),
+      /** Rufname für Sprachbefehle („Quizmaster, Stand“). */
+      wakeWords: z.array(z.string()).default(['quizmaster', 'quiz master', 'quizmeister', 'quizhost', 'quiz host']),
+      /** Zusätzliche Sekunden für Antwort- und Buzzerzeit, solange der Bot spricht (Vorlesen braucht Zeit). */
+      extraTimeSec: z.number().int().default(10),
+      /** Punktestand nach jeder n-ten Frage ansagen (0 = nie). */
+      scoresEvery: z.number().int().default(3),
     })
     .prefault({}),
 

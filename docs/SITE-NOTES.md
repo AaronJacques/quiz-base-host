@@ -29,6 +29,8 @@ Live erkundet mit Host + 2 Testspielern. Diese Datei dokumentiert, worauf `src/s
 ## Spiel (Host, URL `/host`)
 
 - Bei Musikfragen-Boards erst ein Gate: Button `Sound aktivieren` (auch bei jedem Spieler).
+- „Am Zug“ bleibt nach „Frage schließen → Nächster Spieler“ **manchmal am vorherigen Spieler hängen** (bis zum Öffnen der nächsten Karte). Der Controller merkt sich deshalb die Reihenfolge (`rotation`) und verlässt sich nach 6 s darauf.
+- Punktestände aktualisieren sich erst ~0,5–2 s nach der Vergabe – vor Ansagen auf den neuen Wert warten.
 - Header: `aria-label`s `Punkte` (manueller Dialog), `Reihenfolge mischen`, `Spiel beenden`; bei 2 Boards Buttons `Board 1`/`Board 2` (aktiv: Klasse `from-btn-primary-from`).
 - Raster: Spalten = Container, deren erstes Kind die Kategorie ist, danach `button` mit Punktetext. Beantwortet: `title="Frage wieder öffnen"`. DOM-Reihenfolge = Spalte für Spalte.
 - Spielerliste: `ul[aria-label=Spieler] button` → `span[title=<Name>]`, `[data-testid=animated-score]`, Text `Am Zug` bzw. `Buzzer`.

@@ -76,3 +76,12 @@ describe('FuzzyJudge (fuzzy-only mode)', () => {
     expect((await judge.judge({ question: 'q', reference: '4', answer: '5' })).verdict).toBe('wrong');
   });
 });
+
+describe('spoken answers', () => {
+  it('accepts answers that sound like the solution', async () => {
+    const { FuzzyJudge } = await import('../src/judge/fuzzy-judge.ts');
+    const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
+    expect((await j.judge({ question: 'Wer?', reference: 'Dschingis Khan', answer: 'Tschingis Kahn', spoken: true })).verdict).toBe('correct');
+    expect((await j.judge({ question: 'Wer?', reference: 'Dschingis Khan', answer: 'Tschingis Kahn' })).verdict).not.toBe('correct');
+  });
+});

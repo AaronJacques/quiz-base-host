@@ -5,6 +5,8 @@ export interface JudgeInput {
   answer: string;
   /** Extra context the LLM may use (e.g. YouTube title of an audio question). */
   hints?: string[];
+  /** Transcribed from speech: judge by sound, not by spelling ("Preaking Bad" = "Breaking Bad"). */
+  spoken?: boolean;
 }
 
 export type Verdict = 'correct' | 'wrong' | 'unsure';

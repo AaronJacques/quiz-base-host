@@ -1,5 +1,5 @@
 import type { AnswerJudge, JudgeInput, JudgeResult } from './judge.ts';
-import { isNonAnswer, normalize, numbers, referenceVariants, similarity, tokens } from './normalize.ts';
+import { colognePhonetic, isNonAnswer, normalize, numbers, referenceVariants, similarity, tokens } from './normalize.ts';
 
 /**
  * Deterministic, free judge. It is intentionally conservative about saying
@@ -10,7 +10,7 @@ import { isNonAnswer, normalize, numbers, referenceVariants, similarity, tokens 
 export class FuzzyJudge implements AnswerJudge {
   constructor(private opts: { acceptThreshold: number; rejectThreshold: number; rejectDissimilar: boolean }) {}
 
-  async judge({ reference, answer }: JudgeInput): Promise<JudgeResult> {
+  async judge({ reference, answer, spoken }: JudgeInput): Promise<JudgeResult> {
     if (isNonAnswer(answer)) return { verdict: 'wrong', method: 'rule', confidence: 1, reason: 'keine Antwort' };
     if (!reference) return { verdict: 'unsure', method: 'fuzzy', confidence: 0, reason: 'keine Referenz' };
 
@@ -40,6 +40,12 @@ export class FuzzyJudge implements AnswerJudge {
       }
 
       best = Math.max(best, similarity(v, answer));
+      // Spoken answers: compare how they sound (Kölner Phonetik over the whole phrase).
+      if (spoken && vNorm.replace(/\s/g, '').length >= 5) {
+        const pa = tokens(answer).map(colognePhonetic).join('');
+        const pv = tokens(v).map(colognePhonetic).join('');
+        if (pa && pa === pv) return { verdict: 'correct', method: 'fuzzy', confidence: 0.9, reason: 'klingt gleich' };
+      }
     }
 
     if (best >= this.opts.acceptThreshold) return { verdict: 'correct', method: 'fuzzy', confidence: best, reason: `ähnlich (${best.toFixed(2)})` };

@@ -21,7 +21,9 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",
+    "@discordjs/voice": "^0.19.2",
     "discord.js": "^14.28.1",
+    "opusscript": "^0.1.1",
     "playwright": "1.58.2",
     "zod": "^4.6.7"
   },

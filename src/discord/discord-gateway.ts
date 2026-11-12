@@ -1,4 +1,6 @@
 import { Client, Events, GatewayIntentBits, Partials, PermissionFlagsBits, type Message } from 'discord.js';
+import { DiscordVoiceTransport } from '../voice/discord-voice.ts';
+import type { Speaker, VoiceTransport } from '../voice/transport.ts';
 import { createLogger } from '../core/logger.ts';
 import type { ChatGateway, ChatMessage } from './gateway.ts';
 
@@ -7,7 +9,7 @@ const log = createLogger('discord');
 /** discord.js implementation of the ChatGateway. */
 export class DiscordGateway implements ChatGateway {
   private client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages],
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages, GatewayIntentBits.GuildVoiceStates],
     partials: [Partials.Channel],
   });
   private handlers: ((m: ChatMessage) => void | Promise<void>)[] = [];
@@ -57,6 +59,7 @@ export class DiscordGateway implements ChatGateway {
       mentionsBot,
       mentions: [...m.mentions.users.keys()].filter((id) => id !== botId),
       canManage: !!m.member?.permissions.has(PermissionFlagsBits.ManageGuild),
+      voiceChannelId: m.member?.voice.channelId ?? null,
     };
     this.raw.set(m.id, m);
     if (this.raw.size > 200) this.raw.delete(this.raw.keys().next().value!);
@@ -76,6 +79,34 @@ export class DiscordGateway implements ChatGateway {
 
   async react(msg: ChatMessage, emoji: string): Promise<void> {
     await this.raw.get(msg.id)?.react(emoji).catch(() => {});
+  }
+
+  async joinVoice(guildId: string, channelId: string, opts: { silenceMs: number; maxSpeechSec: number }): Promise<VoiceTransport> {
+    const guild = await this.client.guilds.fetch(guildId);
+    const channel = await guild.channels.fetch(channelId);
+    if (!channel?.isVoiceBased()) throw new Error('Das ist kein Voice-Channel.');
+    const me = guild.members.me ?? (await guild.members.fetchMe());
+    const perms = channel.permissionsFor(me);
+    if (!perms?.has(PermissionFlagsBits.Connect) || !perms.has(PermissionFlagsBits.Speak)) {
+      throw new Error(`Mir fehlen im Voice-Channel „${channel.name}“ die Rechte „Verbinden“ und/oder „Sprechen“.`);
+    }
+    return DiscordVoiceTransport.join({
+      guildId,
+      channelId,
+      adapterCreator: guild.voiceAdapterCreator,
+      ...opts,
+      speaker: (userId) => {
+        const member = guild.members.cache.get(userId);
+        if (!member || member.user.bot) return null;
+        return { id: userId, username: member.user.username, displayName: member.displayName };
+      },
+    });
+  }
+
+  voiceMembers(guildId: string, channelId: string): Speaker[] {
+    const channel = this.client.guilds.cache.get(guildId)?.channels.cache.get(channelId);
+    if (!channel?.isVoiceBased()) return [];
+    return [...channel.members.values()].filter((m) => !m.user.bot).map((m) => ({ id: m.id, username: m.user.username, displayName: m.displayName }));
   }
 
   async destroy(): Promise<void> {

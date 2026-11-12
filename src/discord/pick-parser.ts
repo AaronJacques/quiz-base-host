@@ -1,5 +1,5 @@
 import type { BoardCell } from '../core/types.ts';
-import { normalize, similarity } from '../judge/normalize.ts';
+import { colognePhonetic, normalize, similarity } from '../judge/normalize.ts';
 
 export type PickResult =
   /** Message doesn't look like a pick at all (chatter) – ignore silently. */
@@ -97,6 +97,8 @@ function categoryScore(normText: string, words: string[], category: string): num
       if (w === cw) best = Math.max(best, 0.95);
       else if (w.length >= 3 && cw.startsWith(w)) best = Math.max(best, 0.85);
       else if (w.length >= 4 && similarity(w, cw) >= 0.72) best = Math.max(best, 0.75);
+      // Sounds the same ("Flecken" for "Flaggen") – typical speech-recognition mix-up.
+      else if (w.length >= 4 && cw.length >= 4 && colognePhonetic(w) === colognePhonetic(cw)) best = Math.max(best, 0.72);
     }
   }
   return best;

@@ -4,6 +4,7 @@ import { GameSession, fetchPublicBoards } from '../session.ts';
 import { QuizBot } from './bot.ts';
 import { DiscordGateway } from './discord-gateway.ts';
 import { GuildStore } from './store.ts';
+import { createVoiceKit, voiceProblems } from '../voice/index.ts';
 
 const log = createLogger('discord');
 
@@ -14,6 +15,12 @@ export async function runDiscordBot(config: Config): Promise<void> {
     throw new Error(`Kein Discord-Token: setze ${config.discord.tokenEnv} (z.B. in .env). Anleitung: docs/DISCORD.md`);
   }
   const gateway = new DiscordGateway();
+  let voice = null;
+  if (config.voice.enabled) {
+    const problems = await voiceProblems(config);
+    if (problems.length) log.warn(`Sprachsteuerung aus: ${problems.join('; ')} – \`npx qbhost voice-setup\``);
+    else voice = createVoiceKit(config);
+  }
   const bot = new QuizBot({
     gateway,
     config,
@@ -21,14 +28,16 @@ export async function runDiscordBot(config: Config): Promise<void> {
     // Discord games have no terminal/web channel – the chat is the interface.
     createSession: (cfg) => new GameSession(cfg, []),
     listBoards: (query) => fetchPublicBoards(config, query),
+    voice,
   });
   await gateway.login(token);
-  log.info(`Bereit. Befehle mit "${config.discord.prefix} hilfe" oder @Mention.`);
+  log.info(`Bereit. Befehle mit "${config.discord.prefix} hilfe" oder @Mention.${voice ? ' Sprachsteuerung: an.' : ''}`);
 
   await new Promise<void>((resolve) => {
     const stop = async () => {
       log.info('Fahre herunter …');
       await bot.shutdown().catch(() => {});
+      await voice?.close().catch(() => {});
       await gateway.destroy();
       resolve();
     };

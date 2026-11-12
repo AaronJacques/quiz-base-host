@@ -8,7 +8,7 @@
    - Unter **Privileged Gateway Intents** **Message Content Intent** einschalten. Ohne ihn sieht der Bot keine Nachrichten und kann keine Karten oder Antworten lesen.
 3. Links **OAuth2 → URL Generator**:
    - Scopes: `bot`
-   - Bot Permissions: `View Channels`, `Send Messages`, `Read Message History`, `Add Reactions`
+   - Bot Permissions: `View Channels`, `Send Messages`, `Read Message History`, `Add Reactions`, für Sprache zusätzlich `Connect` und `Speak`
    - Generierte URL öffnen → Server auswählen → autorisieren.
 
 ## 2. Starten
@@ -108,8 +108,12 @@ Wer die Lobby erstellt hat, und alle mit der Berechtigung „Server verwalten“
 
 Ist die automatische Bewertung unsicher, fragt der Bot die Spielleitung. Die Lösung bekommt sie **per DM**, damit sie im Channel nicht vor der Buzzer-Runde verraten wird. Aus demselben Grund erscheinen Begründungen zu falschen Antworten erst mit der Auflösung.
 
+## Sprache
+
+Der Bot kann auch im Voice-Channel moderieren und zuhören: **[VOICE.md](VOICE.md)**.
+
 ## Grenzen
 
 - Ein Spiel gleichzeitig pro Bot-Instanz (ein Browser).
-- Buzzern passiert auf quiz-base, nicht in Discord: quiz-base entscheidet, wer zuerst war.
+- Buzzern passiert auf quiz-base oder per Zuruf im Voice-Channel (nicht per Text-Chat).
 - Audio (YouTube) spielt quiz-base bei allen Spielern synchron ab. Musik-Boards brauchen bei jedem Spieler einmal „Sound aktivieren“.

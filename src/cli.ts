@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { parseArgs } from 'node:util';
 import { runHost } from './app.ts';
 import { runDiscordBot } from './discord/index.ts';
+import { setupVoice, voiceProblems } from './voice/index.ts';
 import { createDriver } from './browser/index.ts';
 import { loadConfig, type Config } from './config.ts';
 import { EventBus } from './core/events.ts';
@@ -20,6 +21,7 @@ Befehle:
   host     Spiel hosten, Bedienung über Terminal + Web-Spieler-Pult (Standard)
   discord  Als Discord-Bot laufen (Token in DISCORD_TOKEN bzw. .env)
   boards   Öffentliche Tafelquiz-Boards auflisten (qbhost boards [suche])
+  voice-setup  Sprachsteuerung einrichten (whisper.cpp, Modelle, Piper) – einmalig
   probe    Aktuellen Seitenzustand als JSON ausgeben (Debug)
   judge    Bewertung testen:  qbhost judge "<Frage>" "<Lösung>" "<Antwort>"
   doctor   Umgebung prüfen
@@ -101,6 +103,11 @@ switch (command) {
     break;
   }
 
+  case 'voice-setup': {
+    await setupVoice(config);
+    break;
+  }
+
   case 'probe': {
     const driver = createDriver(config);
     await driver.open();
@@ -140,6 +147,11 @@ switch (command) {
       const v = b.version();
       await b.close();
       return v;
+    });
+    await check('Sprachsteuerung (STT/TTS lokal)', async () => {
+      const problems = await voiceProblems(config);
+      if (problems.length) throw new Error(`${problems.join('; ')} → npx qbhost voice-setup`);
+      return `whisper.cpp + ${config.voice.tts === 'piper' ? 'Piper' : 'say'} bereit`;
     });
     await check(`LLM (${config.llm.provider}/${config.llm.model})`, async () => {
       const meter = new UsageMeter();

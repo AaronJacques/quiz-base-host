@@ -1,5 +1,6 @@
 import { createLogger } from '../core/logger.ts';
 import { JudgeCache } from './cache.ts';
+import { JUDGE_RULES_VERSION } from './llm-judge.ts';
 import type { AnswerJudge, JudgeInput, JudgeResult } from './judge.ts';
 
 const log = createLogger('judge');
@@ -16,7 +17,7 @@ export class CascadeJudge implements AnswerJudge {
   ) {}
 
   async judge(input: JudgeInput): Promise<JudgeResult> {
-    const key = JudgeCache.verdictKey(input.question, input.reference, input.answer);
+    const key = JudgeCache.verdictKey(input.question, input.reference, input.answer, { spoken: input.spoken, version: JUDGE_RULES_VERSION });
     let last: JudgeResult = { verdict: 'unsure', method: 'fuzzy', confidence: 0 };
 
     for (const [i, stage] of this.stages.entries()) {

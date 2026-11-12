@@ -59,3 +59,15 @@ describe('parsePick', () => {
     expect(formatBoard(grid).split('\n')).toHaveLength(4);
   });
 });
+
+describe('parsePick – speech mix-ups', () => {
+  it('matches categories that sound alike (Kölner Phonetik)', async () => {
+    const { colognePhonetic } = await import('../src/judge/normalize.ts');
+    expect(colognePhonetic('Flaggen')).toBe(colognePhonetic('Flecken'));
+    expect(colognePhonetic('Meyer')).toBe(colognePhonetic('Maier'));
+    const grid = ['Flaggen', 'Sport', 'Geschichte'].flatMap((category, col) => [100, 200].map((points, row) => ({ col, row, category, points, answered: false })));
+    const r = parsePick('Flecken für 200', grid);
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') expect(r.cell.category).toBe('Flaggen');
+  });
+});
