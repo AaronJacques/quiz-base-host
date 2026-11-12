@@ -2,7 +2,7 @@
 // Only Discord is replaced: chat → log file + HTTP, voice room → LoopbackTransport.
 // Player browsers (Anna, Ben) join quiz-base automatically once the lobby link appears.
 import http from 'node:http';
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { chromium, type Browser } from 'playwright';
 import { loadConfig } from '../../src/config.ts';
 import { QuizBot } from '../../src/discord/bot.ts';
@@ -23,12 +23,21 @@ const config = loadConfig('qbhost.config.json', {
 
 const chatLog = `${DIR}/chat.log`;
 writeFileSync(chatLog, '');
+// Listening positions of earlier runs would make `client.mjs listen` wait for sentences that never come.
+for (const f of readdirSync(DIR)) if (/^seq-.*\.txt$/.test(f)) rmSync(`${DIR}/${f}`, { force: true });
 const status = { phase: 'start', questions: 0, over: false, joinUrl: '' };
 const saveStatus = () => writeFileSync(`${DIR}/status.json`, JSON.stringify(status));
 saveStatus();
 
-const room = new LoopbackTransport(4790);
+// A closed room cannot be reused – a rejoin (`!quiz voice` after `voice aus`) gets a new one on the same port.
+let room = new LoopbackTransport(4790);
 await room.listen();
+async function openRoom(): Promise<LoopbackTransport> {
+  if (!room.closed) return room;
+  room = new LoopbackTransport(4790, 1, room.lastSeq);
+  await room.listen();
+  return room;
+}
 const people = { Anna: { id: 'u-anna', username: 'anna', displayName: 'Anna' }, Ben: { id: 'u-ben', username: 'ben', displayName: 'Ben' } };
 
 let handler: (m: ChatMessage) => void | Promise<void> = () => {};
@@ -52,7 +61,7 @@ const gw: ChatGateway = {
   },
   sendDirect: async (u, text) => void appendFileSync(chatLog, `[DM ${u}] ${text}\n`),
   react: async (_m, e) => void appendFileSync(chatLog, `[react ${e}]\n`),
-  joinVoice: async () => room,
+  joinVoice: () => openRoom(),
   voiceMembers: () => Object.values(people),
 };
 

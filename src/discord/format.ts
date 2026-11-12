@@ -32,9 +32,16 @@ export function helpText(prefix: string): string {
 
 export function rulesText(rules: GameRules, prefix: string): string {
   const lines = RULES.map((r) => `• ${r.label}: **${formatRuleValue(rules, r)}**  \`${r.names[0]}\``);
-  return ['**📏 Regeln** (Prozent vom Fragewert)', ...lines, '', `Ändern: \`${prefix} regel <name> <wert>\``].join('\n');
+  const bonus = rules.bonusTimeSec > 0 ? [`🎙️ Solange ich im Voice-Channel moderiere: **+${rules.bonusTimeSec} s** Antwort- und Buzzerzeit.`] : [];
+  return ['**📏 Regeln** (Prozent vom Fragewert)', ...lines, ...bonus, '', `Ändern: \`${prefix} regel <name> <wert>\``].join('\n');
 }
 
 export function medal(i: number): string {
   return ['🥇', '🥈', '🥉'][i] ?? `${i + 1}.`;
+}
+
+/** "🥇 Anna — **300**" per player, best first. Equal scores share the place (a tie gets two 🥇, the next one 🥉). */
+export function rankingLines(players: { name: string; score: number }[], label: (name: string) => string = (n) => `**${n}**`): string[] {
+  const sorted = [...players].sort((a, b) => b.score - a.score);
+  return sorted.map((p) => `${medal(sorted.filter((o) => o.score > p.score).length)} ${label(p.name)} — **${p.score}**`);
 }

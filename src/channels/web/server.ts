@@ -18,7 +18,7 @@ interface Snapshot {
   turn: HostEvents['host:turn'] | null;
   question: HostEvents['host:question'] | null;
   awaiting: HostEvents['host:await-answer'] | null;
-  verdict: HostEvents['host:verdict'] | null;
+  verdict: Omit<HostEvents['host:verdict'], 'reason'> | null;
   reveal: string | null;
   feed: string[];
   over: boolean;
@@ -66,7 +66,8 @@ export class WebCompanion implements Channel {
       this.snap.awaiting = a;
       this.push('await', a);
     });
-    bus.on('host:verdict', (v) => {
+    bus.on('host:verdict', ({ reason: _reason, ...v }) => {
+      // The judge's reason often names the solution – phones never get it (not even after the reveal).
       Object.assign(this.snap, { verdict: v, awaiting: null });
       this.push('verdict', v);
     });

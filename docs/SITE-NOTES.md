@@ -29,7 +29,7 @@ Live erkundet mit Host + 2 Testspielern. Diese Datei dokumentiert, worauf `src/s
 ## Spiel (Host, URL `/host`)
 
 - Bei Musikfragen-Boards erst ein Gate: Button `Sound aktivieren` (auch bei jedem Spieler).
-- „Am Zug“ bleibt nach „Frage schließen → Nächster Spieler“ **manchmal am vorherigen Spieler hängen** (bis zum Öffnen der nächsten Karte). Der Controller merkt sich deshalb die Reihenfolge (`rotation`) und verlässt sich nach 6 s darauf.
+- „Am Zug“ bleibt nach „Frage schließen → Nächster Spieler“ **manchmal am vorherigen Spieler hängen** (bis zum Öffnen der nächsten Karte, teils noch kurz danach). Der Controller merkt sich deshalb die Reihenfolge (`rotation`) und verlässt sich nach 6 s darauf. Wer antwortet, bestimmt er aus seiner eigenen Kartenwahl (`lastPick`), nicht aus der Anzeige; nur eine von Hand im Browser geöffnete Karte nimmt „Am Zug“ der Seite.
 - Punktestände aktualisieren sich erst ~0,5–2 s nach der Vergabe – vor Ansagen auf den neuen Wert warten.
 - Header: `aria-label`s `Punkte` (manueller Dialog), `Reihenfolge mischen`, `Spiel beenden`; bei 2 Boards Buttons `Board 1`/`Board 2` (aktiv: Klasse `from-btn-primary-from`).
 - Raster: Spalten = Container, deren erstes Kind die Kategorie ist, danach `button` mit Punktetext. Beantwortet: `title="Frage wieder öffnen"`. DOM-Reihenfolge = Spalte für Spalte.
@@ -38,7 +38,7 @@ Live erkundet mit Host + 2 Testspielern. Diese Datei dokumentiert, worauf `src/s
 ### Offene Frage
 
 - `section[aria-label="Aktive Frage"]`: `span` „`<n> Punkte`“, erstes `p` = Fragetext, `img` (oft `/_next/image?url=…`, manchmal `data:`-URI, manchmal kaputt), `p` „Richtige Antwort (Notiz):“ + nächstes `p` = Notiz oder „Keine Notiz hinterlegt“.
-- Audio: `p` „Audio für diese Frage“, Button `Abspielen` (→ `Pause` während Wiedergabe), `Stop`, YouTube-`iframe[title]` (Titel verrät oft die Lösung), „wird für alle Spieler synchronisiert“.
+- Audio: `p` „Audio für diese Frage“, Button `Abspielen` (→ `Pause` während Wiedergabe), `Stop`, YouTube-`iframe[title]` (Titel verrät oft die Lösung), „wird für alle Spieler synchronisiert“. Der Titel ist die Identität der Audiofrage für den Lösungs-Cache; ohne Titel (oder bei `data:`-Bildern, die der Probe als `data:` meldet) wird eine per LLM bestimmte Lösung nicht gecacht.
 - `section[aria-label=Timer]`: Zahl-Input, `Start` (läuft: `Stopp`), Presets `10 s`/`20 s`/`30 s`/`60 s`.
 - `section[aria-label=Buzzer]` `p`: „<Name> ist dran, Buzzer gesperrt“ | „Warten auf Buzzer...“ (offen) | „<Name> hat gebuzzert!“ (`role=status`). Buttons `Buzzer freigeben` / `Buzzer zurücksetzen`.
 - `section[aria-label="Punkte vergeben"]`: `strong` = Zielspieler (springt automatisch auf Buzzernden). Buttons `aria-label`: „`<n> Punkte an <Name>`“ (voll + halb) und „`<n/2> Punkte von <Name> abziehen`“. Anderen Spieler durch Klick in der Spielerliste wählen.

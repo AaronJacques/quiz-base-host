@@ -29,12 +29,18 @@ export function stripWakeWord(text: string, wakeWords: string[]): string | null 
   return null;
 }
 
+/**
+ * Ending the game is the one command that cannot be undone – only whole, unambiguous phrases count
+ * ("Spiel beenden"), never a word inside a sentence ("kannst du aufhören zu reden", "Schlussrunde").
+ */
+const END_RE = /^(?:(?:das |dieses )?(?:spiel|quiz) (?:beenden|abbrechen|ende)|beende (?:das|dieses) (?:spiel|quiz)|wir beenden (?:das|dieses) (?:spiel|quiz)|(?:spiel|quiz) ist (?:zu ende|vorbei)|beenden|ende|schluss|schluss für heute|lass uns aufhören|wir hören auf)$/;
+
 /** Maps a spoken instruction (after the wake word) to a bot command + args. */
 export function voiceCommand(rest: string): { name: string; args: string[] } | null {
   const s = speechNorm(rest).replace(/^(bitte|mal|kannst du|könntest du)\s+/, '').replace(/\s+bitte$/, '');
   if (!s) return { name: 'hilfe', args: [] };
   let m: RegExpMatchArray | null;
-  if (/(spiel beenden|beende das spiel|^beenden$|^ende$|aufhören|schluss)/.test(s)) return { name: 'ende', args: [] };
+  if (END_RE.test(s)) return { name: 'ende', args: [] };
   if ((m = s.match(/^(?:ein |eine )?(?:neues?|neue|neuen) (?:quiz|spiel|lobby|runde|board)(?: (?:mit|zu|zum thema|über))?(?: (.*))?$/))) return { name: 'neu', args: m[1] ? m[1].split(' ') : [] };
   if ((m = s.match(/^(?:lass uns (.+) spielen|wir spielen (.+))$/))) return { name: 'neu', args: (m[1] ?? m[2])!.split(' ') };
   if ((m = s.match(/^(?:ich bin|mein name ist|ich heiße) (.+)$/))) return { name: 'ich', args: m[1]!.split(' ') };
@@ -52,17 +58,22 @@ export function voiceCommand(rest: string): { name: string; args: string[] } | n
 }
 
 /**
- * "Buzzer!", "Ich!", "Hier!", "Ich weiß es" – short claims during the buzzer window.
- * A bare "ja" does not count: it is said all the time in side talk.
+ * "Buzzer!", "Ich!", "Hier!", "Ich weiß es" – short claims during the buzzer window, as the whole
+ * utterance. A bare "ja" does not count (side talk), nor a question ("Ich?") or a sentence that only
+ * mentions the buzzer ("kein Buzzer für mich").
  */
 export function isBuzz(text: string): boolean {
+  if (/\?\s*$/.test(text.trim())) return false;
   const s = speechNorm(text);
   if (!s || s.split(' ').length > 4) return false;
-  return /^(buzzer|buzz|bass|ich|ich ich|hier|ich weiß|ich weiß es|ich weiß das|ich will|ich hab s|ich habs|ich hab es)( buzzer)?$/.test(s) || /\bbuzzer\b/.test(s);
+  return /^(?:(?:ich|hier) )?(?:buzzer|buzz|ich|ich ich|hier|hier hier|ich weiß|ich weiß es|ich weiß das|ich will|ich hab s|ich habs|ich hab es)(?: (?:buzzer|hier))?$/.test(s);
 }
 
-/** Fillers that may come before the answer keyword ("Okay, äh, meine Antwort ist …"). */
-const ANSWER_LEAD = String.raw`(?:(?:äh+m*|ähm|hm+|okay|ok|also|gut|na gut|ja|nein|ne|nee|nö|doch|warte|moment|sorry|dann|so|und)[\s,.!…:–-]*)*`;
+/**
+ * Fillers that may come before the answer keyword ("Okay, äh, meine Antwort ist …"). Confirmation words
+ * belong here too: "Genau, meine Antwort ist zehn" is a new answer, not the "Ja" to the old one.
+ */
+const ANSWER_LEAD = String.raw`(?:(?:äh+m*|ähm|hm+|okay|ok|also|gut|na gut|ja|jap|jep|jo|genau|richtig|korrekt|stimmt|exakt|klar|passt|nein|ne|nee|nö|doch|warte|moment|sorry|dann|so|und)[\s,.!…:–-]*)*`;
 /** "Meine Antwort ist", "Antwort:", "Die Antwort lautet", "Meine finale Antwort ist", "Ich antworte mit" … */
 const ANSWER_KEY = String.raw`(?:(?:meine|unsere|die)\s+)?(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort(?:\s+(?:ist|is|lautet|wäre|heißt|sei))?|ich antworte(?:\s+mit)?`;
 const ANSWER_RE = new RegExp(String.raw`^\s*${ANSWER_LEAD}(?:${ANSWER_KEY})(?=[\s,.:;!?…–-]|$)[\s,.:;!…–-]*(.*)$`, 'isu');
@@ -82,6 +93,7 @@ export function extractAnswer(text: string): string | null {
 export function confirmReply(text: string): 'yes' | 'no' | null {
   const s = speechNorm(text);
   if (!s || s.split(' ').length > 6) return null;
+  if (extractAnswer(text) !== null) return null; // "Genau, meine Antwort ist …" brings a new answer
   const end = String.raw`(?=\s|$)`;
   if (new RegExp(`^(nein|ne|nee|nö|nä|falsch|stopp|stop|halt|warte|moment|doch nicht|nicht|korrektur|anders)${end}`, 'u').test(s)) return 'no';
   if (/(^|\s)(nicht|nein)(\s|$)/.test(s)) return 'no';

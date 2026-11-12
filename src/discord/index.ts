@@ -14,6 +14,8 @@ export async function runDiscordBot(config: Config): Promise<void> {
   if (!token) {
     throw new Error(`Kein Discord-Token: setze ${config.discord.tokenEnv} (z.B. in .env). Anleitung: docs/DISCORD.md`);
   }
+  // The bot serves every server at once – a stray promise rejection is logged, it must not end the process.
+  process.on('unhandledRejection', (e) => log.error(`Unbehandelter Fehler: ${(e as Error)?.stack ?? e}`));
   const gateway = new DiscordGateway();
   let voice = null;
   if (config.voice.enabled) {

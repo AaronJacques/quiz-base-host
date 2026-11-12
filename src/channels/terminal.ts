@@ -22,6 +22,10 @@ export class TerminalChannel implements Channel {
     bus.on('host:status', ({ message }) => this.print(`· ${message}`));
     bus.on('host:question', (q) => this.print(`\n❔ [${q.category} ${q.points}] ${q.text}${q.hasImage ? ' 🖼' : ''}${q.hasAudio ? ' 🎵' : ''}`));
     bus.on('host:game-over', () => this.print('\nSpiel beendet. Ctrl+C zum Beenden.'));
+    // The operator console is private: questions to the game leader come with the solution.
+    bus.on('host:notice', (n) => {
+      if (n.kind === 'operator-needed' && n.detail) this.print(`❓ ${n.detail}`);
+    });
 
     if (!process.stdin.isTTY && process.env.QBHOST_STDIN !== '1') return;
     this.rl = readline.createInterface({ input: process.stdin });

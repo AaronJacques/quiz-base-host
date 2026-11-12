@@ -20,7 +20,7 @@ npm run doctor                      # prüft Token, Claude CLI, Browser
 npx qbhost discord
 ```
 
-Der Bot muss auf einem Rechner laufen, der während des Spiels an ist (er steuert einen Browser, der die Host-Ansicht auf quiz-base öffnet). Standard ist ein unsichtbarer Chromium (`"browser": { "headless": true }` in `qbhost.config.json`). Zum Zuschauen `false` setzen oder `--driver orca --page <id>` verwenden.
+Der Bot muss auf einem Rechner laufen, der während des Spiels an ist (er steuert einen Browser, der die Host-Ansicht auf quiz-base öffnet). Standard ist ein sichtbarer Chromium. Auf einem Server oder wenn das Fenster stört, `"browser": { "headless": true }` in `qbhost.config.json` setzen. Zum Zuschauen in Orca: `--driver orca --page <id>`.
 
 ### Optional: auf bestimmte Channels beschränken
 
@@ -99,12 +99,21 @@ Wenn der Bot dich fragt („✍️ @Anna, deine Antwort?“), ist deine **nächs
 !quiz regeln reset                → Standard (quiz-base-Klassik: +100 % / −50 %)
 ```
 
-Werte: `50%`, `0.5`, `1/2`, `halb`, `2x`, `nichts`. Regeln gelten pro Server und bleiben gespeichert. Während eines Spiels darf nur die Spielleitung sie ändern; sie gelten ab der nächsten Frage.
+Werte: `50%`, `0.5`, `1/2`, `halb`, `2x`, `nichts`. Regeln gelten pro Server und bleiben gespeichert. Während eines Spiels darf nur die Spielleitung sie ändern; sie gelten ab der nächsten Frage. `regeln reset` setzt nur diese Punkte- und Zeitregeln zurück – Autostart und die Sprach-Zusatzzeit bleiben, wie der Bot sie für das Spiel gesetzt hat.
 
 ### Spielleitung
 
-Wer die Lobby erstellt hat, und alle mit der Berechtigung „Server verwalten“:
+Wer die Lobby erstellt hat, und alle mit der Berechtigung „Server verwalten“ **auf dem Server, auf dem das Spiel läuft** (Admin-Rechte auf einem anderen Server zählen nicht):
 `!quiz los` · `!quiz richtig` / `!quiz falsch` (Bewertung überstimmen) · `!quiz skip` · `!quiz nimm <Karte>` (für jemanden wählen) · `!quiz korrektur <Name> <±Punkte>` · `!quiz link @user <Name>` · `!quiz ende`.
+
+**Überstimmen** mit `!quiz richtig` / `!quiz falsch`:
+- während jemand antworten soll oder der Bot dich bei einer unsicheren Antwort fragt → ersetzt die Bewertung;
+- nach der Bewertung, bis die nächste Karte gewählt ist (Buzzer-Runde, Auflösung, Kartenwahl) → **korrigiert die letzte Bewertung**: die Punkte werden über die normale Punktekorrektur angepasst (z.B. „zwölf“ falsch −50 → richtig: +150, also +100 insgesamt). Wird eine Antwort so richtig, endet eine laufende Buzzer-Runde;
+- während der Bot noch bewertet, oder wenn es nichts zu überstimmen gibt, sagt er das, statt 👍 zu geben. Dann hilft `!quiz korrektur`.
+
+`!quiz skip` überspringt die Frage ohne Punkte, solange eine Antwort erwartet wird, und beendet sonst eine laufende Buzzer-Runde (Lösung kommt sofort).
+
+`!quiz ende` mitten in einer Frage beendet das Spiel ohne Bewertung der offenen Antwort: kein Abzug, keine Klicks mehr auf der Seite.
 
 Ist die automatische Bewertung unsicher, fragt der Bot die Spielleitung. Die Lösung bekommt sie **per DM**, damit sie im Channel nicht vor der Buzzer-Runde verraten wird. Aus demselben Grund erscheinen Begründungen zu falschen Antworten erst mit der Auflösung.
 
@@ -114,6 +123,7 @@ Der Bot kann auch im Voice-Channel moderieren und zuhören: **[VOICE.md](VOICE.m
 
 ## Grenzen
 
-- Ein Spiel gleichzeitig pro Bot-Instanz (ein Browser).
+- Ein Spiel gleichzeitig pro Bot-Instanz (ein Browser). Es gehört zum Server, auf dem es erstellt wurde: Andere Server sehen es nicht, können es nicht steuern, keine neue Lobby öffnen und den Bot nicht aus dessen Voice-Channel holen („Ich hoste gerade ein Spiel auf einem anderen Server“).
+- Bei Gleichstand teilen sich Spieler den Platz in der Rangliste (zweimal 🥇).
 - Buzzern passiert auf quiz-base oder per Zuruf im Voice-Channel (nicht per Text-Chat).
 - Audio (YouTube) spielt quiz-base bei allen Spielern synchron ab. Musik-Boards brauchen bei jedem Spieler einmal „Sound aktivieren“.

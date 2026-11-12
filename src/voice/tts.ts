@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import type { Config } from '../config.ts';
 import { createLogger } from '../core/logger.ts';
 import { decodeWav, type Pcm } from './audio.ts';
+import { killOnExit } from './children.ts';
 
 const log = createLogger('tts');
 const run = promisify(execFile);
@@ -62,7 +63,7 @@ export class PiperTts implements TextToSpeech {
       const worker = fileURLToPath(new URL('./piper_worker.py', import.meta.url));
       const proc = spawn(this.python, [worker, model, String(this.cfg.piperLengthScale)], { stdio: ['pipe', 'pipe', 'pipe'] });
       this.proc = proc;
-      process.once('exit', () => proc.kill());
+      killOnExit(proc);
       let stderr = '';
       proc.stderr!.on('data', (d) => (stderr = (stderr + d).slice(-2000)));
       proc.once('error', (e) => reject(e));

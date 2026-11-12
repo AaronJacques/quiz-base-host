@@ -188,9 +188,12 @@ export class TafelquizController implements GameMode {
   // ───────────────────────────── Question ─────────────────────────────
   private async onQuestion(s: TafelquizState): Promise<void> {
     const q = s.question!;
-    const answerer = s.players.find((p) => p.isTurn)?.name ?? this.lastPick?.player ?? s.players[0]?.name ?? '?';
+    // Who picked is known for sure (turn / rotation) – quiz-base may still show the previous player for a moment.
+    // Only a card opened by hand in the browser falls back to the page's "Am Zug".
+    const answerer = this.lastPick?.player ?? s.players.find((p) => p.isTurn)?.name ?? s.players[0]?.name ?? '?';
     const category = this.lastPick?.category ?? '';
     const hints = q.audio.title ? [`Audio-Titel: ${q.audio.title}`] : [];
+    const media = JudgeCache.mediaKey(q);
 
     this.d.bus.emit('host:question', {
       player: answerer,
@@ -208,21 +211,28 @@ export class TafelquizController implements GameMode {
 
     // 1) The player who picked the question answers.
     const tried = new Set<string>();
-    let solved = await this.askAndJudge(answerer, q, referencePromise, hints, false);
+    let solved = await this.askAndJudge(answerer, q, referencePromise, hints, media, false);
+    // Game ended mid-question: no verdict, no points, no more clicks – the session closes the page.
+    if (this.signal.aborted) return;
     tried.add(answerer);
 
     // 2) Optional buzzer round for everybody else.
-    if (!solved && this.d.game.buzzerOnWrong) solved = await this.buzzerRound(q, referencePromise, hints, tried, s.players.length);
+    if (!solved && this.d.game.buzzerOnWrong) solved = await this.buzzerRound(q, referencePromise, hints, media, tried, s.players.length);
+    if (this.signal.aborted) return;
 
     // 3) Reveal + close.
-    this.publishPlayers(await this.d.page.state()); // scores right after awarding, for the reveal message
+    const after = await this.d.page.state();
+    if (after.phase === 'results') return; // ended in the browser – the main loop reports the results
+    this.publishPlayers(after); // scores right after awarding, for the reveal message
     const reference = await referencePromise;
+    if (this.signal.aborted) return;
     const shown = reference ? stripUrls(reference).replace(/\s+/g, ' ').trim() : null;
     this.d.bus.emit('host:reveal', { answer: shown });
     if (shown) this.say(`💡 Lösung: ${shown}`);
     await this.d.page.stopTimer();
     await this.d.page.stopAudio();
     await sleep(this.d.game.revealPauseSec * 1000);
+    if (this.signal.aborted) return;
     const before = await this.d.page.state();
     const prevTurn = before.players.find((p) => p.isTurn)?.name;
     if (before.phase === 'question') {
@@ -245,21 +255,23 @@ export class TafelquizController implements GameMode {
     q: QuestionState,
     referencePromise: Promise<string | null>,
     hints: string[],
+    media: string | null,
     viaBuzzer: boolean,
   ): Promise<boolean> {
-    const timeoutSec = viaBuzzer ? this.d.game.buzzAnswerTimeoutSec : this.d.game.answerTimeoutSec;
+    const timeoutSec = viaBuzzer ? this.d.game.buzzAnswerTimeoutSec + Math.round(this.bonusSec / 2) : this.d.game.answerTimeoutSec + this.bonusSec;
     this.d.bus.emit('host:await-answer', { player, timeoutSec, viaBuzzer });
     this.status('question', `${player}, deine Antwort? (${timeoutSec}s)`);
     await this.d.page.startTimer(timeoutSec);
 
     const outcome = await this.collectAnswer(player, timeoutSec * 1000 + 3000);
+    if (this.signal.aborted) return false; // game ended: no verdict, no points, no clicks
+    // Operator skipped or the question was closed in the browser – no points (the reveal stops the timer).
+    if (outcome.kind === 'skip') return true;
     await this.d.page.stopTimer();
 
     let result: JudgeResult;
     let answerText = '';
     switch (outcome.kind) {
-      case 'skip':
-        return true; // operator skipped or question closed in the browser – no points
       case 'override':
         result = { verdict: outcome.correct ? 'correct' : 'wrong', method: 'operator', confidence: 1 };
         answerText = '(Host-Entscheidung)';
@@ -271,9 +283,10 @@ export class TafelquizController implements GameMode {
       case 'answer': {
         answerText = outcome.answer;
         const reference = await referencePromise;
-        result = await this.d.judge.judge.judge({ question: q.text, reference, answer: outcome.answer, hints, spoken: outcome.spoken });
+        result = await this.d.judge.judge.judge({ question: q.text, reference, answer: outcome.answer, hints, spoken: outcome.spoken, media });
       }
     }
+    if (this.signal.aborted) return false; // ended while the judge was thinking
 
     const correct = result.verdict === 'correct';
     const delta = scoreFor(q.points, correct, viaBuzzer, this.d.game);
@@ -295,46 +308,77 @@ export class TafelquizController implements GameMode {
     q: QuestionState,
     referencePromise: Promise<string | null>,
     hints: string[],
+    media: string | null,
     tried: Set<string>,
     playerCount: number,
   ): Promise<boolean> {
+    const windowSec = this.d.game.buzzWindowSec + this.bonusSec;
+    /** End of the current buzzer window (0 = not open yet). Buzzes of people who already answered do not extend it. */
+    let deadline = 0;
     while (tried.size < playerCount && !this.signal.aborted) {
       let s = await this.d.page.state();
+      if (deadline && Date.now() >= deadline) {
+        if (s.question?.buzzer.status === 'buzzed') await this.d.page.resetBuzzer();
+        return this.noBuzz();
+      }
       if (s.question?.buzzer.status === 'buzzed') await this.d.page.resetBuzzer();
       s = await this.d.page.state();
       if (s.question?.buzzer.status !== 'open') await this.d.page.releaseBuzzer();
-      this.say(`🔔 Buzzer frei! (${this.d.game.buzzWindowSec}s)`);
-      this.notice('buzzer-open', `Buzzer frei! Wer es weiß, drückt auf quiz-base den Buzzer (${this.d.game.buzzWindowSec} s).`);
-      this.status('question', 'Buzzer frei');
-
-      // Whoever is first: the quiz-base buzzer or a buzz claimed by voice (player:buzz).
-      const voice = new AbortController();
-      const viaBus = this.d.bus
-        .waitFor('player:buzz', (b) => !tried.has(b.player), this.d.game.buzzWindowSec * 1000, voice.signal)
-        .then((b) => b?.player ?? null);
-      const viaPage = this.d.page
-        .waitFor((x) => x.phase !== 'question' || (x.question?.buzzer.status === 'buzzed' && !!x.question.buzzer.buzzedBy), this.d.game.buzzWindowSec * 1000, 250)
-        .then((x) => x?.question?.buzzer.buzzedBy ?? null);
-      const first = await Promise.race([viaBus.then((p) => ({ src: 'bus', p })), viaPage.then((p) => ({ src: 'page', p }))]);
-      // Voice window timed out → the page wait ends at the same moment; take its result.
-      const who = first.p ?? (first.src === 'bus' ? await viaPage : null);
-      voice.abort();
-      if (who && (await this.d.page.state()).question?.buzzer.status === 'open') await this.d.page.resetBuzzer(); // lock the page buzzer for the others
-      if (!who) {
-        this.say('Niemand hat gebuzzert.');
-        this.notice('no-buzz', 'Niemand hat gebuzzert.');
-        return false;
+      if (!deadline) {
+        deadline = Date.now() + windowSec * 1000;
+        this.say(`🔔 Buzzer frei! (${windowSec}s)`);
+        this.notice('buzzer-open', `Buzzer frei! Wer es weiß, drückt auf quiz-base den Buzzer (${windowSec} s).`);
+        this.status('question', 'Buzzer frei');
       }
+
+      const first = await this.firstBuzz(tried, Math.max(0, deadline - Date.now()));
+      if (first.src === 'abort') return false;
+      if (first.src === 'skip') return true; // the game leader skipped the question → reveal
+      const who = first.who;
+      if (who && (await this.d.page.state()).question?.buzzer.status === 'open') await this.d.page.resetBuzzer(); // lock the page buzzer for the others
+      if (!who) return this.noBuzz();
       if (tried.has(who)) {
         log.info(`${who} hat schon geantwortet – Buzz ignoriert`);
-        continue;
+        continue; // same window: re-open the page buzzer silently, no new announcement
       }
       tried.add(who);
       this.say(`🔔 ${who} hat gebuzzert!`);
       this.notice('buzzed', 'hat gebuzzert!', who);
-      if (await this.askAndJudge(who, q, referencePromise, hints, true)) return true;
+      if (await this.askAndJudge(who, q, referencePromise, hints, media, true)) return true;
+      deadline = 0; // wrong → a fresh window for the rest
     }
     return false;
+  }
+
+  private noBuzz(): false {
+    this.say('Niemand hat gebuzzert.');
+    this.notice('no-buzz', 'Niemand hat gebuzzert.');
+    return false;
+  }
+
+  /**
+   * Whoever is first within `ms`: the quiz-base buzzer, a buzz claimed by voice (player:buzz),
+   * or the game leader skipping the question. `who` is null when the window ran out.
+   */
+  private firstBuzz(tried: Set<string>, ms: number): Promise<{ src: 'bus' | 'page' | 'skip' | 'abort'; who: string | null }> {
+    return new Promise((resolve) => {
+      const ac = new AbortController();
+      const done = (r: { src: 'bus' | 'page' | 'skip' | 'abort'; who: string | null }) => {
+        if (ac.signal.aborted) return;
+        ac.abort();
+        this.signal.removeEventListener('abort', onAbort);
+        resolve(r);
+      };
+      const onAbort = () => done({ src: 'abort', who: null });
+      if (this.signal.aborted) return onAbort();
+      this.signal.addEventListener('abort', onAbort);
+      void this.d.bus.waitFor('player:buzz', (b) => !tried.has(b.player), ms, ac.signal).then((b) => b && done({ src: 'bus', who: b.player }));
+      void this.d.bus.waitFor('operator:command', (c) => c.command === 'skip', ms, ac.signal).then((c) => c && done({ src: 'skip', who: null }));
+      void this.d.page
+        .waitFor((x) => ac.signal.aborted || x.phase !== 'question' || (x.question?.buzzer.status === 'buzzed' && !!x.question.buzzer.buzzedBy), ms, 250)
+        .then((x) => done({ src: 'page', who: x?.question?.buzzer.buzzedBy ?? null }))
+        .catch(() => done({ src: 'page', who: null }));
+    });
   }
 
   /**
@@ -400,8 +444,9 @@ export class TafelquizController implements GameMode {
     const solver = this.d.judge.solver;
     if (!solver) return q.audio.title;
 
-    const key = JudgeCache.questionKey(q.text, q.imageUrls[0]);
-    const cached = this.d.judge.cache.getSolution(key);
+    // null = some picture/sound has no stable identity (data: image, untitled audio) → solve, but never cache.
+    const key = JudgeCache.solutionKey(q.text, q);
+    const cached = key ? this.d.judge.cache.getSolution(key) : undefined;
     if (cached && cached.confidence >= 0.6) return cached.answer;
     try {
       const images: ImageInput[] = [];
@@ -418,9 +463,11 @@ export class TafelquizController implements GameMode {
       if (!images.length && !hints.length) return null;
       log.info('Keine Notiz – bestimme Lösung per LLM …');
       const sol = await solver.solve(q.text, images, hints);
-      log.info(`Lösung (LLM): ${sol.answer} (${Math.round(sol.confidence * 100)}%)`);
+      // The solution itself only on debug: the info log is visible to the host before the reveal.
+      log.info(`Lösung per LLM bestimmt (${Math.round(sol.confidence * 100)}%)`);
+      log.debug(`Lösung (LLM): ${sol.answer}`);
       if (sol.confidence < 0.6) return null; // too unsure to grade against – the judge falls back to its own knowledge + hints
-      this.d.judge.cache.setSolution(key, sol);
+      if (key) this.d.judge.cache.setSolution(key, sol);
       return sol.answer;
     } catch (e) {
       log.warn(`Lösung konnte nicht bestimmt werden: ${(e as Error).message}`);
@@ -429,6 +476,11 @@ export class TafelquizController implements GameMode {
   }
 
   // ───────────────────────────── helpers ─────────────────────────────
+  /** Extra answer/buzzer seconds while a voice host narrates (`game.bonusTimeSec`). */
+  private get bonusSec(): number {
+    return Math.max(0, this.d.game.bonusTimeSec ?? 0);
+  }
+
   private publishPlayers(s: TafelquizState): void {
     const sig = s.players.map((p) => `${p.name}:${p.score}:${p.isTurn}`).join('|');
     if (sig !== this.playerSig) {

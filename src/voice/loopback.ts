@@ -22,8 +22,10 @@ export class LoopbackTransport implements VoiceTransport {
   private played: { seq: number; pcm: Pcm; at: number }[] = [];
   private waiters: (() => void)[] = [];
   private stopCurrent: (() => void) | null = null;
+  private _closed = false;
 
-  constructor(readonly port: number, private speed = 1) {
+  /** `firstSeq`: numbering of played sentences continues from an earlier room (rejoin), so clients keep their position. */
+  constructor(readonly port: number, private speed = 1, private firstSeq = 0) {
     this.server = http.createServer((req, res) => void this.handle(req, res).catch((e) => {
       res.writeHead(500).end(String(e?.message ?? e));
     }));
@@ -69,8 +71,17 @@ export class LoopbackTransport implements VoiceTransport {
     res.writeHead(404).end();
   }
 
+  get closed(): boolean {
+    return this._closed;
+  }
+
+  /** Number of the last sentence played (0 = nothing yet). */
+  get lastSeq(): number {
+    return this.played.at(-1)?.seq ?? this.firstSeq;
+  }
+
   async play(pcm: Pcm): Promise<void> {
-    const seq = (this.played.at(-1)?.seq ?? 0) + 1;
+    const seq = this.lastSeq + 1;
     this.played.push({ seq, pcm, at: Date.now() });
     if (this.played.length > 500) this.played.shift();
     this.waiters.splice(0).forEach((w) => w());
@@ -98,6 +109,8 @@ export class LoopbackTransport implements VoiceTransport {
   }
 
   async close(): Promise<void> {
+    if (this._closed) return;
+    this._closed = true;
     this.waiters.splice(0).forEach((w) => w());
     await sleep(10);
     await new Promise<void>((r) => this.server.close(() => r()));

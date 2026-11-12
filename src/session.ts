@@ -31,6 +31,7 @@ export class GameSession {
   private driver: BrowserDriver;
   private ac = new AbortController();
   private opened = false;
+  private ending: Promise<void> | null = null;
 
   constructor(
     private config: Config,
@@ -40,12 +41,16 @@ export class GameSession {
     this.driver = createDriver(config);
     this.page = new TafelquizPage(this.driver);
 
-    // Operator point corrections go straight to the page.
-    this.bus.on('operator:command', async ({ command, args }) => {
+    // Operator point corrections go straight to the page. A failing browser must not take the process down.
+    this.bus.on('operator:command', ({ command, args }) => {
       if (command !== 'punkte' || args.length < 2) return;
       const delta = Number(args[args.length - 1]);
       const name = args.slice(0, -1).join(' ');
-      if (Number.isFinite(delta)) await this.page.award(name, delta);
+      if (!Number.isFinite(delta)) return;
+      this.page.award(name, delta).then(
+        (r) => void (r.ok || log.warn(`Punktekorrektur ${name} ${delta}: ${r.error ?? 'fehlgeschlagen'}`)),
+        (e) => log.warn(`Punktekorrektur ${name} ${delta}: ${(e as Error).message}`),
+      );
     });
   }
 
@@ -86,16 +91,23 @@ export class GameSession {
     await controller.run(this.ac.signal);
   }
 
-  /** Ends the game on quiz-base (results for everyone) and stops the controller. */
-  async endGame(): Promise<void> {
-    const s = await this.page.state().catch(() => null);
-    if (s && (s.phase === 'board' || s.phase === 'question')) await this.page.endGame();
-    else if (s?.phase === 'lobby') await this.page.closeLobby();
-    this.ac.abort();
+  /**
+   * Ends the game on quiz-base (results for everyone) and stops the controller. The controller is
+   * stopped first, so a question that is cut off gets no verdict, no points and no further clicks.
+   */
+  endGame(): Promise<void> {
+    this.ending ??= (async () => {
+      this.ac.abort();
+      const s = await this.page.state().catch(() => null);
+      if (s && (s.phase === 'board' || s.phase === 'question')) await this.page.endGame();
+      else if (s?.phase === 'lobby') await this.page.closeLobby();
+    })();
+    return this.ending;
   }
 
   async close(): Promise<void> {
     this.ac.abort();
+    await this.ending?.catch(() => {}); // let "Spiel beenden" finish before the browser goes away
     log.info(`Verbrauch: ${this.meter.summary()}`);
     for (const c of this.channels) await c.stop().catch(() => {});
     await this.driver.close().catch(() => {});

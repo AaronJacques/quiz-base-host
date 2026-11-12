@@ -83,5 +83,59 @@ describe('spoken answers', () => {
     const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
     expect((await j.judge({ question: 'Wer?', reference: 'Dschingis Khan', answer: 'Tschingis Kahn', spoken: true })).verdict).toBe('correct');
     expect((await j.judge({ question: 'Wer?', reference: 'Dschingis Khan', answer: 'Tschingis Kahn' })).verdict).not.toBe('correct');
+    expect((await j.judge({ question: 'Serie?', reference: 'Breaking Bad', answer: 'Preaking Bat', spoken: true })).verdict).toBe('correct');
+  });
+
+  // F2: sounding alike is not enough – digits, vowels and the rough spelling must match too.
+  it.each([
+    ['Apollo 11', 'Apollo 13'],
+    ['Rocky 2', 'Rocky 4'],
+    ['Kenia', 'Guinea'],
+    ['Hamburg', 'Homburg'],
+  ])('does not accept %s ← spoken %s by sound alone', async (reference, answer) => {
+    for (const rejectDissimilar of [false, true]) {
+      const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar });
+      expect((await j.judge({ question: 'q', reference, answer, spoken: true })).verdict).toBe('unsure');
+    }
+  });
+
+  it('keeps the live cases: "Preakidad" is never wrong, "Better Call Saul" stays wrong', async () => {
+    for (const rejectDissimilar of [false, true]) {
+      const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar });
+      expect((await j.judge({ question: 'Serie?', reference: 'Breaking Bad', answer: 'Preakidad', spoken: true })).verdict).not.toBe('wrong');
+      expect((await j.judge({ question: 'Serie?', reference: 'Breaking Bad', answer: 'Better Call Saul', spoken: true })).verdict).not.toBe('correct');
+    }
+    const strict = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: true });
+    expect((await strict.judge({ question: 'Serie?', reference: 'Breaking Bad', answer: 'Better Call Saul', spoken: true })).verdict).toBe('wrong');
+  });
+});
+
+// F1: an answer that hedges, negates or lists candidates is never accepted without the LLM.
+describe('FuzzyJudge – hedged answers', () => {
+  it.each([
+    ['Paris', 'Paris oder London'],
+    ['Paris', 'nicht Paris'],
+    ['Paris', 'London Paris Rom'],
+    ['Paris', 'Paris / London'],
+    ['1989', '1988 oder 1989'],
+    ['1989', '1987 1988 1989'],
+    ['1989', '1988 bzw. 1989'],
+    ['Breaking Bad', 'Breaking Bad oder Better Call Saul'],
+    ['Apollo 11', 'Apollo 13'], // close spelling, other number
+  ])('%s ← %s is not correct', async (reference, answer) => {
+    for (const rejectDissimilar of [false, true]) {
+      for (const spoken of [false, true]) {
+        const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar });
+        expect((await j.judge({ question: 'q', reference, answer, spoken })).verdict).not.toBe('correct');
+      }
+    }
+  });
+
+  it('still accepts fillers and words that belong to the solution', async () => {
+    const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
+    expect((await j.judge({ question: 'q', reference: 'Tatooine', answer: 'ich glaube Tatooine' })).verdict).toBe('correct');
+    expect((await j.judge({ question: 'q', reference: 'Tatooine (Wüstenplanet)', answer: 'Wüstenplanet Tatooine' })).verdict).toBe('correct');
+    expect((await j.judge({ question: 'q', reference: 'Wer nicht wagt, der nicht gewinnt', answer: 'wer nicht wagt der nicht gewinnt' })).verdict).toBe('correct');
+    expect((await j.judge({ question: 'q', reference: 'Vereinigte Staaten / USA', answer: 'USA' })).verdict).toBe('correct');
   });
 });

@@ -3,9 +3,9 @@ import type { EventBus, HostEvents } from '../core/events.ts';
 import { createLogger } from '../core/logger.ts';
 import type { PlayerState } from '../core/types.ts';
 import { normalize, similarity } from '../judge/normalize.ts';
-import { applyRule, findRule, formatRuleValue, type GameRules } from '../modes/tafelquiz/rules.ts';
+import { applyRule, findRule, formatRuleValue, pickRules, scoreFor, type GameRules } from '../modes/tafelquiz/rules.ts';
 import type { LobbyInfo } from '../session.ts';
-import { helpText, medal, rulesText } from './format.ts';
+import { helpText, rankingLines, rulesText } from './format.ts';
 import { mention, type ChatGateway, type ChatMessage } from './gateway.ts';
 import { formatBoard, parsePick, parsePickWithContext } from './pick-parser.ts';
 import type { GuildStore } from './store.ts';
@@ -59,6 +59,8 @@ interface VoiceSession {
 }
 
 const VOICE_IDLE_MS = 20 * 60_000;
+/** A spoken answer still waiting for "Ja" this close to the end of the answer time is submitted as said. */
+const PENDING_SUBMIT_MS = 1500;
 /** Answers that are really "wait a second". */
 const STALLING = /^(äh+m*|ähm|hm+|mh+|moment|einen moment|warte|wart mal|lass mich (kurz )?(überlegen|nachdenken)|ich überlege|gute frage|ok|okay|also)$/;
 
@@ -89,10 +91,23 @@ interface ActiveGame {
   lastTurnSig: string;
   questionOpen: boolean;
   awaiting: HostEvents['host:await-answer'] | null;
+  /** When the current answer time runs out (epoch ms). */
+  answerDeadline: number;
   /** A spoken answer that was repeated back ("Paris?") and waits for "Ja". */
   pending: { player: string; answer: string } | null;
   /** Submits a pending answer unconfirmed just before the answer time runs out. */
   pendingTimer?: NodeJS.Timeout;
+  /** An answer was handed in and the verdict is not there yet. */
+  judging: boolean;
+  /** The judge is unsure and waits for the leader's "richtig"/"falsch". */
+  operatorNeeded: boolean;
+  /** For overruling after the verdict: the open question, the last ask and the last verdict (cleared with the next card). */
+  lastQuestion: HostEvents['host:question'] | null;
+  lastAsk: HostEvents['host:await-answer'] | null;
+  lastVerdict: { player: string; answer: string; correct: boolean; delta: number; points: number; viaBuzzer: boolean } | null;
+  buzzerOpen: boolean;
+  /** The leader made the last answer correct before the buzzer opened → end the buzzer round right away. */
+  closeBuzzer: boolean;
   /** Authors who wrote in the game channel – used for automatic name linking. */
   seen: Map<string, { username: string; displayName: string }>;
   hinted: Set<string>;
@@ -107,6 +122,8 @@ interface ActiveGame {
 }
 
 type Handler = (msg: ChatMessage, args: string[], game: ActiveGame | null) => Promise<void>;
+
+const BUSY_ELSEWHERE = '🎲 Ich hoste gerade ein Spiel auf einem anderen Server. Sobald es vorbei ist, bin ich wieder frei.';
 
 /**
  * Discord front-end for the quiz host. Maps chat commands and messages to the
@@ -158,7 +175,8 @@ export class QuizBot {
     // With configured channels the bot lives only there – prefix and @mentions elsewhere are ignored.
     const allowed = this.d.config.discord.channelIds;
     if (allowed.length && !allowed.includes(msg.channelId)) return;
-    const game = this.game;
+    // One game at a time, owned by the server it was created on – other servers neither see nor control it.
+    const game = this.game?.guildId === msg.guildId ? this.game : null;
     if (game && msg.channelId === game.channelId) game.seen.set(msg.author.id, { username: msg.author.username, displayName: msg.author.displayName });
 
     const cmd = this.parseCommand(msg);
@@ -212,6 +230,7 @@ export class QuizBot {
 
   private async cmdNew(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
     if (game) return this.reply(msg, `Es läuft schon ein Spiel in <#${game.channelId}>. Die Spielleitung kann es mit \`${this.prefix} ende\` beenden.`);
+    if (this.game) return this.reply(msg, BUSY_ELSEWHERE);
     const text = args.join(' ').trim();
     if (text) return this.chooseBoard(msg, text);
     // No board named → ask instead of picking one.
@@ -268,7 +287,7 @@ export class QuizBot {
   }
 
   private async createGame(msg: ChatMessage, board: string): Promise<void> {
-    if (this.game) return;
+    if (this.game) return this.reply(msg, this.game.guildId === msg.guildId ? `Es läuft schon ein Spiel in <#${this.game.channelId}>.` : BUSY_ELSEWHERE);
     this.menu = null;
     const guild = this.d.store.get(msg.guildId!);
     const config: Config = { ...this.d.config, game: { ...this.d.config.game, ...guild.rules, autoStart: false, publicBoard: undefined } };
@@ -276,7 +295,8 @@ export class QuizBot {
     const g: ActiveGame = {
       guildId: msg.guildId!, channelId: msg.channelId, leaderId: msg.author.id, board, session, lobby: null, phase: 'creating',
       lobbyPlayers: [], canStart: false, startRequested: false, players: [], turn: null, lastTurnSig: '', questionOpen: false,
-      awaiting: null, pending: null, seen: new Map([[msg.author.id, { username: msg.author.username, displayName: msg.author.displayName }]]),
+      awaiting: null, answerDeadline: 0, pending: null, judging: false, operatorNeeded: false, lastQuestion: null, lastAsk: null, lastVerdict: null, buzzerOpen: false, closeBuzzer: false,
+      seen: new Map([[msg.author.id, { username: msg.author.username, displayName: msg.author.displayName }]]),
       hinted: new Set(), pickContext: null, reasons: [], lobbyStatusSig: '', offs: [],
     };
     this.game = g;
@@ -285,7 +305,7 @@ export class QuizBot {
       void this.joinVoice(msg.guildId!, msg.voiceChannelId, msg.channelId).catch((e) => this.say(msg.channelId, `⚠️ Voice: ${(e as Error).message}`));
     }
     await this.say(msg.channelId, `⏳ Erstelle eine Tafelquiz-Lobby mit **${board}** …`);
-    void this.speak(`Alles klar, ich erstelle eine Lobby mit ${board}.`);
+    void this.speakFor(g.guildId, `Alles klar, ich erstelle eine Lobby mit ${board}.`);
     try {
       g.lobby = await session.createLobby(board);
     } catch (e) {
@@ -302,11 +322,15 @@ export class QuizBot {
       `2. Hier \`${this.prefix} ich <dein quiz-base-Name>\` schreiben, falls ich dich nicht automatisch erkenne.`,
       'Sobald alle bereit und verknüpft sind, geht es los.',
     ].join('\n'));
-    void this.speak('Die Lobby ist offen! Den Link findet ihr im Chat. Gebt auf quiz-base euren Namen ein und klickt auf: Ich bin bereit.');
+    void this.speakFor(g.guildId, 'Die Lobby ist offen! Den Link findet ihr im Chat. Gebt auf quiz-base euren Namen ein und klickt auf: Ich bin bereit.');
     g.lobbyTimeout = setTimeout(() => {
       if (this.game === g && g.phase === 'lobby') {
         void this.say(g.channelId, `⌛ Die Lobby wurde nicht innerhalb von ${this.d.config.discord.lobbyTimeoutMin} Minuten gestartet und wird geschlossen.`);
-        void g.session.endGame().finally(() => this.finish(g));
+        void g.session
+          .endGame()
+          .catch((e) => log.warn(`Lobby schließen: ${(e as Error).message}`))
+          .then(() => this.finish(g))
+          .catch((e) => log.error(`Lobby-Timeout: ${(e as Error).stack ?? e}`));
       }
     }, this.d.config.discord.lobbyTimeoutMin * 60_000);
     session
@@ -315,7 +339,8 @@ export class QuizBot {
         log.error(`Spiel: ${(e as Error).stack ?? e}`);
         await this.say(g.channelId, `⚠️ Das Spiel ist abgebrochen: ${(e as Error).message}`);
       })
-      .finally(() => this.finish(g));
+      .finally(() => this.finish(g))
+      .catch((e) => log.error(`Spielende: ${(e as Error).stack ?? e}`));
   }
 
   private async cmdMe(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
@@ -376,7 +401,8 @@ export class QuizBot {
       if (game && !this.isLeader(msg, game)) return this.notLeader(msg);
       guild.rules = {};
       this.d.store.save(msg.guildId!);
-      if (game) Object.assign(game.session.rules, this.d.config.game);
+      // Only the adjustable rules – autoStart/publicBoard stay as the bot set them, the voice bonus stays too.
+      if (game) Object.assign(game.session.rules, pickRules(this.d.config.game));
       return this.reply(msg, '📏 Regeln auf Standard zurückgesetzt.\n' + rulesText(this.currentRules(msg.guildId!), this.prefix));
     }
     if (args.length >= 2) return this.cmdRule(msg, args, game);
@@ -417,8 +443,40 @@ export class QuizBot {
   private async cmdOverride(msg: ChatMessage, game: ActiveGame | null, command: 'r' | 'f' | 'skip'): Promise<void> {
     if (!game || game.phase !== 'running') return this.reply(msg, 'Gerade läuft keine Frage.');
     if (!this.isLeader(msg, game)) return this.notLeader(msg);
-    game.session.bus.emit('operator:command', { command, args: [] });
-    await this.d.gateway.react(msg, '👍');
+    // An answer is expected right now, or the judge asks the leader → the decision replaces it.
+    if (game.awaiting || game.operatorNeeded) {
+      game.session.bus.emit('operator:command', { command, args: [] });
+      return this.d.gateway.react(msg, '👍');
+    }
+    if (game.judging) return this.reply(msg, '⏳ Ich bewerte gerade noch – danach kannst du überstimmen.');
+    if (command === 'skip') {
+      if (!game.buzzerOpen) return this.reply(msg, 'Gerade gibt es nichts zu überspringen.');
+      game.session.bus.emit('operator:command', { command: 'skip', args: [] });
+      return this.reply(msg, '⏭️ Buzzer-Runde beendet, gleich kommt die Lösung.');
+    }
+    await this.overrideLastVerdict(msg, game, command === 'r');
+  }
+
+  /** "richtig"/"falsch" after the verdict: corrects the points of the last verdict until the next card is picked. */
+  private async overrideLastVerdict(msg: ChatMessage, game: ActiveGame, correct: boolean): Promise<void> {
+    const v = game.lastVerdict;
+    if (!v) return this.reply(msg, `Gerade gibt es keine Bewertung zum Überstimmen. Punkte korrigieren: \`${this.prefix} korrektur <Name> <±Punkte>\``);
+    const target = scoreFor(v.points, correct, v.viaBuzzer, game.session.rules);
+    const fix = target - v.delta;
+    if (v.correct === correct && fix === 0) return this.reply(msg, `**${v.player}**: „${v.answer}“ ist schon als ${correct ? 'richtig' : 'falsch'} gewertet.`);
+    game.lastVerdict = { ...v, correct, delta: target };
+    if (fix) game.session.bus.emit('operator:command', { command: 'punkte', args: [v.player, String(fix)] });
+    // A solved question needs no more buzzing.
+    if (correct && game.questionOpen) {
+      if (game.buzzerOpen) game.session.bus.emit('operator:command', { command: 'skip', args: [] });
+      else game.closeBuzzer = true;
+    }
+    const pts = fix ? ` (${fix > 0 ? '+' : '−'}${Math.abs(fix)})` : '';
+    await this.reply(
+      msg,
+      `✏️ Korrigiert: **${v.player}** „${v.answer}“ zählt als ${correct ? 'richtig' : 'falsch'}${pts}.`,
+      `Korrigiert: ${v.player}, ${correct ? 'richtig' : 'falsch'}.${fix ? ` ${fix > 0 ? 'Plus' : 'Minus'} ${Math.abs(fix)}.` : ''}`,
+    );
   }
 
   private async cmdCorrect(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
@@ -436,9 +494,14 @@ export class QuizBot {
     if (!game) return this.reply(msg, 'Gerade läuft kein Spiel.');
     if (!this.isLeader(msg, game)) return this.notLeader(msg);
     await this.say(msg.channelId, '🛑 Spiel wird beendet …');
-    this.voice?.bridge.detach(); // no more "…, du bist dran" while the game shuts down
-    this.voice?.host.clear();
-    void this.speak('Okay, wir hören hier auf.');
+    // A spoken answer still waiting for "Ja" is discarded – the cut-off question gets no verdict.
+    this.dropPending(game);
+    game.awaiting = null;
+    if (this.voice?.guildId === game.guildId) {
+      this.voice.bridge.detach(); // no more "…, du bist dran" while the game shuts down
+      this.voice.host.clear();
+    }
+    void this.speakFor(game.guildId, 'Okay, wir hören hier auf.');
     await game.session.endGame().catch(() => {});
     if (game.phase !== 'running') await this.finish(game);
   }
@@ -488,6 +551,11 @@ export class QuizBot {
       const answer = cleanSpokenAnswer(said);
       if (!answer) return; // "Meine Antwort ist … ähm" – keep listening
       this.transcript(name, text);
+      // Time is (nearly) up – no time left for "Ja": the answer counts as said.
+      if (Date.now() >= game.answerDeadline - PENDING_SUBMIT_MS) {
+        void this.speak(`${answer}.`, 'confirm');
+        return this.submitAnswer(game, name, answer, true);
+      }
       game.pending = { player: name, answer: answer.slice(0, 200) };
       void this.speak(`${answer}?`, 'confirm');
       return;
@@ -510,15 +578,16 @@ export class QuizBot {
   private submitAnswer(game: ActiveGame, name: string, answer: string, spoken: boolean): void {
     clearTimeout(game.pendingTimer);
     game.pending = null;
-    game.session.bus.emit('player:answer', { player: name, answer: answer.slice(0, 200), spoken });
     game.awaiting = null;
+    game.judging = true;
+    game.session.bus.emit('player:answer', { player: name, answer: answer.slice(0, 200), spoken });
   }
 
   private transcript(name: string, text: string): void {
     const v = this.voice;
     if (!v) return;
     log.info(`🎙 ${name}: „${text}“`);
-    this.queue(v.textChannelId, `-# 🎙️ ${name}: „${text}“`);
+    this.queue(this.voiceText(v), `-# 🎙️ ${name}: „${text}“`);
   }
 
   private async handlePick(msg: ChatMessage, game: ActiveGame, text: string, player: string, verbose: boolean): Promise<void> {
@@ -551,12 +620,12 @@ export class QuizBot {
   private attach(g: ActiveGame): void {
     const on = <K extends keyof HostEvents>(e: K, h: (p: HostEvents[K]) => void) => g.offs.push(g.session.bus.on(e, h));
     const ch = g.channelId;
-    this.voice?.bridge.attach(g.session.bus, g.session.rules);
+    if (this.voice?.guildId === g.guildId) this.voice.bridge.attach(g.session.bus, g.session.rules);
 
     on('host:lobby', (l) => {
       const before = new Set(g.lobbyPlayers.map((p) => p.name));
       const joined = l.players.filter((p) => !before.has(p.name)).map((p) => p.name);
-      if (joined.length && g.phase === 'lobby') void this.speak(`${joined.join(' und ')} ${joined.length > 1 ? 'sind' : 'ist'} da.`);
+      if (joined.length && g.phase === 'lobby') void this.speakFor(g.guildId, `${joined.join(' und ')} ${joined.length > 1 ? 'sind' : 'ist'} da.`);
       g.lobbyPlayers = l.players;
       g.canStart = l.canStart;
       this.autoLink(g);
@@ -573,18 +642,30 @@ export class QuizBot {
           clearTimeout(g.lobbyStatusTimer);
           this.queue(ch, `🚀 **Los geht's!** Regeln: \`${this.prefix} regeln\` · Hilfe: \`${this.prefix} hilfe\``);
           break;
+        case 'buzzer-open':
+          g.buzzerOpen = true;
+          this.queue(ch, `🔔 ${n.text}`);
+          if (g.closeBuzzer) setTimeout(() => g.session.bus.emit('operator:command', { command: 'skip', args: [] }), 0); // after the controller listens
+          g.closeBuzzer = false;
+          break;
         case 'buzzed':
+          g.buzzerOpen = false;
           this.queue(ch, `🔔 ${who} hat gebuzzert!`);
+          break;
+        case 'no-buzz':
+          g.buzzerOpen = false;
+          this.queue(ch, `· ${n.text}`);
           break;
         case 'reminder':
           this.queue(ch, `⏰ ${who}, du bist dran – schreib z.B. \`${g.turn?.open[0]?.category ?? 'Kategorie'} ${g.turn?.open[0]?.points ?? 100}\`.`);
           break;
         case 'operator-needed':
+          g.operatorNeeded = true;
           this.queue(ch, `❓ ${n.text} (${mention(g.leaderId)}: \`${this.prefix} richtig\` / \`${this.prefix} falsch\`)`);
           if (n.detail) void this.d.gateway.sendDirect(g.leaderId, `❓ ${n.detail}\nIm Channel mit \`${this.prefix} richtig\` oder \`${this.prefix} falsch\` antworten.`).catch(() => {});
           break;
         default:
-          this.queue(ch, `${n.kind === 'buzzer-open' ? '🔔' : n.kind === 'board-switch' ? '🔀' : '·'} ${n.text}`);
+          this.queue(ch, `${n.kind === 'board-switch' ? '🔀' : '·'} ${n.text}`);
       }
     });
     on('host:turn', (t) => {
@@ -604,35 +685,47 @@ export class QuizBot {
     });
     on('host:question', (q) => {
       g.questionOpen = true;
+      g.lastQuestion = q;
+      g.lastVerdict = null; // a new card: overruling the previous one is over
+      g.closeBuzzer = false;
       const extras = [q.hasImage ? '🖼 Bild auf quiz-base' : '', q.hasAudio ? '🎵 Audio läuft auf quiz-base' : ''].filter(Boolean).join(' · ');
       const opts = q.options.length ? '\n' + q.options.map((o, i) => `**${'ABCDEFGH'[i] ?? i + 1}**) ${o}`).join('   ') : '';
       this.queue(ch, `❔ **${q.category || 'Frage'} · ${q.points} Punkte**\n> ${q.text}${opts}${extras ? `\n${extras}` : ''}`);
     });
     on('host:await-answer', (a) => {
       g.awaiting = a;
+      g.lastAsk = a;
+      g.judging = false;
+      g.operatorNeeded = false;
+      g.buzzerOpen = false;
+      g.answerDeadline = Date.now() + a.timeoutSec * 1000;
       this.dropPending(g);
       // Time is nearly up and an answer is still waiting for "Ja" → take it as said.
       g.pendingTimer = setTimeout(() => {
         if (g.awaiting === a && g.pending?.player === a.player) this.submitAnswer(g, a.player, g.pending.answer, true);
-      }, Math.max(0, a.timeoutSec * 1000 - 1500));
+      }, Math.max(0, a.timeoutSec * 1000 - PENDING_SUBMIT_MS));
       const how = this.voice ? 'Schreib sie hier rein oder sag „Meine Antwort ist …“' : 'Schreib sie einfach hier rein';
       this.queue(ch, `✍️ ${this.who(g, a.player)}, deine Antwort? ${how} (${a.timeoutSec} s).`);
     });
     on('host:verdict', (v) => {
       g.awaiting = null;
+      g.judging = false;
+      g.operatorNeeded = false;
       this.dropPending(g);
+      g.lastVerdict = { player: v.player, answer: v.answer, correct: v.correct, delta: v.delta, points: g.lastQuestion?.points ?? 0, viaBuzzer: !!g.lastAsk?.viaBuzzer };
       const delta = v.delta ? ` **${v.delta > 0 ? '+' : '−'}${Math.abs(v.delta)}**` : '';
       this.queue(ch, `${v.correct ? '✅' : '❌'} **${v.player}**: „${v.answer}“ ist ${v.correct ? 'richtig' : 'falsch'}${delta}`);
       if (v.reason && !v.correct && v.answer && !v.answer.startsWith('(')) g.reasons.push(`${v.player}: ${v.reason}`);
     });
     on('host:reveal', ({ answer }) => {
+      g.buzzerOpen = false;
+      g.questionOpen = false;
       const why = g.reasons.splice(0).map((r) => `-# ${r}`).join('\n');
       this.queue(ch, `${answer ? `💡 Lösung: **${answer}**\n` : ''}${why ? `${why}\n` : ''}📊 ${this.scoreLine(g)}`);
     });
     on('host:game-over', ({ players }) => {
       g.phase = 'over';
-      const ranking = [...players].sort((a, b) => b.score - a.score).map((p, i) => `${medal(i)} ${this.who(g, p.name)} — **${p.score}**`);
-      this.queue(ch, ['🏁 **Spiel vorbei!**', ...ranking, `-# Host-Kosten: ${g.session.meter.summary()}`].join('\n'));
+      this.queue(ch, ['🏁 **Spiel vorbei!**', ...rankingLines(players, (n) => this.who(g, n)), `-# Host-Kosten: ${g.session.meter.summary()}`].join('\n'));
     });
   }
 
@@ -697,7 +790,7 @@ export class QuizBot {
     if (!unlinked.length) return this.requestStart(g);
     if (this.voice && g.lobbyPlayers.every((p) => p.ready) && !g.hinted.has(`voice-unlinked:${unlinked.join()}`)) {
       g.hinted.add(`voice-unlinked:${unlinked.join()}`);
-      void this.speak(`Alle sind bereit, aber ich weiß noch nicht, wer ${unlinked.join(' und ')} ist. Sagt: Quizmaster, ich bin, und euren Namen.`);
+      void this.speakFor(g.guildId, `Alle sind bereit, aber ich weiß noch nicht, wer ${unlinked.join(' und ')} ist. Sagt: Quizmaster, ich bin, und euren Namen.`);
     }
   }
 
@@ -733,8 +826,11 @@ export class QuizBot {
 
   // ───────────────────────────── helpers ─────────────────────────────
 
+  /** Game leader or server admin – of the server the game runs on; admin rights elsewhere count for nothing. */
   private isLeader(msg: ChatMessage, game: ActiveGame | null): boolean {
-    return msg.canManage || !game || game.leaderId === msg.author.id;
+    if (!game) return true;
+    if (msg.guildId !== game.guildId) return false;
+    return msg.canManage || game.leaderId === msg.author.id;
   }
 
   private notLeader(msg: ChatMessage, text = 'Das darf nur die Spielleitung (wer die Lobby erstellt hat) oder ein Server-Admin.'): Promise<void> {
@@ -792,14 +888,13 @@ export class QuizBot {
     if (this.game !== g) return;
     this.game = null;
     if (g.phase === 'running' && g.players.length) {
-      const ranking = [...g.players].sort((a, b) => b.score - a.score).map((p, i) => `${medal(i)} ${this.who(g, p.name)} — **${p.score}**`);
-      this.queue(g.channelId, ['🏁 **Spiel beendet.** Endstand:', ...ranking].join('\n'));
-      void this.speak(gameOverLine(g.players));
+      this.queue(g.channelId, ['🏁 **Spiel beendet.** Endstand:', ...rankingLines(g.players, (n) => this.who(g, n))].join('\n'));
+      void this.speakFor(g.guildId, gameOverLine(g.players));
     }
     clearTimeout(g.lobbyTimeout);
     clearTimeout(g.lobbyStatusTimer);
     g.offs.forEach((off) => off());
-    this.voice?.bridge.detach();
+    if (this.voice?.guildId === g.guildId) this.voice.bridge.detach();
     this.touchVoice();
     await g.session.close().catch(() => {});
     await this.flush(g.channelId);
@@ -842,10 +937,11 @@ export class QuizBot {
   }
 
   async shutdown(): Promise<void> {
-    if (this.game) {
-      await this.say(this.game.channelId, '👋 Der Quiz-Host fährt herunter, das Spiel wird beendet.');
-      await this.game.session.endGame().catch(() => {});
-      await this.finish(this.game);
+    const g = this.game; // the game may already be finished (and this.game null) once endGame() returns
+    if (g) {
+      await this.say(g.channelId, '👋 Der Quiz-Host fährt herunter, das Spiel wird beendet.');
+      await g.session.endGame().catch(() => {});
+      await this.finish(g);
     }
     await this.leaveVoice(null, 'Ich muss leider los. Tschüss!');
   }
@@ -862,13 +958,20 @@ export class QuizBot {
     if (msg.viaVoice) void this.speak(spoken ?? briefSpeech(text));
   }
 
+  /** Game announcements: only into a voice channel on the game's server. */
+  private speakFor(guildId: string, text: string): Promise<void> {
+    return this.voice?.guildId === guildId ? this.speak(text) : Promise.resolve();
+  }
+
   private speak(text: string, key?: string): Promise<void> {
-    return this.voice ? this.voice.bridge.say(text, key) : Promise.resolve();
+    return this.voice ? this.voice.bridge.say(text, key).catch((e) => log.warn(`Sprechen: ${(e as Error).message}`)) : Promise.resolve();
   }
 
   private async cmdVoice(msg: ChatMessage, args: string[]): Promise<void> {
+    // Voice belongs to the running game – another server must not pull the bot out of it.
+    if (this.game && this.game.guildId !== msg.guildId) return this.reply(msg, BUSY_ELSEWHERE);
     if (/^(aus|off|stop|raus|leave|verlassen)$/i.test(args[0] ?? '')) {
-      if (!this.voice) return this.reply(msg, 'Ich bin in keinem Voice-Channel.');
+      if (!this.voice || this.voice.guildId !== msg.guildId) return this.reply(msg, 'Ich bin in keinem Voice-Channel.');
       return this.leaveVoice(msg.channelId, 'Okay, ich gehe. Bis zum nächsten Quiz!');
     }
     if (!this.voiceReady) return this.reply(msg, '🔇 Die Sprachsteuerung ist auf diesem Rechner nicht eingerichtet: `npx qbhost voice-setup` (siehe docs/VOICE.md).');
@@ -898,22 +1001,27 @@ export class QuizBot {
         onSpeech: (speaker, text) => this.onSpeech(speaker, text),
         attention: (speaker) => this.attention(speaker.id),
         onClose: () => {
-          if (this.voice?.host === host) {
-            clearTimeout(this.voice.idleTimer);
-            this.voice = null;
-          }
+          // The room went away by itself (Discord disconnect, kick): give the extra time back and stop narrating.
+          const v = this.voice;
+          if (v?.host !== host) return;
+          const g = this.voiceGame();
+          clearTimeout(v.idleTimer);
+          v.bridge.detach();
+          this.voice = null;
+          if (g) this.queue(g.channelId, `🔇 Die Voice-Verbindung ist weg. \`${this.prefix} voice\` holt mich zurück.`);
         },
       });
       const bridge = new VoiceBridge(host, { scoresEvery: vc.scoresEvery, extraTimeSec: vc.extraTimeSec, board: () => this.game?.board ?? 'dem Quiz' });
       this.voice = { host, bridge, guildId, textChannelId, voiceChannelId, seq: 0 };
-      if (this.game) {
-        bridge.attach(this.game.session.bus, this.game.session.rules);
-        this.autoLink(this.game);
+      const g = this.voiceGame();
+      if (g) {
+        bridge.attach(g.session.bus, g.session.rules);
+        this.autoLink(g);
       }
       this.touchVoice();
       await this.say(textChannelId, `🎙️ Ich bin im Voice-Channel <#${voiceChannelId}> und höre zu, solange ich drin bin. Aufnahmen werden nicht gespeichert, nur Erkanntes, auf das ich reagiere, schreibe ich hier mit. Sprachbefehle: „Quizmaster, Hilfe“.`);
       void this.speak(
-        this.game
+        this.voiceGame()
           ? 'Hallo! Ich bin euer Quizmaster und höre ab jetzt zu.'
           : 'Hallo! Ich bin euer Quizmaster und höre ab jetzt zu. Sagt: Quizmaster, neues Quiz, und den Namen des Quiz.',
       );
@@ -938,16 +1046,21 @@ export class QuizBot {
     if (!v) return;
     clearTimeout(v.idleTimer);
     v.idleTimer = setTimeout(() => {
-      if (this.voice === v && !this.game) void this.leaveVoice(v.textChannelId, 'Hier ist es still geworden. Ich verabschiede mich!');
+      if (this.voice === v && !this.game) void this.leaveVoice(v.textChannelId, 'Hier ist es still geworden. Ich verabschiede mich!').catch((e) => log.warn(`Voice verlassen: ${(e as Error).message}`));
       else this.touchVoice();
     }, VOICE_IDLE_MS);
   }
 
   /** Vocabulary hints for the recogniser – categories, names, board titles. Never solutions. */
   private voicePrompt(): string {
-    const g = this.game;
+    const g = this.voiceGame();
     const words = ['Quizmaster', 'Meine Antwort ist', 'Hier'];
-    if (g?.turn) words.push(...g.turn.categories);
+    if (g?.turn) {
+      // Point values, so "hundert" is not heard as "Hunde" or "Jahrhundert".
+      const points = [...new Set(g.turn.grid.map((c) => c.points))].sort((a, b) => a - b);
+      if (points.length) words.push(`${g.turn.categories[0] ?? 'Sport'} für ${points[0]}`, ...points.map(String));
+      words.push(...g.turn.categories);
+    }
     if (g) words.push(...this.knownNames(g));
     if (!g && this.menu) words.push(...this.menu.options.slice(0, 6));
     return words.join(', ').slice(0, 400);
@@ -959,7 +1072,7 @@ export class QuizBot {
    * else only "Quizmaster, …" at the start of an utterance gets through.
    */
   private attention(userId: string): Attention {
-    const g = this.game;
+    const g = this.voiceGame();
     if (!g) return this.menu?.askedBy === userId ? 'full' : 'wake';
     if (g.phase !== 'running') return 'wake';
     const name = this.nameFor(g, userId);
@@ -979,7 +1092,8 @@ export class QuizBot {
     this.touchVoice();
     const msg: ChatMessage = {
       id: `voice-${++v.seq}`,
-      channelId: v.textChannelId,
+      // Spoken input belongs to the game's channel, wherever the bot was called into voice.
+      channelId: this.voiceText(v),
       guildId: v.guildId,
       author: { id: speaker.id, username: speaker.username, displayName: speaker.displayName, isBot: false },
       content: text,
@@ -989,10 +1103,10 @@ export class QuizBot {
       voiceChannelId: v.voiceChannelId,
       viaVoice: true,
     };
-    const g = this.game;
+    const g = this.voiceGame();
     const transcript = () => {
       log.info(`🎙 ${speaker.displayName}: „${text}“`);
-      this.queue(v.textChannelId, `-# 🎙️ ${speaker.displayName}: „${text}“`);
+      this.queue(msg.channelId, `-# 🎙️ ${speaker.displayName}: „${text}“`);
     };
 
     // 1) "Quizmaster, …" commands.
@@ -1036,8 +1150,19 @@ export class QuizBot {
     }
   }
 
+  /** The game the voice room belongs to – only one on the same server as the voice channel. */
+  private voiceGame(): ActiveGame | null {
+    return this.voice && this.game?.guildId === this.voice.guildId ? this.game : null;
+  }
+
+  /** Where voice input and transcripts belong: the game's channel while a game runs on the voice's server. */
+  private voiceText(v: VoiceSession): string {
+    const g = this.game;
+    return g && g.guildId === v.guildId ? g.channelId : v.textChannelId;
+  }
+
   private async cmdRepeat(msg: ChatMessage, game: ActiveGame | null): Promise<void> {
-    this.voice?.bridge.repeat();
+    if (this.voice?.guildId === msg.guildId) this.voice.bridge.repeat();
     if (!msg.viaVoice && game?.turn) await this.reply(msg, this.turnText(game, game.turn));
   }
 }

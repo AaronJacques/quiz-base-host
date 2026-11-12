@@ -6,6 +6,10 @@ export interface FakeQuestion {
   points: number;
   text: string;
   note: string | null;
+  /** Image URLs of the question (`data:` = inline image without identity). */
+  images?: string[];
+  /** YouTube title of the question's audio; null = audio without title. Omitted = no audio. */
+  audio?: string | null;
 }
 
 /**
@@ -50,9 +54,9 @@ export class FakeTafelquizPage implements TafelquizPort {
             text: this.open.q.text,
             note: this.open.q.note,
             options: [],
-            imageUrls: [],
-            imagesLoaded: [],
-            audio: { present: false, title: null, playing: false },
+            imageUrls: this.open.q.images ?? [],
+            imagesLoaded: (this.open.q.images ?? []).map(() => true),
+            audio: this.open.q.audio !== undefined ? { present: true, title: this.open.q.audio, playing: false } : { present: false, title: null, playing: false },
             buzzer: { ...this.buzzer },
             pointTarget: this.buzzer.buzzedBy ?? this.players[this.turn]!.name,
           }
@@ -76,7 +80,9 @@ export class FakeTafelquizPage implements TafelquizPort {
   passSoundGate = () => this.ok('passSoundGate');
   selectBoard = (n: number) => this.ok(`selectBoard ${n}`);
   openCell = (col: number, row: number) => {
-    this.shownTurn = null;
+    // With staleAfterOpenMs, "Am Zug" keeps showing the previous player for a moment after the card opened.
+    if (this.staleAfterOpenMs && this.shownTurn !== null) setTimeout(() => (this.shownTurn = null), this.staleAfterOpenMs);
+    else this.shownTurn = null;
     this.open = this.cells.find((c) => c.col === col && c.row === row) ?? null;
     this.phase = 'question';
     this.buzzer = { status: 'locked', buzzedBy: null };
@@ -97,6 +103,8 @@ export class FakeTafelquizPage implements TafelquizPort {
   stopAudio = () => this.ok('stopAudio');
   /** Test hook: like quiz-base sometimes, keep showing "Am Zug" at the previous player until the next card opens. */
   staleTurnDisplay = false;
+  /** Test hook: how long the stale "Am Zug" survives opening the next card (0 = it corrects itself at once). */
+  staleAfterOpenMs = 0;
   private shownTurn: number | null = null;
   closeQuestion = () => {
     if (this.open) this.open.answered = true;

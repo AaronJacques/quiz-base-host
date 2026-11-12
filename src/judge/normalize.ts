@@ -60,6 +60,44 @@ export function similarity(a: string, b: string): number {
   return 1 - levenshtein(x, y) / Math.max(x.length, y.length);
 }
 
+/** Spelling similarity 0..1 of the whole phrase without spaces ("Breakingbad" = "Breaking Bad"); order matters. */
+export function spellingSimilarity(a: string, b: string): number {
+  const x = normalize(a).replace(/\s/g, '');
+  const y = normalize(b).replace(/\s/g, '');
+  if (!x || !y) return 0;
+  return 1 - levenshtein(x, y) / Math.max(x.length, y.length);
+}
+
+/** Words that hedge or negate an answer ("Paris oder London", "nicht Paris", "1988 bzw. 1989"). */
+const HEDGE_WORDS = new Set(['oder', 'or', 'bzw', 'beziehungsweise', 'entweder', 'either', 'nicht', 'kein', 'keine', 'keiner', 'not', 'no', 'nor', 'weder']);
+
+/** Hedging/negating words of `answer` that are not part of `reference` itself ("Wer nicht wagt …" stays fine). */
+export function hedgeWords(answer: string, reference: string): string[] {
+  const ref = new Set(normalize(reference).split(' '));
+  const hedges = normalize(answer).split(' ').filter((w) => HEDGE_WORDS.has(w) && !ref.has(w));
+  // "Paris / London", "Paris | London" – separators of alternatives (normalize() drops them).
+  if (/\S\s*[/|;]\s*\S/.test(stripUrls(answer)) && !/[/|;]/.test(stripUrls(reference))) hedges.push('/');
+  return hedges;
+}
+
+/**
+ * The vowels of a phrase with spelling variants folded (ä/ae → e, y → i, ei/ai/ey → ai, eu/äu → oi).
+ * Kölner Phonetik ignores vowels; comparing them as well keeps "Hamburg"/"Homburg" and "Kenia"/"Guinea" apart.
+ */
+export function vowelSkeleton(s: string): string {
+  return normalize(s)
+    .replace(/[^a-z]/g, '')
+    .replace(/ae/g, 'e')
+    .replace(/oe/g, 'o')
+    .replace(/ue/g, 'u')
+    .replace(/y/g, 'i')
+    .replace(/ie/g, 'i')
+    .replace(/ei|ai/g, 'A')
+    .replace(/eu|oi/g, 'O')
+    .replace(/[^aeiouAO]/g, '')
+    .replace(/(.)\1+/g, '$1');
+}
+
 /** Extracts numbers incl. German number words ("vier" → 4, "42,195" → 42.195). */
 export function numbers(s: string): number[] {
   const n = normalize(s);

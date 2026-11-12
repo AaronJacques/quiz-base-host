@@ -1,7 +1,8 @@
 import type { EventBus, HostEvents } from '../core/events.ts';
 import type { PlayerState } from '../core/types.ts';
 
-type TimingRules = { answerTimeoutSec: number; buzzWindowSec: number; buzzAnswerTimeoutSec: number };
+/** The live rules object of the game – the bridge only sets its voice bonus (`bonusTimeSec`). */
+type TimingRules = { bonusTimeSec: number };
 import {
   ANSWER_HOW_LINE,
   askLine,
@@ -47,20 +48,18 @@ export class VoiceBridge {
 
   /**
    * Spoken questions and verdicts take time before players hear "deine Antwort?" or
-   * "Buzzer frei!" – give the game that time back while voice is active.
+   * "Buzzer frei!" – give the game that time back while voice is active. The bonus is a field
+   * of its own (set, never added), so rule changes keep it and a rejoin does not double it.
    */
-  private timing: { rules: TimingRules; base: TimingRules } | null = null;
+  private timed: TimingRules | null = null;
   private rules: Parameters<typeof rulesLine>[0] | null = null;
 
   attach(bus: EventBus, rules?: TimingRules & Partial<Parameters<typeof rulesLine>[0]>): void {
     this.detach();
     this.rules = rules && rules.correctFactor !== undefined ? (rules as Parameters<typeof rulesLine>[0]) : null;
-    if (rules && this.opts.extraTimeSec > 0) {
-      const base = { answerTimeoutSec: rules.answerTimeoutSec, buzzWindowSec: rules.buzzWindowSec, buzzAnswerTimeoutSec: rules.buzzAnswerTimeoutSec };
-      rules.answerTimeoutSec += this.opts.extraTimeSec;
-      rules.buzzWindowSec += this.opts.extraTimeSec;
-      rules.buzzAnswerTimeoutSec += Math.round(this.opts.extraTimeSec / 2);
-      this.timing = { rules, base };
+    if (rules) {
+      rules.bonusTimeSec = Math.max(0, this.opts.extraTimeSec);
+      this.timed = rules;
     }
     const on = <K extends keyof HostEvents>(e: K, h: (p: HostEvents[K]) => void) => this.offs.push(bus.on(e, h));
 
@@ -132,8 +131,8 @@ export class VoiceBridge {
   }
 
   detach(): void {
-    if (this.timing) Object.assign(this.timing.rules, this.timing.base);
-    this.timing = null;
+    if (this.timed) this.timed.bonusTimeSec = 0;
+    this.timed = null;
     this.offs.splice(0).forEach((off) => off());
     this.turn = null;
     this.lastQuestion = null;

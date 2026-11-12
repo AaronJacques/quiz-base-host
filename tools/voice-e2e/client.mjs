@@ -13,6 +13,7 @@ const STT = 'http://127.0.0.1:8178/inference';
 const DIR = '.qbhost/voice-e2e';
 const VOICES = { Anna: 'Anna', Ben: 'Reed (Deutsch (Deutschland))' };
 mkdirSync(DIR, { recursive: true });
+// Position in the bot's speech; the harness deletes these files at start.
 const stateFile = `${DIR}/seq-${name}.txt`;
 
 async function status() {

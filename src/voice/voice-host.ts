@@ -109,7 +109,7 @@ export class VoiceHost {
         return null;
       });
       this.queue.push({ text: clean, key: opts.key, audio, done: resolve });
-      void this.pump();
+      void this.pump().catch((e) => log.warn(`Sprechen: ${(e as Error).message}`));
     });
   }
 
@@ -126,7 +126,7 @@ export class VoiceHost {
       if (pcm) {
         log.info(`🔊 ${item.text}`);
         const from = (this.currentFrom = Date.now());
-        await this.d.transport.play(pcm);
+        await this.d.transport.play(pcm).catch((e) => log.warn(`Wiedergabe: ${(e as Error).message}`));
         this.currentFrom = 0;
         this.spoken.push({ from, to: Math.max(Date.now(), from + durationMs(pcm)) });
         if (this.spoken.length > 30) this.spoken.shift();

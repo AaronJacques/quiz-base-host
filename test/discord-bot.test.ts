@@ -7,6 +7,7 @@ import { EventBus } from '../src/core/events.ts';
 import { setLogLevel } from '../src/core/logger.ts';
 import { QuizBot, type SessionLike } from '../src/discord/bot.ts';
 import type { ChatGateway, ChatMessage } from '../src/discord/gateway.ts';
+import { rankingLines } from '../src/discord/format.ts';
 import { GuildStore } from '../src/discord/store.ts';
 import { createJudge } from '../src/judge/index.ts';
 import { UsageMeter } from '../src/llm/client.ts';
@@ -62,6 +63,10 @@ class FakeSession implements SessionLike {
   board = '';
   constructor(private config: Config) {
     this.rules = { ...config.game };
+    // Like GameSession: operator point corrections go straight to the page.
+    this.bus.on('operator:command', ({ command, args }) => {
+      if (command === 'punkte') void this.page.award(args.slice(0, -1).join(' '), Number(args.at(-1)));
+    });
   }
   async createLobby(board: string) {
     this.board = board;
@@ -72,8 +77,8 @@ class FakeSession implements SessionLike {
     await new TafelquizController({ page: this.page, bus: this.bus, judge, game: this.rules, pollMs: 20 }).run(this.ac.signal);
   }
   async endGame() {
+    this.ac.abort(); // like GameSession: stop the controller first, then end on the page
     await this.page.endGame();
-    this.ac.abort();
   }
   async close() {
     this.ac.abort();
@@ -89,10 +94,10 @@ async function until(fn: () => boolean, ms = 5000) {
   throw new Error('timeout');
 }
 
-function setup(discord: Record<string, unknown> = {}) {
+function setup(discord: Record<string, unknown> = {}, game: Record<string, unknown> = {}) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbbot-'));
   const config = ConfigSchema.parse({
-    game: { revealPauseSec: 0, answerTimeoutSec: 2, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2 },
+    game: { revealPauseSec: 0, answerTimeoutSec: 2, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2, ...game },
     judge: { cacheFile: path.join(tmp, 'cache.json') },
     llm: { provider: 'none' },
     discord: { dataDir: tmp, ...discord },
@@ -278,6 +283,125 @@ describe('QuizBot secrecy', () => {
     expect(gw.all()).not.toContain('Luigi');
     bus.emit('host:reveal', { answer: 'Luigi Mario' });
     await until(() => gw.all().includes('Lösung wäre Luigi'));
+    await gw.write(anna, '!quiz ende');
+    await until(() => bot.activeGame === null);
+  }, 10000);
+});
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const score = (s: FakeSession, name: string) => s.page.players.find((p) => p.name === name)!.score;
+
+async function startGame(gw: FakeGateway, bot: QuizBot) {
+  await gw.write(anna, '!quiz neu 1');
+  await gw.write(ben, '!quiz ich Ben');
+  await until(() => !!bot.activeGame?.turn && !bot.activeGame.questionOpen);
+}
+
+describe('QuizBot – ending mid-question (F6)', () => {
+  it('posts no verdict and clicks nothing on the page after "!quiz ende"', async () => {
+    const { gw, bot, session } = setup({}, { answerTimeoutSec: 10 });
+    await startGame(gw, bot);
+    await gw.write(anna, 'sport 100');
+    await until(() => !!bot.activeGame?.awaiting);
+    const clicks = session().page.log.length;
+    await gw.write(anna, '!quiz ende');
+    await until(() => bot.activeGame === null);
+    await sleep(300);
+    expect(gw.all()).not.toContain('(keine Antwort)');
+    expect(gw.all()).not.toContain('Lösung');
+    expect(session().page.log.slice(clicks)).toEqual(['endGame']);
+    expect(score(session(), 'Anna')).toBe(0);
+    expect(gw.all().match(/🥇/g)).toHaveLength(2); // F24: a 0:0 tie has two winners
+  }, 15000);
+});
+
+describe('QuizBot – servers (F7)', () => {
+  it('grants leader rights only on the server of the running game', async () => {
+    const { gw, bot, session } = setup();
+    await startGame(gw, bot);
+    const mallory = { id: 'u-mallory', name: 'Mallory', admin: true };
+    const elsewhere = { guildId: 'other-guild', channelId: 'other-chan' };
+    await gw.write(mallory, '!quiz regel zeit 5', elsewhere);
+    await gw.write(mallory, '!quiz ende', elsewhere);
+    await gw.write(mallory, '!quiz korrektur Anna +500', elsewhere);
+    await gw.write(mallory, '!quiz neu 1', elsewhere);
+    await sleep(300);
+    expect(session().rules.answerTimeoutSec).toBe(2);
+    expect(bot.activeGame).not.toBeNull();
+    expect(score(session(), 'Anna')).toBe(0);
+    expect(gw.all()).toContain('auf einem anderen Server');
+    await gw.write({ ...ben, admin: true }, '!quiz ende'); // an admin of the game's own server may
+    await until(() => bot.activeGame === null);
+  }, 15000);
+});
+
+describe('QuizBot – overruling after the verdict (F12)', () => {
+  it('corrects the points of the last verdict until the next card, and says so honestly otherwise', async () => {
+    const { gw, bot, session } = setup({}, { buzzWindowSec: 10, answerTimeoutSec: 5 });
+    await startGame(gw, bot);
+    await gw.write(anna, '!quiz richtig'); // nothing judged yet
+    expect(gw.all()).toContain('keine Bewertung zum Überstimmen');
+    expect(gw.reactions).not.toContain('👍');
+
+    await gw.write(anna, 'sport 100');
+    await until(() => !!bot.activeGame?.awaiting);
+    await gw.write(anna, 'zwölf');
+    await until(() => !!bot.activeGame?.buzzerOpen);
+    expect(score(session(), 'Anna')).toBe(-50);
+    const t0 = Date.now();
+    await gw.write(anna, '!quiz richtig'); // the leader overrules during the buzzer window
+    await until(() => gw.all().includes('Korrigiert'));
+    await until(() => score(session(), 'Anna') === 100);
+    // A solved question needs no buzzer round – it ends long before its 10 s.
+    await until(() => bot.activeGame?.turn?.player === 'Ben' && !bot.activeGame.questionOpen, 5000);
+    expect(Date.now() - t0).toBeLessThan(5000);
+
+    // Still the same verdict until the next card is picked.
+    await gw.write(anna, '!quiz falsch');
+    await until(() => score(session(), 'Anna') === -50);
+    await gw.write(ben, 'film 200');
+    await until(() => !!bot.activeGame?.awaiting);
+    expect(bot.activeGame?.lastVerdict).toBeNull(); // a new card: the old verdict can no longer be changed
+    await gw.write(ben, 'Naboo'); // no LLM → the judge asks the leader
+    await until(() => !!bot.activeGame?.operatorNeeded);
+    await gw.write(anna, '!quiz falsch');
+    await until(() => gw.all().includes('„Naboo“ ist falsch'));
+    await until(() => !!bot.activeGame?.buzzerOpen);
+    await gw.write(anna, '!quiz skip'); // ends the 10 s buzzer window at once
+    await until(() => gw.all().includes('Buzzer-Runde beendet'));
+    await until(() => gw.all().includes('Spiel vorbei'), 5000);
+    expect(score(session(), 'Anna')).toBe(-50);
+    expect(score(session(), 'Ben')).toBe(-100);
+  }, 30000);
+});
+
+describe('QuizBot – rules reset (F18)', () => {
+  it('"regeln reset" restores the adjustable rules but never autoStart from the config', async () => {
+    const { gw, bot, session } = setup({}, { autoStart: true, answerTimeoutSec: 7 });
+    await gw.write(anna, '!quiz neu 1'); // Ben stays unlinked → the bot must not start
+    await until(() => !!bot.activeGame?.lobby);
+    await gw.write(anna, '!quiz regel zeit 30');
+    expect(session().rules.answerTimeoutSec).toBe(30);
+    await gw.write(anna, '!quiz regeln reset');
+    expect(session().rules.answerTimeoutSec).toBe(7);
+    expect(session().rules.autoStart).toBe(false);
+    expect(session().rules.publicBoard).toBeUndefined();
+    await sleep(400);
+    expect(session().page.phase).toBe('lobby');
+    await gw.write(anna, '!quiz ende');
+    await until(() => bot.activeGame === null);
+  }, 10000);
+});
+
+describe('QuizBot – reveal and ranking', () => {
+  it('shows the full note in the chat (F23) and gives tied players the same medal (F24)', async () => {
+    const { gw, bot } = setup();
+    await startGame(gw, bot);
+    const bus = (bot.activeGame as unknown as { session: FakeSession }).session.bus;
+    const note = '1. September 1939 - In Europa begann der Zweite Weltkrieg mit dem Überfall auf Polen.';
+    bus.emit('host:reveal', { answer: note });
+    await until(() => gw.all().includes(note));
+    expect(rankingLines([{ name: 'A', score: 100 }, { name: 'B', score: 100 }, { name: 'C', score: 50 }])).toEqual(['🥇 **A** — **100**', '🥇 **B** — **100**', '🥉 **C** — **50**']);
     await gw.write(anna, '!quiz ende');
     await until(() => bot.activeGame === null);
   }, 10000);

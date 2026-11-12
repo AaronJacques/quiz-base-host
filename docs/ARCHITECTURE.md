@@ -17,7 +17,7 @@ src/
 │
 ├── core/                  framework-freie Basis
 │   ├── types.ts           Domänenmodell (TafelquizState, QuestionState, …)
-│   ├── events.ts          typisierter EventBus (host:* raus, player:*/operator:* rein)
+│   ├── events.ts          typisierter EventBus (host:* raus, player:*/operator:* rein); Fehler eines Handlers (auch async) werden geloggt, nie weitergereicht
 │   └── logger.ts
 │
 ├── browser/               "Wie kommt JS in einen Tab?"  – kein quiz-base-Wissen
@@ -39,11 +39,11 @@ src/
 │
 ├── judge/                 "Ist die Antwort richtig?"
 │   ├── normalize.ts       Normalisierung, Levenshtein, Zahlen, Lösungsvarianten
-│   ├── fuzzy-judge.ts     kostenlos, konservativ ("unsure" statt raten)
+│   ├── fuzzy-judge.ts     kostenlos, konservativ ("unsure" statt raten); nie "richtig" für Absicherungen ("A oder B", "nicht A", Listen)
 │   ├── llm-judge.ts       Bewertung + Lösen von Bildfragen per LLM
 │   ├── operator-judge.ts  Mensch im Terminal
 │   ├── cascade-judge.ts   Chain of Responsibility mit Cache vor teuren Stufen
-│   └── cache.ts           persistenter Cache (.qbhost/judge-cache.json)
+│   └── cache.ts           persistenter Cache (.qbhost/judge-cache.json); Schlüssel mit Medienidentität (Bild-URLs, Audio-Titel)
 │
 ├── llm/                   "Wie rede ich mit Claude?"
 │   ├── client.ts          LlmClient-Interface (einmalige JSON-Antwort) + UsageMeter
@@ -62,7 +62,8 @@ src/
 │   ├── transport.ts       VoiceTransport-Interface: play(pcm), onUtterance(pro Sprecher)
 │   ├── discord-voice.ts   @discordjs/voice: Opus empfangen/dekodieren, PCM abspielen (DAVE)
 │   ├── loopback.ts        Voice-Raum per HTTP – Tests und Agenten-Spieler ohne Discord
-│   ├── stt.ts             whisper.cpp-Server (warm), Halluzinationsfilter
+│   ├── stt.ts             whisper.cpp-Server (warm, startet nach Absturz neu), Halluzinationsfilter
+│   ├── children.ts        ein gemeinsamer Exit-Hook, der whisper-server/Piper mit dem Prozess beendet
 │   ├── tts.ts             Piper (Python-Worker, warm) oder macOS say, mit Cache
 │   ├── voice-host.ts      Sprechwarteschlange (nächster Satz wird vorab erzeugt), Echo-Schutz, Lautstärke-/Längenfilter
 │   ├── commands.ts        Rufname „Quizmaster“, Sprachbefehle, „Buzzer!“, gesprochene Zahlen
@@ -85,14 +86,18 @@ controller.onQuestion  host:question ───────────► Pult z
                        resolveReference() läuft parallel: Notiz → MC-Option → Cache → Vision-LLM
 page.startTimer(45)    host:await-answer ───────► Pult zeigt Eingabefeld + Countdown
                        ◄─────────────── player:answer "luigi mario"
-judge.judge()          Fuzzy ─(unsicher)─► Cache ─(Miss)─► Haiku ─(Fehler)─► Operator
+judge.judge()          Fuzzy ─(unsicher)─► Cache ─(Miss)─► Haiku ─(Fehler)─► Operator (Lösung nur per host:notice.detail)
 page.award(±)          quick buttons (+Wert/+½/−½) oder manueller Punkte-Dialog
 page.animate()         "Richtig"/"Falsch"-Animation für alle
-(falsch) buzzerRound   releaseBuzzer → warten auf "X hat gebuzzert" → erneut fragen/bewerten
+(falsch) buzzerRound   releaseBuzzer → warten auf "X hat gebuzzert" (feste Fensterlänge, skip beendet) → erneut fragen/bewerten
 page.closeQuestion()   quiz-base gibt den Zug weiter → nächster onBoard-Durchlauf
 ```
 
 Jeder Warteschritt läuft über `whilePage()`: Ändert ein Mensch im Browser den Zustand (Frage manuell geöffnet/geschlossen, Spiel beendet), bricht das Warten ab und die Hauptschleife liest den neuen Zustand. Die Phasen-Handler sind idempotent, daher kann qbhost auch in ein laufendes Spiel einsteigen.
+
+**Spielende mitten in der Frage:** `GameSession.endGame()` stoppt zuerst den Controller (AbortSignal) und klickt erst dann „Spiel beenden“. Der Controller prüft das Signal nach jedem Warten und nach der Bewertung: Eine abgeschnittene Frage bekommt kein Verdict, keine Punkte, keine Auflösung und keine weiteren Klicks. `close()` wartet, bis „Spiel beenden“ durch ist, bevor der Browser zugeht.
+
+**Geheimhaltung:** Was die Lösung enthalten kann (Notiz, LLM-Lösung, LLM-Begründung), geht vor `host:reveal` nur in `host:notice.detail` (DM an die Spielleitung, Operator-Konsole). `host:say` ist öffentlich (Web-Pult). Das Web-Pult bekommt `verdict.reason` nie, Discord hält Begründungen bis zur Auflösung zurück, und das `info`-Log zeigt weder LLM-Lösung noch LLM-Begründung (nur `debug`).
 
 ## Erweiterungspunkte
 
@@ -120,7 +125,9 @@ Discord-Voice ─Opus pro Sprecher─► DiscordVoiceTransport ─PCM─► Voic
                                                                                                    → wer ist dran? → wie eine Chat-Nachricht (Karte/Antwort)
 ```
 
-Gesprochenes wird zu einer synthetischen Chat-Nachricht (`viaVoice: true`) und läuft durch dieselbe Logik wie getippter Text – Kartenparser, Antworten, Menüs, Befehle. Antworten auf gesprochene Eingaben gehen in den Chat **und** in den Voice-Channel. Der Controller kennt Sprache nicht; einzige Ergänzung ist das Event `player:buzz`, das mit dem quiz-base-Buzzer um die Wette läuft.
+Gesprochenes wird zu einer synthetischen Chat-Nachricht (`viaVoice: true`) im Channel des Spiels und läuft durch dieselbe Logik wie getippter Text – Kartenparser, Antworten, Menüs, Befehle. Antworten auf gesprochene Eingaben gehen in den Chat **und** in den Voice-Channel. Der Controller kennt Sprache nicht; Ergänzungen sind nur das Event `player:buzz`, das mit dem quiz-base-Buzzer um die Wette läuft, und der Zeitbonus `game.bonusTimeSec`, den die VoiceBridge setzt, solange sie moderiert (getrennt von den Grundwerten, damit Regeländerungen und Reconnects ihn nicht verfälschen).
+
+Der Bot hostet ein Spiel gleichzeitig; es gehört zu dem Discord-Server, auf dem es erstellt wurde. Befehle, Leitungsrechte, Ansagen und der Voice-Channel gelten nur dort.
 
 ## Warum keine direkte Supabase-Anbindung?
 

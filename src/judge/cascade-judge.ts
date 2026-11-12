@@ -17,12 +17,12 @@ export class CascadeJudge implements AnswerJudge {
   ) {}
 
   async judge(input: JudgeInput): Promise<JudgeResult> {
-    const key = JudgeCache.verdictKey(input.question, input.reference, input.answer, { spoken: input.spoken, version: JUDGE_RULES_VERSION });
+    const key = JudgeCache.verdictKey(input.question, input.reference, input.answer, { spoken: input.spoken, version: JUDGE_RULES_VERSION, media: input.media });
     let last: JudgeResult = { verdict: 'unsure', method: 'fuzzy', confidence: 0 };
 
     for (const [i, stage] of this.stages.entries()) {
       // Check the cache right before the first expensive stage.
-      if (stage.cache && this.cache) {
+      if (stage.cache && this.cache && key) {
         const hit = this.cache.getVerdict(key);
         if (hit) {
           log.info(`Cache-Treffer: "${input.answer}" → ${hit.verdict}`);
@@ -35,9 +35,12 @@ export class CascadeJudge implements AnswerJudge {
         log.warn(`${stage.name} fehlgeschlagen: ${(e as Error).message}`);
         continue;
       }
-      log.info(`${stage.name}: "${input.answer}" → ${last.verdict}${last.reason ? ` (${last.reason})` : ''}`);
+      // LLM/operator reasons often name the solution – only on debug, the info log is visible before the reveal.
+      const publicReason = last.reason && (last.method === 'fuzzy' || last.method === 'rule') ? ` (${last.reason})` : '';
+      log.info(`${stage.name}: "${input.answer}" → ${last.verdict}${publicReason}`);
+      if (last.reason && !publicReason) log.debug(`${stage.name}-Begründung: ${last.reason}`);
       if (last.verdict !== 'unsure') {
-        if (stage.cache && this.cache) this.cache.setVerdict(key, last);
+        if (stage.cache && this.cache && key) this.cache.setVerdict(key, last);
         return last;
       }
       if (i === this.stages.length - 1) break;

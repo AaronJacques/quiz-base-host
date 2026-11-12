@@ -75,11 +75,29 @@ export function verdictLine(v: HostEvents['host:verdict'], echo: boolean): strin
   return v.correct ? `${heard}Richtig!${pts}` : `${heard}Leider falsch.${pts}`;
 }
 
+/** Longer spoken solutions are cut here – the chat keeps the full note. */
+const REVEAL_MAX_WORDS = 15;
+
+/**
+ * The spoken solution is only its core: no brackets, the first sentence, nothing after a dash
+ * that starts an explanation ("1. September 1939 - In Europa begann …"). The chat shows the full note.
+ */
+export function solutionCore(answer: string): string {
+  // Notes often carry extras – "42,195 km (26,22 Meilen)", "Vereinigte Staaten / USA".
+  let core = answer.replace(/\([^)]*\)/g, ' ').replace(/\s+\/\s+/g, ' oder ').replace(/\s+/g, ' ').trim();
+  // First sentence: a full stop after a word (not "1. September", "z.B.", "Dr.") followed by a capital.
+  core = core.split(/(?<=\p{Ll}{2}[.!?])\s+(?=\p{Lu})/u)[0]!;
+  // "X - long explanation": keep X; short tails stay ("Bryan Adams - Summer Of 69").
+  const dash = core.match(/^(.+?)\s+[-–—]\s+(.+)$/u);
+  if (dash && dash[2]!.split(' ').length >= 5) core = dash[1]!;
+  const words = core.split(' ');
+  if (words.length > REVEAL_MAX_WORDS) core = words.slice(0, REVEAL_MAX_WORDS).join(' ');
+  return core.replace(/[\s.,;:!?–-]+$/u, '');
+}
+
 export function revealLine(answer: string | null): string {
   if (!answer) return '';
-  // Notes often carry extras – "42,195 km (26,22 Meilen)", "Vereinigte Staaten / USA".
-  const spoken = answer.replace(/\([^)]*\)/g, ' ').replace(/\s+\/\s+/g, ' oder ').replace(/\s+/g, ' ').trim();
-  return `Die richtige Antwort war: ${spoken || answer}.`;
+  return `Die richtige Antwort war: ${solutionCore(answer) || answer}.`;
 }
 
 /** "Richtig: voller Wert. Falsch: minus die Hälfte. Buzzer: …" – said once at the start. */

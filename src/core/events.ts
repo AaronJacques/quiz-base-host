@@ -1,5 +1,8 @@
 import { EventEmitter } from 'node:events';
+import { createLogger } from './logger.ts';
 import type { BoardCell, PlayerState } from './types.ts';
+
+const log = createLogger('bus');
 
 /**
  * Everything that crosses module boundaries goes through this typed bus.
@@ -43,9 +46,22 @@ export class EventBus {
     this.emitter.emit(event, payload);
   }
 
-  on<K extends keyof HostEvents>(event: K, handler: (payload: HostEvents[K]) => void): () => void {
-    this.emitter.on(event, handler);
-    return () => this.emitter.off(event, handler);
+  /**
+   * Subscribe. A failing handler (thrown error or rejected promise of an async handler) is logged and
+   * never reaches the emitter – one broken subscriber must not stop the game or crash the process.
+   */
+  on<K extends keyof HostEvents>(event: K, handler: (payload: HostEvents[K]) => unknown): () => void {
+    const fail = (e: unknown) => log.error(`Fehler in ${event}-Handler: ${(e as Error)?.stack ?? e}`);
+    const safe = (payload: HostEvents[K]) => {
+      try {
+        const r = handler(payload);
+        if (r instanceof Promise) r.catch(fail);
+      } catch (e) {
+        fail(e);
+      }
+    };
+    this.emitter.on(event, safe);
+    return () => this.emitter.off(event, safe);
   }
 
   /** Resolve with the first payload that matches `filter`, or null after `timeoutMs`. */

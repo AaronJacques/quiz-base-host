@@ -7,6 +7,11 @@ export interface JudgeInput {
   hints?: string[];
   /** Transcribed from speech: judge by sound, not by spelling ("Preaking Bad" = "Breaking Bad"). */
   spoken?: boolean;
+  /**
+   * Identity of the question's pictures/sound (`JudgeCache.mediaKey`) – part of the verdict cache key when
+   * there is no reference. null = no stable identity → the verdict is not cached. Omitted = no media.
+   */
+  media?: string | null;
 }
 
 export type Verdict = 'correct' | 'wrong' | 'unsure';

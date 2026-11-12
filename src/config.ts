@@ -39,6 +39,12 @@ export const ConfigSchema = z.object({
       buzzerOnWrong: z.boolean().default(true),
       buzzWindowSec: z.number().int().default(15),
       buzzAnswerTimeoutSec: z.number().int().default(25),
+      /**
+       * Zusatzzeit in Sekunden auf Antwortzeit und Buzzerfenster (Antwortzeit nach Buzzer: die Hälfte).
+       * Setzt der Voice-Bot zur Laufzeit auf `voice.extraTimeSec`, solange er moderiert (Vorlesen braucht Zeit),
+       * und wieder auf 0, wenn er geht. Getrennt von den Grundwerten, damit Regeländerungen sie nicht verlieren.
+       */
+      bonusTimeSec: z.number().int().min(0).default(0),
       // Punkteregeln als Faktor vom Fragewert (1 = voller Wert, 0.5 = halber, 0 = nichts).
       // Standard = klassische quiz-base-Regeln. Per Discord änderbar (`!quiz regel …`).
       correctFactor: z.number().min(0).max(5).default(1),
@@ -123,7 +129,7 @@ export const ConfigSchema = z.object({
       ignoreWhileSpeaking: z.boolean().default(true),
       /** Rufname für Sprachbefehle („Quizmaster, Stand“). */
       wakeWords: z.array(z.string()).default(['quizmaster', 'quiz master', 'quizmeister', 'quizhost', 'quiz host']),
-      /** Zusätzliche Sekunden für Antwort- und Buzzerzeit, solange der Bot spricht (Vorlesen braucht Zeit). */
+      /** Zusätzliche Sekunden für Antwort- und Buzzerzeit, solange der Bot spricht (Vorlesen braucht Zeit). Wird als `game.bonusTimeSec` gesetzt. */
       extraTimeSec: z.number().int().default(10),
       /** Punktestand nach jeder n-ten Frage ansagen (0 = nie). */
       scoresEvery: z.number().int().default(3),
