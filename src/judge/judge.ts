@@ -12,6 +12,14 @@ export interface JudgeInput {
    * there is no reference. null = no stable identity → the verdict is not cached. Omitted = no media.
    */
   media?: string | null;
+  /** Multiple-choice options as shown on quiz-base ("A" … "D"), the correct one flagged. */
+  options?: ChoiceOption[];
+}
+
+export interface ChoiceOption {
+  letter: string;
+  label: string;
+  correct: boolean;
 }
 
 export type Verdict = 'correct' | 'wrong' | 'unsure';

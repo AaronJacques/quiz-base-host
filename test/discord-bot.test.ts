@@ -52,16 +52,20 @@ class FakeSession implements SessionLike {
   bus = new EventBus();
   meter = new UsageMeter();
   rules: Config['game'];
-  page = new FakeTafelquizPage(
-    ['Anna', 'Ben'],
-    [
-      [{ category: 'Sport', points: 100, text: 'Wie viele Pins beim Bowling?', note: '10' }],
-      [{ category: 'Film', points: 200, text: 'Geburtsplanet von Anakin?', note: 'Tatooine' }],
-    ],
-  );
+  page: FakeTafelquizPage;
   private ac = new AbortController();
   board = '';
-  constructor(private config: Config) {
+  constructor(
+    private config: Config,
+    names: string[] = ['Anna', 'Ben'],
+  ) {
+    this.page = new FakeTafelquizPage(
+      names,
+      [
+        [{ category: 'Sport', points: 100, text: 'Wie viele Pins beim Bowling?', note: '10' }],
+        [{ category: 'Film', points: 200, text: 'Geburtsplanet von Anakin?', note: 'Tatooine' }],
+      ],
+    );
     this.rules = { ...config.game };
     // Like GameSession: operator point corrections go straight to the page.
     this.bus.on('operator:command', ({ command, args }) => {
@@ -94,7 +98,7 @@ async function until(fn: () => boolean, ms = 5000) {
   throw new Error('timeout');
 }
 
-function setup(discord: Record<string, unknown> = {}, game: Record<string, unknown> = {}) {
+function setup(discord: Record<string, unknown> = {}, game: Record<string, unknown> = {}, players?: string[]) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbbot-'));
   const config = ConfigSchema.parse({
     game: { revealPauseSec: 0, answerTimeoutSec: 2, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2, ...game },
@@ -109,7 +113,7 @@ function setup(discord: Record<string, unknown> = {}, game: Record<string, unkno
     gateway: gw,
     config,
     store: new GuildStore(tmp),
-    createSession: (cfg) => (session = new FakeSession(cfg)),
+    createSession: (cfg) => (session = new FakeSession(cfg, players)),
     listBoards: async (q?: string) => {
       searches.push(q ?? '');
       const all = ['Test Board', 'Anderes Board', 'Allgemeinwissen Quiz v1', 'Allgemeinwissen Quiz v2', 'Dragon Ball Quiz'];
@@ -158,6 +162,40 @@ describe('QuizBot', () => {
     expect(session().page.players.find((p) => p.name === 'Ben')!.score).toBe(200);
     expect(gw.all()).toMatch(/🥇 <@u-ben> \(\*\*Ben\*\*\) — \*\*200\*\*/);
     await until(() => bot.activeGame === null);
+  }, 20000);
+
+  // Live 12.11.2026: the user played "Schulwissen 1. - 12. Klasse" alone. With minPlayers 2 nothing started
+  // automatically – fine – but the documented "!quiz los" (force start) was ignored by the controller as well.
+  it('plays alone: "!quiz los" starts below minPlayers, quiz-base ends the game itself, negative final score', async () => {
+    const aaron = { id: 'u-aaron', name: 'Aaron' };
+    const { gw, bot, session } = setup({}, {}, ['Aaron']);
+    await gw.write(aaron, '!quiz neu 1');
+    await until(() => gw.all().includes('join?code=ABC123'));
+    session().page.autoResults = true;
+    await until(() => gw.all().includes('1/1 bereit'));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(gw.all()).not.toContain("Los geht's"); // one player < minPlayers → no automatic start …
+    await until(() => gw.all().includes('`!quiz los` geht es trotzdem los')); // … but the bot says how to start
+
+    await gw.write(aaron, '!quiz los');
+    await until(() => gw.all().includes("Los geht's"));
+    await until(() => !!bot.activeGame?.turn && !bot.activeGame.questionOpen);
+    await gw.write(aaron, 'Sport 100');
+    await until(() => !!bot.activeGame?.awaiting);
+    await gw.write(aaron, 'keine Ahnung');
+    await until(() => gw.all().includes('„keine Ahnung“ ist falsch'));
+    // Always the same player's turn; no buzzer round without anybody else.
+    await until(() => bot.activeGame?.turn?.player === 'Aaron' && bot.activeGame.turn.open.length === 1 && !bot.activeGame.questionOpen);
+    expect(gw.all()).not.toContain('Buzzer frei');
+    await gw.write(aaron, 'Film 200');
+    await until(() => !!bot.activeGame?.awaiting);
+    await gw.write(aaron, 'weiß nicht');
+
+    await until(() => gw.all().includes('Spiel vorbei'), 8000);
+    expect(session().page.log).not.toContain('endGame'); // quiz-base ended it, nobody clicked "Spiel beenden"
+    expect(gw.all()).toMatch(/🏁 \*\*Spiel vorbei!\*\*\n🥇 <@u-aaron> \(\*\*Aaron\*\*\) — \*\*-150\*\*/);
+    await until(() => bot.activeGame === null);
+    expect(gw.all().match(/Spiel vorbei|Spiel beendet/g)).toHaveLength(1);
   }, 20000);
 
   it('lets players change the scoring rules via chat and applies them', async () => {

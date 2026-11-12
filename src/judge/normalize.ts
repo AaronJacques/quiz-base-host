@@ -16,18 +16,213 @@ export function stripUrls(s: string): string {
 }
 
 export function normalize(s: string): string {
-  return stripUrls(s)
-    .toLowerCase()
-    .replace(/ä/g, 'ae')
-    .replace(/ö/g, 'oe')
-    .replace(/ü/g, 'ue')
-    .replace(/ß/g, 'ss')
+  return markNegatives(
+    mathText(
+      stripUrls(s)
+        .toLowerCase()
+        .replace(/ä/g, 'ae')
+        .replace(/ö/g, 'oe')
+        .replace(/ü/g, 'ue')
+        .replace(/ß/g, 'ss'),
+    ),
+  )
     .normalize('NFKD')
     .replace(/[̀-ͯ]/g, '')
+    .replace(/\bsqrt\b/g, 'wurzel')
     .replace(/(\d)[.,](\d)/g, '$1.$2')
     .replace(/[^a-z0-9. ]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// ───────────────────────────── formulas ─────────────────────────────
+
+const SUPERSCRIPT: Record<string, string> = {
+  '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4', '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
+  '⁺': '+', '⁻': '-', '⁼': '=', '⁽': '(', '⁾': ')', 'ⁿ': 'n', 'ˣ': 'x', 'ʸ': 'y', 'ⁱ': 'i', 'ᵃ': 'a', 'ᵇ': 'b', 'ᶜ': 'c', 'ᵏ': 'k', 'ᵗ': 't',
+};
+const SUBSCRIPT: Record<string, string> = {
+  '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4', '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9',
+  '₊': '+', '₋': '-', '₌': '=', '₍': '(', '₎': ')', 'ₐ': 'a', 'ₑ': 'e', 'ₒ': 'o', 'ₓ': 'x', 'ₙ': 'n', 'ᵢ': 'i', 'ₖ': 'k', 'ₘ': 'm', 'ₜ': 't',
+};
+const GREEK: Record<string, string> = {
+  α: 'alpha', β: 'beta', γ: 'gamma', δ: 'delta', ε: 'epsilon', ϵ: 'epsilon', ζ: 'zeta', η: 'eta', θ: 'theta', ϑ: 'theta',
+  ι: 'iota', κ: 'kappa', λ: 'lambda', μ: 'mu', µ: 'mu', ν: 'nu', ξ: 'xi', π: 'pi', ρ: 'rho', σ: 'sigma', ς: 'sigma',
+  τ: 'tau', υ: 'ypsilon', φ: 'phi', ϕ: 'phi', χ: 'chi', ψ: 'psi', ω: 'omega', 'Ω': 'omega',
+};
+const SUPER_RE = new RegExp(`[${Object.keys(SUPERSCRIPT).join('')}]+`, 'g');
+const SUB_RE = new RegExp(`[${Object.keys(SUBSCRIPT).join('')}]`, 'g');
+const GREEK_RE = new RegExp(`[${Object.keys(GREEK).join('')}]`, 'gi');
+
+/**
+ * Unicode math as plain ASCII: "x²" → "x^2", "10⁻³" → "10^-3", "H₂O" → "H2O", "2πr" → "2 pi r",
+ * "√2" → " sqrt 2", "·"/"×" → "*", "÷"/"∶" → "/", "−" → "-", "½" → "1/2". quiz-base shows formulas as such
+ * Unicode text, players type the ASCII spelling.
+ */
+export function mathText(s: string): string {
+  return s
+    .replace(/[¼-¾⅐-⅞]/g, (c) => ` ${c.normalize('NFKD')} `)
+    .replace(SUPER_RE, (run) => {
+      const v = [...run].map((c) => SUPERSCRIPT[c]).join('');
+      return /^-?[0-9a-z]$|^-?\d+$/.test(v) ? `^${v}` : `^(${v})`;
+    })
+    .replace(SUB_RE, (c) => SUBSCRIPT[c]!)
+    .replace(GREEK_RE, (c) => ` ${GREEK[c] ?? GREEK[c.toLowerCase()]} `)
+    .replace(/√/g, ' sqrt ')
+    .replace(/[×·⋅∙✕]/g, '*')
+    .replace(/[÷∶⁄∕]/g, '/')
+    .replace(/[−–]/g, '-')
+    .replace(/[′’´]/g, "'")
+    .replace(/∞/g, ' unendlich ');
+}
+
+/** A minus that starts a number ("-5", "x = −7", "bei -5 Grad") becomes the word "minus"; "10-3" and "1914 - 1918" stay. */
+function markNegatives(s: string): string {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '-') {
+      let j = i + 1;
+      while (s[j] === ' ') j++;
+      if (/\d/.test(s[j] ?? '')) {
+        let k = i - 1;
+        while (k >= 0 && s[k] === ' ') k--;
+        const prev = k >= 0 ? s[k]! : '';
+        const tight = j === i + 1 && k < i - 1; // " -5": space before, none after
+        if (!prev || /[(=±,;:+*/^<>≈]/.test(prev) || (tight && !/[\d)]/.test(prev))) {
+          out += ' minus ';
+          continue;
+        }
+      }
+    }
+    out += s[i];
+  }
+  return out;
+}
+
+/**
+ * Canonical spelling of a formula, for equality only: "a² + b² = c²", "a^2+b^2=c^2" and "a2 + b2 = c2" → "a2+b2=c2";
+ * "F = m · a" = "F=m*a" = "f=ma"; "2πr" = "2*pi*r"; "√(2)" = "sqrt(2)" = "Wurzel aus 2"; "U = R x I" = "U=R*I".
+ * Exponents after a letter may be written without "^" ("x2" = "x²"), after a digit not ("2³" ≠ "23").
+ */
+export function mathKey(s: string): string {
+  let k = mathText(stripUrls(s).toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss'))
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '');
+  k = k
+    .replace(/\b(?:quadrat)?wurzel\s+(?:aus|von)\b|\b(?:quadrat)?wurzel\b|\bsqrt\b/g, ' √ ')
+    .replace(/\bhoch\b/g, '^')
+    .replace(/\bquadrat\b/g, '^2')
+    .replace(/\bgeteilt durch\b|\bdurch\b/g, '/')
+    .replace(/\bmal\b/g, '*')
+    .replace(/\bplus\b/g, '+')
+    .replace(/\bminus\b/g, '-')
+    .replace(/\b(?:ist )?gleich\b/g, '=')
+    .replace(/\*\*/g, '^')
+    .replace(/\+\s*\/?\s*-/g, '±')
+    // "U = R x I", "7 x 3": a lone x between two operands multiplies.
+    .replace(/([\w)])\s+x\s+(?=[\w(√])/g, '$1*')
+    .replace(/(\d)x(?=\d)/g, '$1*')
+    .replace(/([\w)])\s*:\s*(?=[\w(√])/g, '$1/')
+    .replace(/(\d),(\d)/g, '$1.$2')
+    .replace(/\s+/g, '')
+    .replace(/[.?!]+$/, '');
+  // Multiplication signs are optional ("m*a" = "ma") – except between two numbers ("2*3" ≠ "23").
+  k = k.replace(/\*/g, (m, off: number, str: string) => (/\d/.test(str[off - 1] ?? '') && /\d/.test(str[off + 1] ?? '') ? m : ''));
+  // Brackets around a single term are optional: "√(2)" = "√2", "cos(x)" = "cos x", "/(2a)" = "/2a".
+  for (let prev = ''; prev !== k; ) {
+    prev = k;
+    k = k.replace(/\((-?[a-z0-9.']+)\)/g, '$1');
+  }
+  return k.replace(/([a-z)'])\^(\d+)/g, '$1$2');
+}
+
+/** Has operators that change a number's value ("√2", "2³", "1/2", "3*4", "pi") – then its digits alone say nothing. */
+export function hasMathValue(s: string): boolean {
+  return /[√π^²³⁰¹⁴-⁹½¼¾⅓-⅞]|\d\s*[*/:×·÷x]\s*\d|\b(?:sqrt|pi|wurzel|hoch|quadrat)\b/i.test(s);
+}
+
+/**
+ * Value of a pure arithmetic expression in `mathKey` spelling ("1/2", "√2", "2pi", "3*10^8", "-7"), else null.
+ * Variables, functions and anything unparsable give null – it never guesses.
+ */
+export function mathValue(key: string): number | null {
+  let i = 0;
+  const peek = () => key[i] ?? '';
+  const num = (): number | null => {
+    const m = /^\d+(?:\.\d+)?/.exec(key.slice(i));
+    if (!m) return null;
+    i += m[0].length;
+    return parseFloat(m[0]);
+  };
+  const atom = (): number | null => {
+    if (peek() === '(') {
+      i++;
+      const v = expr();
+      if (peek() !== ')') return null;
+      i++;
+      return v;
+    }
+    if (peek() === '√') {
+      i++;
+      const v = power();
+      return v === null || v < 0 ? null : Math.sqrt(v);
+    }
+    if (key.startsWith('pi', i)) {
+      i += 2;
+      return Math.PI;
+    }
+    return num();
+  };
+  const power = (): number | null => {
+    const base = atom();
+    if (base === null) return null;
+    if (peek() !== '^') return base;
+    i++;
+    const exp = unary();
+    return exp === null ? null : Math.pow(base, exp);
+  };
+  const unary = (): number | null => {
+    if (peek() === '-' || peek() === '+') {
+      const neg = key[i++] === '-';
+      const v = unary();
+      return v === null ? null : neg ? -v : v;
+    }
+    return power();
+  };
+  const term = (): number | null => {
+    let v = unary();
+    while (v !== null) {
+      const c = peek();
+      if (c === '*' || c === '/') {
+        i++;
+        const r = unary();
+        if (r === null) return null;
+        v = c === '*' ? v * r : v / r;
+      } else if (c === '(' || c === '√' || key.startsWith('pi', i) || (/\d/.test(c) && /[)i]/.test(key[i - 1] ?? ''))) {
+        const r = power(); // implicit multiplication: "2pi", "2√2", "3(4)"
+        if (r === null) return null;
+        v *= r;
+      } else break;
+    }
+    return v;
+  };
+  const expr = (): number | null => {
+    let v = term();
+    while (v !== null && (peek() === '+' || peek() === '-')) {
+      const plus = key[i++] === '+';
+      const r = term();
+      if (r === null) return null;
+      v = plus ? v + r : v - r;
+    }
+    return v;
+  };
+  if (!key) return null;
+  const v = expr();
+  return v !== null && i === key.length && Number.isFinite(v) ? v : null;
+}
+
+export function sameValue(a: number, b: number): boolean {
+  return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
 }
 
 export function tokens(s: string): string[] {
@@ -76,7 +271,9 @@ export function hedgeWords(answer: string, reference: string): string[] {
   const ref = new Set(normalize(reference).split(' '));
   const hedges = normalize(answer).split(' ').filter((w) => HEDGE_WORDS.has(w) && !ref.has(w));
   // "Paris / London", "Paris | London" – separators of alternatives (normalize() drops them).
-  if (/\S\s*[/|;]\s*\S/.test(stripUrls(answer)) && !/[/|;]/.test(stripUrls(reference))) hedges.push('/');
+  // A slash between numbers or single letters divides ("1/2", "s/t") and hedges nothing.
+  const divisions = /(?<![a-zà-ÿ])([a-z0-9)])\s*\/\s*(?=[a-z0-9(√π](?![a-zà-ÿ]))/gi;
+  if (/\S\s*[/|;]\s*\S/.test(stripUrls(answer).replace(divisions, '$1÷')) && !/[/|;]/.test(stripUrls(reference))) hedges.push('/');
   return hedges;
 }
 
@@ -98,12 +295,21 @@ export function vowelSkeleton(s: string): string {
     .replace(/(.)\1+/g, '$1');
 }
 
-/** Extracts numbers incl. German number words ("vier" → 4, "42,195" → 42.195). */
+/** Extracts numbers incl. German number words and signs ("vier" → 4, "42,195" → 42.195, "−7" / "minus 7" → -7). */
 export function numbers(s: string): number[] {
-  const n = normalize(s);
   const out: number[] = [];
-  for (const m of n.matchAll(/\d+(?:\.\d+)?/g)) out.push(parseFloat(m[0]));
-  for (const t of n.split(' ')) if (t in NUMBER_WORDS) out.push(NUMBER_WORDS[t]!);
+  let sign = 1;
+  for (const t of normalize(s).split(' ')) {
+    if (t === 'minus') {
+      sign = -1;
+      continue;
+    }
+    const found = [...t.matchAll(/\d+(?:\.\d+)?/g)].map((m) => parseFloat(m[0]));
+    if (t in NUMBER_WORDS) found.push(NUMBER_WORDS[t]!);
+    if (found.length) found[0] = sign * found[0]!;
+    out.push(...found);
+    sign = 1;
+  }
   return out;
 }
 
@@ -115,25 +321,42 @@ export function isNonAnswer(answer: string): boolean {
 }
 
 /**
+ * Formula-like text ("a² + b² = c²", "v = s / t", "cos(x)", "x = (−b ± √(b² − 4ac)) / 2a"): its brackets
+ * and slashes are maths, not explanations or alternatives.
+ */
+export function isFormula(s: string): boolean {
+  return /[=√π^±∞²³¹⁰⁴-⁹⁺⁻₀-₉]/.test(s) || /\b[a-z]{1,4}'?\([^)]*\)/i.test(s) || /(?:^|[\s(])[a-z]\s*[*/×·÷:]\s*[a-z0-9](?:$|[\s)])/i.test(s);
+}
+
+/**
  * Splits a host note into acceptable answer variants. Notes often look like
  * "Tatooine https://…", "Volksrepublik China", "Breaking Bad / BB",
  * "Der Federball (Badminton) kann …" – we take the whole note, the part before
- * an explanation, and explicit alternatives.
+ * an explanation, and explicit alternatives. Formulas stay whole ("v = s / t" never yields "t").
  */
 export function referenceVariants(note: string): string[] {
   const clean = stripUrls(note).replace(/\s+/g, ' ').trim();
   if (!clean) return [];
   const variants = new Set<string>([clean]);
-  const withoutParens = clean.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+  const formula = isFormula(clean);
+  const withoutParens = formula ? clean : clean.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
   if (withoutParens) variants.add(withoutParens);
-  for (const m of clean.matchAll(/\(([^)]+)\)/g)) {
-    const inner = m[1]!.trim();
-    variants.add(inner);
-    // "(englisch: Bolts)", "(auch: BB)" → "Bolts", "BB"
-    const afterColon = inner.split(':').slice(1).join(':').trim();
-    if (afterColon) variants.add(afterColon);
+  if (!formula) {
+    for (const m of clean.matchAll(/\(([^)]+)\)/g)) {
+      const inner = m[1]!.trim();
+      variants.add(inner);
+      // "(englisch: Bolts)", "(auch: BB)" → "Bolts", "BB"
+      const afterColon = inner.split(':').slice(1).join(':').trim();
+      if (afterColon) variants.add(afterColon);
+    }
   }
-  for (const part of withoutParens.split(/\s*(?:\/|;|\boder\b|\bor\b|\|)\s*/i)) if (part.trim()) variants.add(part.trim());
+  const separators = formula ? /\s*(?:;|\boder\b|\bor\b|\|)\s*/i : /\s*(?:\/|;|\boder\b|\bor\b|\|)\s*/i;
+  for (const part of withoutParens.split(separators)) if (part.trim()) variants.add(part.trim());
+  // "X = 8" (solution of an equation): the value alone is the answer as well.
+  for (const v of [...variants]) {
+    const m = /^[a-z]\s*=\s*([-−]?\s*\d+(?:[.,]\d+)?(?:\s*\/\s*\d+)?)$/i.exec(v);
+    if (m) variants.add(m[1]!.replace(/\s+/g, ''));
+  }
   return [...variants].filter((v) => normalize(v).length > 0);
 }
 

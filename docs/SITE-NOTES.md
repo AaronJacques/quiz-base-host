@@ -1,4 +1,4 @@
-# quiz-base.de – DOM-Notizen (Stand: 11.11.2026)
+# quiz-base.de – DOM-Notizen (Stand: 12.11.2026)
 
 Live erkundet mit Host + 2 Testspielern. Diese Datei dokumentiert, worauf `src/site/tafelquiz/probe.browser.js` sich verlässt. Ändert quiz-base das Layout: `npx qbhost probe` ausführen, mit dieser Datei vergleichen, Probe anpassen.
 
@@ -38,6 +38,8 @@ Live erkundet mit Host + 2 Testspielern. Diese Datei dokumentiert, worauf `src/s
 ### Offene Frage
 
 - `section[aria-label="Aktive Frage"]`: `span` „`<n> Punkte`“, erstes `p` = Fragetext, `img` (oft `/_next/image?url=…`, manchmal `data:`-URI, manchmal kaputt), `p` „Richtige Antwort (Notiz):“ + nächstes `p` = Notiz oder „Keine Notiz hinterlegt“.
+- **Multiple Choice** (z.B. Board „Schulwissen 1. - 12. Klasse“, dann ohne Notiz): `ul > li` je Option = `span` Buchstabe (`A`–`D`) + `span` Text; die richtige Option hat zusätzlich die Klasse `border-success`, ein Häkchen-`svg` und `span.sr-only` „richtig“. **Achtung:** `innerText` des `li` enthält das versteckte „richtig“ („D klein richtig“). Der Probe liest Buchstabe, Text und Markierung getrennt. Vorher landete das „richtig“ im Chat und in der Sprachansage, also die Lösung vor der Auflösung. Leere Optionen kommen vor („D“ ohne Text).
+- **Formeln** stehen als Unicode-Klartext im `p`: „3² + 4²“, „ln(eˣ) = 5“, „x = (−b ± √(b² − 4ac)) / 2a“, „f′(x) = 2x“, „1/x für x → ∞“, „U = R x I“. Kein KaTeX/MathJax, kein `<sup>`/`<sub>`. Der Probe liest solche Markup-Formeln trotzdem einmal und lesbar (`mathT`), falls ein Board sie hat. Spieler tippen die ASCII-Schreibweise (`x^2`, `sqrt(2)`, `pi`, `*`): `mathKey()`/`mathValue()` in `src/judge/normalize.ts` gleichen das ab.
 - Audio: `p` „Audio für diese Frage“, Button `Abspielen` (→ `Pause` während Wiedergabe), `Stop`, YouTube-`iframe[title]` (Titel verrät oft die Lösung), „wird für alle Spieler synchronisiert“. Der Titel ist die Identität der Audiofrage für den Lösungs-Cache; ohne Titel (oder bei `data:`-Bildern, die der Probe als `data:` meldet) wird eine per LLM bestimmte Lösung nicht gecacht.
 - `section[aria-label=Timer]`: Zahl-Input, `Start` (läuft: `Stopp`), Presets `10 s`/`20 s`/`30 s`/`60 s`.
 - `section[aria-label=Buzzer]` `p`: „<Name> ist dran, Buzzer gesperrt“ | „Warten auf Buzzer...“ (offen) | „<Name> hat gebuzzert!“ (`role=status`). Buttons `Buzzer freigeben` / `Buzzer zurücksetzen`.
@@ -49,7 +51,16 @@ Live erkundet mit Host + 2 Testspielern. Diese Datei dokumentiert, worauf `src/s
 
 - Manuelle Punkte (`[role=dialog]`): `input[aria-label="Punkte für <Name>"]`, Buttons `Hinzufügen`/`Abziehen`, `aria-label=Schließen`.
 - Spiel beenden: „Spiel wirklich beenden?“ → `Abbrechen` / `Ja, beenden`.
-- Ergebnis: `SPIEL VORBEI!`, `CHAMPION!`, Buttons `Nochmal spielen`, `Ergebnisse teilen`.
+- Ergebnis: `SPIEL VORBEI!`, `CHAMPION!`, Buttons `Nochmal spielen`, `Ergebnisse teilen`. Ist selbst ein `[role=dialog]` (`aria-labelledby="endscreen-title"`); Name in `div[title]`, Punkte im nächsten Geschwister-`div`, auch bei Platz 2 („2. PLATZ“).
+
+### Spielende und Board-Wechsel (live geprüft 12.11.2026)
+
+- Nach dem Schließen der **letzten Frage des letzten Boards** zeigt quiz-base **von selbst** den Ergebnisbildschirm. „Spiel beenden“ ist dann nicht mehr da (`autoEnd` greift nur, wenn quiz-base das nicht tut).
+- Ist ein Board durch, bleibt quiz-base auf diesem Board stehen. Der Controller wechselt mit `Board 2` weiter. Danach hat `Board 2` die Klasse `from-btn-primary-from`, `boards()` meldet `active: 2`. Die Buttons enthalten `span` „Board n“ (ab `sm`) und „Bn“ (mobil).
+- „Spiel beenden“ geht auch bei offener Frage. Nach „Ja, beenden“ zeigt der Host nach ~0,5 s die Ergebnisse, die Spieler kurz danach. **Den Host-Browser erst danach schließen.** Wird er direkt nach dem Klick geschlossen, kommt das Ende nie an: Die Spieler sehen weiter die offene Frage mit laufendem Timer. `TafelquizPage.endGame()` wartet deshalb auf den Ergebnisbildschirm, `closeLobby()` darauf, dass der Warteraum weg ist (der Host landet auf `/`).
+- Auch nach dem Spielende hält quiz-base die Lobby noch eine Weile (`/join?code=…` zeigt einen Warteraum, für „Nochmal spielen“). Weder „Zurück zur Startseite“ noch das Schließen des Browsers ändert das. Später meldet der Code „Lobby nicht gefunden“ (beobachtet: weniger als eine Stunde nach dem Ende). Die Host-Ansicht lässt sich nach dem Schließen des Browsers nicht wiederherstellen (`/host` leitet auf `/join` um).
+- Allein spielen geht: quiz-base startet ab einem bereiten Spieler. „Am Zug“ bleibt immer bei derselben Person.
+- Boards können pro Spalte lauter gleiche Punktwerte haben („Schulwissen“: 12 Spalten × 10 Karten à 100…1200). „1. Klasse 100“ nimmt dann die oberste freie Karte der Spalte.
 
 ## Spieler-Ansicht (Tafelquiz)
 

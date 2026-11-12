@@ -7,6 +7,9 @@ import { createLogger, sleep } from '../../core/logger.ts';
 
 const log = createLogger('page');
 
+/** How long ending a game / closing the lobby may take until quiz-base shows it (live: ~0.5 s). */
+const END_WAIT_MS = 6000;
+
 const PROBE_SRC = readFileSync(new URL('./probe.browser.js', import.meta.url), 'utf8')
   .trim()
   .replace(/;\s*$/, '');
@@ -113,19 +116,42 @@ export class TafelquizPage implements TafelquizPort {
     return res;
   }
 
-  /** Closes the waiting room (before the game started); confirms a dialog if one appears. */
+  /**
+   * Closes the waiting room (before the game started); confirms a dialog if one appears. Resolves once the waiting
+   * room is gone – the browser may be closed right after, and quiz-base must have sent the close by then.
+   */
   async closeLobby(): Promise<ActionResult> {
     const r = await this.act('closeLobby');
     await sleep(500);
     if ((await this.state()).dialog) await this.act('confirmDialog', 'Lobby schließen');
+    if (r.ok && !(await this.settle((s) => s.phase !== 'lobby'))) log.warn('Lobby schließen: der Warteraum ist noch da');
     return r;
   }
 
+  /**
+   * "Spiel beenden" → "Ja, beenden", then waits for the results screen. quiz-base sends the end to the players
+   * a moment after the click (live: ~0.5 s); closing the browser right after the click left them on the open question.
+   */
   async endGame(): Promise<ActionResult> {
     const r = await this.act('endGame');
     if (!r.ok) return r;
     await sleep(500);
-    return this.act('confirmDialog', 'Ja, beenden');
+    const c = await this.act('confirmDialog', 'Ja, beenden');
+    if (!c.ok) return c;
+    if (await this.settle((s) => s.phase === 'results')) return c;
+    log.warn('Spiel beenden: quiz-base zeigt keine Ergebnisse');
+    return { ok: false, error: 'no results screen after ending the game' };
+  }
+
+  /** Like waitFor, but a page that navigates away meanwhile (unreadable for a moment) also counts as settled. */
+  private async settle(predicate: (s: TafelquizState) => boolean): Promise<boolean> {
+    const end = Date.now() + END_WAIT_MS;
+    while (Date.now() < end) {
+      const s = await this.state().catch(() => null);
+      if (!s || predicate(s)) return true;
+      await sleep(250);
+    }
+    return false;
   }
 
   /** Poll until `predicate` holds; returns the matching state or null on timeout. */

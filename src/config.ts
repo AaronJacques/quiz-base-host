@@ -28,6 +28,7 @@ export const ConfigSchema = z.object({
     .object({
       /** Board, das automatisch als Lobby erstellt wird (Titel aus "Öffentliches Board verwenden"). Leer = Lobby manuell erstellen. */
       publicBoard: z.string().optional(),
+      /** So viele Spieler braucht der automatische Start. Ein ausdrücklicher Start (`start`, Discord `!quiz los`) geht auch mit weniger. */
       minPlayers: z.number().int().min(1).default(2),
       /** Spiel automatisch starten, sobald alle bereit sind. Sonst Operator: `start`. */
       autoStart: z.boolean().default(false),

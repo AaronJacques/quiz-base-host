@@ -66,6 +66,71 @@
     }
   },
 
+  /**
+   * Text of an element with formulas read once and readably. quiz-base itself writes formulas as Unicode text
+   * ("a² + b² = c²", "ln(eˣ)") – that is the fast path. <sup>/<sub> become "²"/"₂" (else "^(…)"/"_(…)"),
+   * KaTeX/MathJax (visible HTML + hidden MathML = everything twice) are read from their MathML only.
+   */
+  mathT(el) {
+    if (!el) return '';
+    if (!el.querySelector('sup,sub,math,.katex,mjx-container')) return this.t(el);
+    return this.mathWalk(el).replace(/\s+/g, ' ').replace(/\s+([?!.,;:)])/g, '$1').replace(/\(\s+/g, '(').trim();
+  },
+  mathScript(text, table, mark) {
+    const cs = Array.from(text.replace(/\s+/g, ''));
+    if (!cs.length) return '';
+    if (cs.every((c) => table[c])) return cs.map((c) => table[c]).join('');
+    return mark + (cs.length > 1 ? '(' + cs.join('') + ')' : cs[0]);
+  },
+  mathWalk(n) {
+    const SUP = { 0: '⁰', 1: '¹', 2: '²', 3: '³', 4: '⁴', 5: '⁵', 6: '⁶', 7: '⁷', 8: '⁸', 9: '⁹', '+': '⁺', '-': '⁻', '−': '⁻', '=': '⁼', '(': '⁽', ')': '⁾', n: 'ⁿ', x: 'ˣ', y: 'ʸ', i: 'ⁱ', a: 'ᵃ', b: 'ᵇ', c: 'ᶜ', k: 'ᵏ', t: 'ᵗ' };
+    const SUB = { 0: '₀', 1: '₁', 2: '₂', 3: '₃', 4: '₄', 5: '₅', 6: '₆', 7: '₇', 8: '₈', 9: '₉', '+': '₊', '-': '₋', '−': '₋', '=': '₌', '(': '₍', ')': '₎', a: 'ₐ', e: 'ₑ', o: 'ₒ', x: 'ₓ', n: 'ₙ', i: 'ᵢ', k: 'ₖ', m: 'ₘ', t: 'ₜ' };
+    if (n.nodeType === 3) return n.nodeValue;
+    if (n.nodeType !== 1) return '';
+    const tag = n.tagName.toLowerCase();
+    const kids = () => Array.from(n.childNodes).map((c) => this.mathWalk(c)).join('');
+    const part = (i) => (n.children[i] ? this.mathWalk(n.children[i]).trim() : '');
+    const group = (x) => (/^[\w.]+$|^[^\s]$/.test(x) ? x : '(' + x + ')');
+    if (tag === 'annotation' || tag === 'annotation-xml' || tag === 'script' || tag === 'style') return '';
+    if (/\bsr-only\b/.test(typeof n.className === 'string' ? n.className : '')) return '';
+    if ((n.classList && n.classList.contains('katex')) || tag === 'mjx-container') {
+      const m = n.querySelector('math');
+      return m ? ' ' + this.mathWalk(m) + ' ' : this.t(n);
+    }
+    if (tag === 'sup') return this.mathScript(kids(), SUP, '^');
+    if (tag === 'sub') return this.mathScript(kids(), SUB, '_');
+    if (tag === 'semantics') return n.children[0] ? this.mathWalk(n.children[0]) : '';
+    if (tag === 'msup') return part(0) + this.mathScript(part(1), SUP, '^');
+    if (tag === 'msub') return part(0) + this.mathScript(part(1), SUB, '_');
+    if (tag === 'msubsup') return part(0) + this.mathScript(part(1), SUB, '_') + this.mathScript(part(2), SUP, '^');
+    if (tag === 'mfrac') return group(part(0)) + '/' + group(part(1));
+    if (tag === 'msqrt') return '√' + group(kids().trim());
+    if (tag === 'mroot') return (part(1) === '3' ? '∛' : part(1) + '√') + group(part(0));
+    if (tag === 'mo') {
+      const o = (n.textContent || '').trim();
+      return /^[=+−\-±×·÷<>≤≥≈≠→]$/.test(o) ? ' ' + o + ' ' : o;
+    }
+    if (tag === 'mspace') return ' ';
+    if (tag === 'br' || tag === 'p' || tag === 'div' || tag === 'li') return ' ' + kids() + ' ';
+    return kids();
+  },
+
+  /** Multiple choice (`ul > li`): letter `span`, text `span`, at the correct one a check icon and `span.sr-only` „richtig“. */
+  choices(s) {
+    return Array.from(s.querySelectorAll('ul > li')).map((li, i) => {
+      const spans = Array.from(li.children).filter((e) => e.tagName === 'SPAN');
+      const hidden = spans.filter((e) => /\bsr-only\b/.test(e.className || ''));
+      const shown = spans.filter((e) => hidden.indexOf(e) < 0);
+      const head = shown[0] && /^[A-H]$/.test(this.t(shown[0])) ? shown[0] : null;
+      const rest = shown.filter((e) => e !== head);
+      return {
+        letter: head ? this.t(head) : 'ABCDEFGH'.charAt(i) || String(i + 1),
+        label: (spans.length ? rest.map((e) => this.mathT(e)).join(' ') : this.mathT(li)).replace(/\s+/g, ' ').trim(),
+        correct: hidden.some((e) => /richtig|korrekt|correct/i.test(e.textContent || '')) || /\bborder-success\b/.test(li.className || ''),
+      };
+    });
+  },
+
   // ───────────────────────── reading ─────────────────────────
   phase() {
     const h1 = this.t(this.one('main h1'));
@@ -166,15 +231,12 @@
     let note = null;
     if (noteLabel) {
       const nx = noteLabel.nextElementSibling;
-      const v = this.t(nx);
+      const v = this.mathT(nx);
       note = v && !/Keine Notiz hinterlegt/i.test(v) ? v : null;
     }
     const skip = /^(Richtige Antwort|Keine Notiz|Audio für diese Frage|YouTube Audio|Spieler hören)/i;
     const textEl = ps.find((p) => this.t(p) && !skip.test(this.t(p)) && p !== (noteLabel && noteLabel.nextElementSibling));
-    // Multiple choice (unverified markup): list items or buttons labelled A–D inside the section.
-    const options = Array.from(s.querySelectorAll('li, [data-correct], [aria-label^="Antwort"]'))
-      .map((e) => ({ label: this.t(e), correct: e.getAttribute('data-correct') === 'true' || /success|green|emerald/.test(e.className || '') }))
-      .filter((o) => o.label);
+    const options = this.choices(s);
     const audioBox = ps.find((p) => /Audio für diese Frage/i.test(this.t(p)));
     const iframe = s.querySelector('iframe');
     const audioEl = s.querySelector('audio');
@@ -191,7 +253,7 @@
     const target = this.one('[aria-label="Punkte vergeben"] strong');
     return {
       points: pointsEl ? parseInt(this.t(pointsEl), 10) : 0,
-      text: textEl ? this.t(textEl) : '',
+      text: textEl ? this.mathT(textEl) : '',
       note: note,
       options: options,
       imageUrls: Array.from(s.querySelectorAll('img')).map((i) => this.realImageUrl(i.getAttribute('src'))),

@@ -1,7 +1,16 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { normalize } from './normalize.ts';
+import { mathKey, normalize, stripUrls } from './normalize.ts';
 import type { JudgeResult } from './judge.ts';
+
+/**
+ * normalize() drops operators – text with maths in it keeps its formula as well ("v = s / t" and "v = s * t" must not
+ * share a verdict). Hyphens in words ("Half-Life") are no maths, so most keys stay as they were.
+ */
+function keyText(s: string): string {
+  const n = normalize(s);
+  return /[=+*/^:×·÷√π±²³¹⁰⁴-⁹₀-₉<>−]|\d\s*-|-\s*\d/.test(stripUrls(s)) ? `${n}␞${mathKey(s)}` : n;
+}
 
 /** Bump when the shape of `solutionKey` changes – older solution entries then no longer match. */
 const SOLUTION_KEY_VERSION = 2;
@@ -46,7 +55,7 @@ export class JudgeCache {
     answer: string,
     opts: { spoken?: boolean; version?: number; media?: string | null } = {},
   ): string | null {
-    const parts = [`v${opts.version ?? 1}${opts.spoken ? 's' : ''}`, normalize(question), normalize(reference ?? ''), normalize(answer)];
+    const parts = [`v${opts.version ?? 1}${opts.spoken ? 's' : ''}`, keyText(question), keyText(reference ?? ''), keyText(answer)];
     if (reference === null && opts.media !== undefined) {
       if (opts.media === null) return null;
       if (opts.media) parts.push(`m:${opts.media}`);
@@ -74,7 +83,7 @@ export class JudgeCache {
   /** Key of the derived solution of a question without note: text + media. null = do not cache. */
   static solutionKey(question: string, media: QuestionMedia): string | null {
     const m = JudgeCache.mediaKey(media);
-    return m === null ? null : [`s${SOLUTION_KEY_VERSION}`, normalize(question), m].join('␟');
+    return m === null ? null : [`s${SOLUTION_KEY_VERSION}`, keyText(question), m].join('␟');
   }
 
   getVerdict(key: string): JudgeResult | undefined {

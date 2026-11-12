@@ -798,8 +798,15 @@ export class QuizBot {
 
   private maybeAutoStart(g: ActiveGame): void {
     if (!this.d.config.discord.autoStart || g.phase !== 'lobby' || g.startRequested || !g.canStart) return;
-    if (g.lobbyPlayers.length < this.d.config.game.minPlayers) return;
     const unlinked = g.lobbyPlayers.filter((p) => !this.userFor(g, p.name)).map((p) => p.name);
+    if (g.lobbyPlayers.length < this.d.config.game.minPlayers) {
+      // Too few for the automatic start – say so once instead of waiting silently ("!quiz los" still starts).
+      if (g.lobbyPlayers.length && !unlinked.length && g.lobbyPlayers.every((p) => p.ready) && !g.hinted.has('few-players')) {
+        g.hinted.add('few-players');
+        this.queue(g.channelId, `✅ Alle bereit. Von selbst starte ich erst ab ${this.d.config.game.minPlayers} Spielern – ${mention(g.leaderId)}, mit \`${this.prefix} los\` geht es trotzdem los.`);
+      }
+      return;
+    }
     if (!unlinked.length) return this.requestStart(g);
     if (this.voice && g.lobbyPlayers.every((p) => p.ready) && !g.hinted.has(`voice-unlinked:${unlinked.join()}`)) {
       g.hinted.add(`voice-unlinked:${unlinked.join()}`);

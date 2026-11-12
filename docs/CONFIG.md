@@ -44,7 +44,7 @@ Ablauf und Punkte des Tafelquiz. Die Punkteregeln sind **pro Server zur Laufzeit
 | Option | Default | Bedeutung |
 |---|---|---|
 | `publicBoard` | – | Board, das automatisch als Lobby erstellt wird (Titel wie bei „Öffentliches Board verwenden“). Leer = Lobby manuell erstellen. CLI: `--board "<Titel>"`. Im Discord-Bot ohne Wirkung, dort wählt man das Quiz im Chat. |
-| `minPlayers` | `2` | Mindestzahl Spieler, bevor das Spiel startet. |
+| `minPlayers` | `2` | Mindestzahl Spieler für den automatischen Start. Ein ausdrücklicher Start (`start`, Discord `!quiz los`) geht auch mit weniger, z.B. allein. |
 | `autoStart` | `false` | Spiel automatisch starten, sobald alle bereit sind. Sonst startet die Spielleitung mit `start`. CLI: `--auto-start`. Im Discord-Bot gilt stattdessen `discord.autoStart`. |
 | `pickReminderSec` | `45` | Sekunden, bis der Spieler am Zug eine Frage wählt. Danach kommt eine Erinnerung. |
 | `answerTimeoutSec` | `45` | Antwortzeit für den Spieler am Zug. |

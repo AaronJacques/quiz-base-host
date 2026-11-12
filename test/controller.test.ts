@@ -334,3 +334,112 @@ describe('TafelquizController – log secrecy (F16)', () => {
     }
   }, 10000);
 });
+
+describe('TafelquizController – multiple choice (Schulwissen board)', () => {
+  const options = [
+    { letter: 'A', label: 'leicht', correct: false },
+    { letter: 'B', label: 'schwer', correct: false },
+    { letter: 'C', label: 'riesig', correct: false },
+    { letter: 'D', label: 'klein', correct: true },
+  ];
+  const mc = (text: string): FakeQuestion => ({ category: '1. Klasse', points: 100, text, note: null, options });
+
+  it('shows the options without the solution, judges letters without LLM and reveals letter + text', async () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbhost-'));
+    const config = ConfigSchema.parse({
+      game: { autoStart: true, revealPauseSec: 0, answerTimeoutSec: 2, buzzerOnWrong: false },
+      judge: { cacheFile: path.join(tmp, 'cache.json') },
+      llm: { provider: 'none' },
+    });
+    const bus = new EventBus();
+    const page = new FakeTafelquizPage(['Anna', 'Ben'], [[mc('Gegenteil von groß?')], [mc('Gegenteil von groß (2)?')]]);
+    page.phase = 'board';
+    const judge = createJudge(config, bus, null, new UsageMeter());
+    const controller = new TafelquizController({ page, bus, judge, game: config.game, pollMs: 20 });
+    const shown: string[][] = [];
+    const verdicts: { player: string; correct: boolean }[] = [];
+    const reveals: (string | null)[] = [];
+    bus.on('host:question', (q) => shown.push(q.options));
+    bus.on('host:verdict', (v) => verdicts.push({ player: v.player, correct: v.correct }));
+    bus.on('host:reveal', (r) => reveals.push(r.answer));
+    bus.on('host:notice', (n) => n.kind === 'operator-needed' && bus.emit('operator:command', { command: 'f', args: [] }));
+    bus.on('host:turn', (t) => (t.open.length ? setTimeout(() => bus.emit('player:pick', { player: t.player, col: t.open[0]!.col, row: t.open[0]!.row }), 5) : void page.endGame()));
+    bus.on('host:await-answer', (a) => setTimeout(() => bus.emit('player:answer', { player: a.player, answer: a.player === 'Anna' ? 'D' : 'B' }), 5));
+
+    await controller.run(new AbortController().signal);
+
+    expect(shown).toEqual([['leicht', 'schwer', 'riesig', 'klein'], ['leicht', 'schwer', 'riesig', 'klein']]);
+    expect(verdicts).toEqual([{ player: 'Anna', correct: true }, { player: 'Ben', correct: false }]);
+    expect(reveals).toEqual(['D) klein', 'D) klein']);
+    expect(page.players.find((p) => p.name === 'Anna')!.score).toBe(100);
+    expect(page.players.find((p) => p.name === 'Ben')!.score).toBe(-50);
+  }, 10000);
+});
+
+// Reported 12.11.2026: last question of "Schulwissen 1. - 12. Klasse", played alone. The player typed "D", the bot
+// said wrong (the LLM read "D Neutralisation richtig" and decided "D nennt keinen Begriff"), the reveal showed D.
+describe('TafelquizController – letter answer on the last multiple-choice question (live report)', () => {
+  const question: FakeQuestion = {
+    category: '12. Klasse',
+    points: 1200,
+    text: 'Wie nennt man den Vorgang, bei dem eine Säure und eine Base miteinander reagieren und typischerweise Wasser entsteht?',
+    note: null,
+    options: [
+      { letter: 'A', label: 'Addition', correct: false },
+      { letter: 'B', label: 'Reduktion', correct: false },
+      { letter: 'C', label: 'Division', correct: false },
+      { letter: 'D', label: 'Neutralisation', correct: true },
+    ],
+  };
+
+  async function play(answer: string, optionsDelayMs: number) {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbhost-'));
+    const bus = new EventBus();
+    const page = new FakeTafelquizPage(['Aaron'], [[question]]);
+    page.phase = 'board';
+    page.autoResults = true; // quiz-base shows the results by itself after the last card
+    page.optionsDelayMs = optionsDelayMs;
+    // An LLM stage that would get it wrong, as it did live – it must not be asked.
+    const llm = { calls: 0, async judge() { this.calls++; return { verdict: 'wrong' as const, method: 'llm' as const, confidence: 0.9, reason: 'D nennt keinen Begriff' }; } };
+    const cache = new JudgeCache(path.join(tmp, 'c.json'));
+    const judge: JudgeKit = {
+      judge: new CascadeJudge([{ name: 'fuzzy', judge: new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false }) }, { name: 'llm', judge: llm, cache: true }], cache),
+      solver: null,
+      cache,
+    };
+    const game = ConfigSchema.parse({ game: { revealPauseSec: 0, answerTimeoutSec: 2 } }).game;
+    const controller = new TafelquizController({ page, bus, judge, game, pollMs: 20 });
+    const out = { verdicts: [] as { answer: string; correct: boolean; delta: number }[], reveals: [] as (string | null)[], over: null as null | { name: string; score: number }[], shown: [] as string[][] };
+    bus.on('host:turn', (t) => t.open.length && setTimeout(() => bus.emit('player:pick', { player: t.player, col: t.open[0]!.col, row: t.open[0]!.row }), 5));
+    bus.on('host:question', (q) => out.shown.push(q.options));
+    bus.on('host:await-answer', (a) => setTimeout(() => bus.emit('player:answer', { player: a.player, answer }), 5));
+    bus.on('host:verdict', (v) => out.verdicts.push({ answer: v.answer, correct: v.correct, delta: v.delta }));
+    bus.on('host:reveal', (r) => out.reveals.push(r.answer));
+    bus.on('host:game-over', ({ players }) => (out.over = players.map((p) => ({ name: p.name, score: p.score }))));
+    await controller.run(new AbortController().signal);
+    return { ...out, llmCalls: llm.calls, log: page.log };
+  }
+
+  it.each(['D', 'd', 'D)', 'Antwort D', 'Neutralisation'])('"%s" is right without the LLM, also at the very end', async (answer) => {
+    const r = await play(answer, 0);
+    expect(r.verdicts).toEqual([{ answer, correct: true, delta: 1200 }]);
+    expect(r.llmCalls).toBe(0);
+    expect(r.reveals).toEqual(['D) Neutralisation']);
+    expect(r.over).toEqual([{ name: 'Aaron', score: 1200 }]);
+    expect(r.log).not.toContain('endGame');
+  }, 10000);
+
+  it('waits for options that appear after the question text', async () => {
+    const r = await play('D', 500);
+    expect(r.shown).toEqual([['Addition', 'Reduktion', 'Division', 'Neutralisation']]);
+    expect(r.verdicts).toEqual([{ answer: 'D', correct: true, delta: 1200 }]);
+    expect(r.llmCalls).toBe(0);
+  }, 10000);
+
+  it('another letter is wrong, also without the LLM', async () => {
+    const r = await play('B', 0);
+    expect(r.verdicts).toEqual([{ answer: 'B', correct: false, delta: -600 }]);
+    expect(r.llmCalls).toBe(0);
+    expect(r.over).toEqual([{ name: 'Aaron', score: -600 }]);
+  }, 10000);
+});

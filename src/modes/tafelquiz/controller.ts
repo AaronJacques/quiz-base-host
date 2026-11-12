@@ -98,8 +98,9 @@ export class TafelquizController implements GameMode {
       this.codeAnnounced = true;
       this.status('lobby', `Lobby offen – Code ${s.lobbyCode}`);
     }
+    // minPlayers only holds back the automatic start – a start the game leader asked for ("!quiz los") always goes.
     const enough = s.players.length >= this.d.game.minPlayers;
-    if (s.canStart && enough && (this.d.game.autoStart || this.startRequested)) {
+    if (s.canStart && ((this.d.game.autoStart && enough) || this.startRequested)) {
       this.status('lobby', 'Alle bereit – Spiel startet!');
       this.notice('started', 'Alle bereit – das Spiel startet!');
       await this.d.page.startGame();
@@ -187,7 +188,13 @@ export class TafelquizController implements GameMode {
 
   // ───────────────────────────── Question ─────────────────────────────
   private async onQuestion(s: TafelquizState): Promise<void> {
-    const q = s.question!;
+    let q = s.question!;
+    // The answer options may appear a moment after the question text. Without them a letter answer ("D")
+    // cannot be judged and the correct option is no reference – give the page a moment.
+    if (!q.note && !q.options.length) {
+      const settled = await this.d.page.waitFor((x) => x.phase !== 'question' || !!x.question?.note || !!x.question?.options.length, 1200, 200);
+      if (settled?.question) q = settled.question;
+    }
     // Who picked is known for sure (turn / rotation) – quiz-base may still show the previous player for a moment.
     // Only a card opened by hand in the browser falls back to the page's "Am Zug".
     const answerer = this.lastPick?.player ?? s.players.find((p) => p.isTurn)?.name ?? s.players[0]?.name ?? '?';
@@ -226,7 +233,8 @@ export class TafelquizController implements GameMode {
     this.publishPlayers(after); // scores right after awarding, for the reveal message
     const reference = await referencePromise;
     if (this.signal.aborted) return;
-    const shown = reference ? stripUrls(reference).replace(/\s+/g, ' ').trim() : null;
+    const choice = q.options.find((o) => o.correct && o.label === reference);
+    const shown = choice ? `${choice.letter}) ${choice.label}` : reference ? stripUrls(reference).replace(/\s+/g, ' ').trim() : null;
     this.d.bus.emit('host:reveal', { answer: shown });
     if (shown) this.say(`💡 Lösung: ${shown}`);
     await this.d.page.stopTimer();
@@ -283,7 +291,7 @@ export class TafelquizController implements GameMode {
       case 'answer': {
         answerText = outcome.answer;
         const reference = await referencePromise;
-        result = await this.d.judge.judge.judge({ question: q.text, reference, answer: outcome.answer, hints, spoken: outcome.spoken, media });
+        result = await this.d.judge.judge.judge({ question: q.text, reference, answer: outcome.answer, hints, spoken: outcome.spoken, media, options: q.options });
       }
     }
     if (this.signal.aborted) return false; // ended while the judge was thinking

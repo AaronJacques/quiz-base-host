@@ -13,7 +13,7 @@ const SolveSchema = z.object({
 });
 
 /** Bump when JUDGE_SYSTEM changes meaningfully – invalidates cached verdicts. */
-export const JUDGE_RULES_VERSION = 2;
+export const JUDGE_RULES_VERSION = 3;
 
 // Kept short and stable on purpose: it is the bulk of every judging request.
 const JUDGE_SYSTEM = `Du bist ein fairer, lockerer Quizmaster bei einem Spieleabend unter Freunden.
@@ -26,6 +26,8 @@ Regeln:
 - Zahlen/Jahre müssen stimmen (Einheiten egal). Nur bei Schätzfragen ("ca.") ist etwas Toleranz ok. Übliche Rundungen bekannter Werte (z.B. "42 km" für 42,195 km beim Marathon) gelten, wenn die Frage nicht ausdrücklich exakt fragt.
 - Mehrere widersprüchliche Antworten auf einmal ("A oder B") sind falsch.
 - Die Lösung des Hosts kann zusätzliche Erklärungen oder Links enthalten – bewerte nur gegen den Kern.
+- Formeln: Es zählt der mathematische Inhalt, nicht die Schreibweise (x^2 = x² = x2, 1/2 = 0,5, pi = π, * = · = ×, sqrt(2) = √2). Eine andere Formel oder ein anderer Wert ist falsch.
+- Multiple Choice: Der Buchstabe der richtigen Option zählt wie ihr Text.
 Antworte nur im geforderten JSON.`;
 
 const SOLVE_SYSTEM = `Du hilfst einem Quiz-Host, die Lösung einer Quizfrage zu bestimmen, für die keine Lösung hinterlegt ist.
@@ -39,8 +41,9 @@ export class LlmJudge implements AnswerJudge {
     private meter: UsageMeter,
   ) {}
 
-  async judge({ question, reference, answer, hints, spoken }: JudgeInput): Promise<JudgeResult> {
+  async judge({ question, reference, answer, hints, spoken, options }: JudgeInput): Promise<JudgeResult> {
     const lines = [`Frage: ${question}`, `Lösung laut Host: ${reference ?? '(keine hinterlegt – nutze dein Wissen)'}`];
+    if (options?.length) lines.push(`Antwortmöglichkeiten: ${options.map((o) => `${o.letter}) ${o.label}${o.correct ? ' (richtig)' : ''}`).join(' | ')}`);
     if (hints?.length) lines.push(`Hinweise: ${hints.join(' | ')}`);
     if (spoken) lines.push('Die Antwort wurde GESPROCHEN und automatisch transkribiert: Werte nach dem Klang, nicht nach der Schreibweise. Klingt sie eindeutig wie die Lösung (z.B. „Preaking Bat“ für „Breaking Bad“, „Tschingis Kan“ für „Dschingis Khan“), ist sie richtig.');
     lines.push(`Antwort des Spielers: ${answer}`);

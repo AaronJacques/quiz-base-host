@@ -29,8 +29,8 @@ export interface QuestionState {
   text: string;
   /** Host-only note ("Richtige Antwort (Notiz)"), null when the board has none. */
   note: string | null;
-  /** Multiple-choice options with the correct one flagged, if the board uses them. */
-  options: { label: string; correct: boolean }[];
+  /** Multiple-choice options ("A" … "D" + text) with the correct one flagged, if the board uses them. */
+  options: { letter: string; label: string; correct: boolean }[];
   imageUrls: string[];
   /** Per image: finished loading (`null` = still loading, `false` = broken). */
   imagesLoaded: (boolean | null)[];

@@ -70,7 +70,7 @@ Der Bot nimmt nie einfach irgendein Board:
 - Automatisch, wenn dein Discord-Anzeigename oder Benutzername gleich deinem quiz-base-Namen ist und du im Channel etwas geschrieben hast.
 - Sonst `!quiz ich <quiz-base-Name>`. Die Spielleitung kann mit `!quiz link @user <Name>` auch andere verknüpfen.
 - Verknüpfungen werden pro Server gespeichert (`.qbhost/discord/`). Wer denselben Namen wieder benutzt, ist in der nächsten Runde sofort verknüpft.
-- Das Spiel startet automatisch, sobald **alle** in quiz-base bereit **und** verknüpft sind. `!quiz los` erzwingt den Start.
+- Das Spiel startet automatisch, sobald **alle** in quiz-base bereit **und** verknüpft sind (ab `game.minPlayers`, Standard 2). `!quiz los` erzwingt den Start, auch allein.
 
 ### Karten wählen
 
@@ -85,6 +85,9 @@ Der Bot prüft gegen das aktuelle Brett:
 ### Antworten
 
 Wenn der Bot dich fragt („✍️ @Anna, deine Antwort?“), ist deine **nächste Nachricht** die Antwort. Nachrichten mit `//` am Anfang ignoriert der Bot (für Zwischenrufe).
+
+- **Multiple Choice:** Der Buchstabe reicht (`D`, `D)`, `Antwort D`), ebenso der Text der Option. Das wertet der Bot ohne LLM.
+- **Formeln** dürfen in Tastatur-Schreibweise kommen: `a^2+b^2=c^2` für a² + b² = c², `E=mc^2`, `U=R*I`, `sqrt(2)` oder `Wurzel aus 2` für √2, `pi` für π, `1/2` für 0,5. Eine andere Formel (z.B. `v=t/s` statt v = s / t) zählt nicht.
 
 ### Regeln (Punkte) einstellen
 

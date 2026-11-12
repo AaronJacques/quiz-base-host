@@ -57,7 +57,7 @@ export class FakeTafelquizPage implements TafelquizPort {
             points: this.open.points,
             text: this.open.q.text,
             note: this.open.q.note,
-            options: this.open.q.options ?? [],
+            options: Date.now() >= this.optionsShownAt ? (this.open.q.options ?? []) : [],
             imageUrls: this.open.q.images ?? [],
             imagesLoaded: (this.open.q.images ?? []).map(() => true),
             audio: this.open.q.audio !== undefined ? { present: true, title: this.open.q.audio, playing: false } : { present: false, title: null, playing: false },
@@ -83,7 +83,11 @@ export class FakeTafelquizPage implements TafelquizPort {
   };
   passSoundGate = () => this.ok('passSoundGate');
   selectBoard = (n: number) => this.ok(`selectBoard ${n}`);
+  /** Test hook: the answer options appear this long after the question text (seen as a possible race). */
+  optionsDelayMs = 0;
+  private optionsShownAt = 0;
   openCell = (col: number, row: number) => {
+    this.optionsShownAt = Date.now() + this.optionsDelayMs;
     // With staleAfterOpenMs, "Am Zug" keeps showing the previous player for a moment after the card opened.
     if (this.staleAfterOpenMs && this.shownTurn !== null) setTimeout(() => (this.shownTurn = null), this.staleAfterOpenMs);
     else this.shownTurn = null;
