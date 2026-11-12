@@ -14,8 +14,8 @@ jobs:
     name: Typecheck & Tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -39,7 +39,7 @@ jobs:
       VPS_USER: ${{ secrets.VPS_USER || 'deploy' }}
       QBHOST_HOME: /opt/quizmaster
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: SSH einrichten
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
