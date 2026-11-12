@@ -87,6 +87,33 @@ Das Sprachmodell, das unsichere Antworten bewertet.
 
 Mit `none` oder ohne Claude-Zugang funktioniert das Spiel weiter, nur unsichere Antworten landen bei der Spielleitung.
 
+## `boardgen`
+
+Der Board-Generator: Claude schreibt ein komplettes Tafelquiz, qbhost legt es über den Board-Editor von quiz-base als eigenes Board an (`npx qbhost board-create`, Discord `!quiz erstellen`). Braucht einmal `npx qbhost login`.
+
+| Option | Default | Bedeutung |
+|---|---|---|
+| `provider` | `inherit` | `inherit` = wie `llm.provider`. Sonst `claude-cli` (Abo) oder `anthropic` (API-Key), z.B. Boards über das Abo, Bewertungen über die API. |
+| `model` | `sonnet` | Modell für Erzeugung und Prüfrunde. Alias (`sonnet`, `opus`, `haiku`) oder volle Modell-ID. CLI: `--gen-model`. |
+| `effort` | `medium` | Denkaufwand `low`/`medium`/`high`. Mehr = gründlicher, langsamer, teurer. |
+| `timeoutMs` | `300000` | Zeitlimit pro Aufruf (ein Board braucht meist 10–60 s). |
+| `review` | `true` | Zweite Prüfrunde: Faktencheck, Eindeutigkeit, Schwierigkeit; ersetzt schwache Fragen. |
+| `maxAttempts` | `3` | Versuche, bis die Ausgabe gültig ist (Schema + Prüfregeln). |
+| `maxCostUsd` | `1` | Abbruch, wenn ein Board mehr kostet (nur `anthropic`; über das Abo fallen keine Kosten an). |
+| `dir` | `.qbhost/boards` | Erzeugte Boards **mit Lösungen** und das Register (welche Anfrage → welches Board). Gitignored. |
+| `creatorIds` | `[]` | Discord-User-IDs, die außer Server-Admins Boards erstellen dürfen. |
+| `defaults.categories` | `4` | Kategorien pro Board (2–8). |
+| `defaults.rows` | `4` | Punktestufen pro Kategorie (1–10, mehr erlaubt quiz-base nicht). |
+| `defaults.step` | `100` | Punkte pro Stufe (100 → 100, 200, …), Vielfache von 50. |
+| `defaults.boards` | `1` | 1 oder 2 Boards (bei 2 bekommt jedes Board eigene Kategorien). |
+| `defaults.level` | `kneipe` | Zielgruppe: `kinder` (8–10), `schule` (Klasse 5–7), `oberstufe`, `kneipe` (Erwachsene), `profi`. |
+| `defaults.language` | `de` | Sprache der Fragen (ISO-Code). |
+| `defaults.mcShare` | `0` | Anteil Multiple-Choice-Fragen (0–1). quiz-base zeigt dann 4 Antworten; diese Fragen haben keine Host-Notiz. |
+
+Eine Sichtbarkeit gibt es nicht: quiz-base speichert eigene Boards immer als privaten Entwurf. Veröffentlichen geht nur von Hand unter „Meine Boards“ (quiz-base prüft das Board dann).
+
+**Kosten** (Sonnet 5.5, $2 / $10 pro Mio. Tokens, inkl. Denken, gemessen): 2×2-Testboard ca. $0.04, 4×4 ca. $0.10, 2 Boards × 5×5 ca. $0.20. Über `claude-cli` (Abo) fallen keine Zusatzkosten an; angezeigt wird dann der API-Gegenwert. Vor jedem Board nennt qbhost die Schätzung, danach die gemessenen Kosten.
+
 ## `discord`
 
 Discord-Bot (`npx qbhost discord`). Einrichtung: [DISCORD.md](DISCORD.md).
@@ -176,6 +203,15 @@ Diese Regeln sind **nicht** in der Konfigurationsdatei, sondern im Chat gespeich
 {
   "judge": { "strategy": "fuzzy" },
   "llm": { "provider": "none" }
+}
+```
+
+**Boards über das Abo, Bewertungen über die API, zwei Leute dürfen Boards erstellen:**
+
+```json
+{
+  "llm": { "provider": "anthropic", "model": "haiku" },
+  "boardgen": { "provider": "claude-cli", "creatorIds": ["123456789012345678", "234567890123456789"], "defaults": { "level": "schule" } }
 }
 ```
 

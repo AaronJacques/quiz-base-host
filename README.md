@@ -29,6 +29,7 @@ Discord-Channel                         qbhost (läuft auf deinem Rechner)      
 - **Kartenwahl in natürlicher Sprache:** `Nintendo 200`, `nin 200`, `2 200`, `ich nehme Filme für 300`. Der Bot prüft, ob die Karte existiert, frei oder schon weg ist.
 - **Punkteregeln per Chat einstellbar:** `!quiz regel minus 0`, `!quiz regel buzzerplus 50%`, `!quiz regel zeit 30`. Sie werden pro Server gespeichert.
 - **Sparsam:** Die Engine spielt deterministisch. Claude wird nur bei unklaren Antworten oder Bildfragen ohne Lösung gefragt, standardmäßig Haiku über dein Claude-Code-Abo. Ein Board mit Lösungsnotizen kostet oft **0 Aufrufe**, ein reines Bilder-Board ohne Notizen ca. **1–2 Cent**.
+- **Eigene Boards per KI:** `!quiz erstellen Star Wars 5x4 profi` – Claude schreibt ein komplettes Tafelquiz mit Lösungen und Varianten, eine Prüfrunde checkt die Fakten, qbhost legt es über den Board-Editor als eigenes Board auf quiz-base an. → [docs/DISCORD.md](docs/DISCORD.md#4-eigene-boards-von-claude-schreiben-lassen)
 - **Fair:** Die Lösung erscheint nie vor der Auflösung im Channel. Unsichere Fälle entscheidet die Spielleitung, die die Lösung per DM bekommt.
 - **Erweiterbar:** saubere Schichten (Browser · Seite · Spielmodus · Bewertung · Kanäle), siehe [Architektur](docs/ARCHITECTURE.md).
 
@@ -76,6 +77,7 @@ Dann im Discord-Channel:
 !quiz neu                 Bot fragt, welches Quiz → Name schreiben → Link wird gepostet
 !quiz neu dragon ball     direkt mit Namen (Suche auf quiz-base, Rückfrage bei mehreren Treffern)
 !quiz boards [suche]      Board-Liste mit Nummern
+!quiz erstellen <Thema>   neues Board von Claude schreiben lassen (Server-Admins)
 !quiz ich <Name>          mit deinem quiz-base-Namen verknüpfen (bei gleichem Namen automatisch)
 nintendo 200              wenn du am Zug bist
 <deine Antwort>           wenn der Bot dich fragt
@@ -83,6 +85,15 @@ nintendo 200              wenn du am Zug bist
 ```
 
 Bot-Einrichtung im Developer Portal, alle Befehle und Regeln: **[docs/DISCORD.md](docs/DISCORD.md)**.
+
+### Eigene Boards
+
+```bash
+npx qbhost login                                          # einmalig: im Browserfenster selbst bei quiz-base anmelden
+npx qbhost board-create --topic "Star Wars" --categories 5 --level profi
+```
+
+qbhost zeigt Aufbau und geschätzte Kosten, lässt Claude (Sonnet) das Board schreiben und prüfen, zeigt es im Terminal mit Lösungen und legt es nach deiner Bestätigung auf quiz-base an, als privaten Entwurf unter „Meine Boards“ (veröffentlichen kannst du es dort selbst). Im Discord-Chat geht dasselbe mit `!quiz erstellen <Thema> [Optionen]`; dort stehen Fragen, Lösungen und der Board-Link nur in deiner DM. Löschen: `npx qbhost board-delete "<Name>"`. Kosten: über das Claude-Abo nichts extra, über die API ca. $0.10 für ein 4×4-Board. Alle Optionen: `npx qbhost board-create --help` und [docs/DISCORD.md](docs/DISCORD.md#4-eigene-boards-von-claude-schreiben-lassen).
 
 ### Mit Sprache
 
@@ -119,6 +130,7 @@ Defaults stehen in [`src/config.ts`](src/config.ts). Für Anpassungen `qbhost.co
 | `game` | `correctFactor` 1, `wrongFactor` 0.5, `buzzerCorrectFactor` 1, `buzzerWrongFactor` 0.5, `buzzerOnWrong`, `answerTimeoutSec`, `buzzWindowSec` |
 | `judge` | `strategy`: `cascade` (Fuzzy → Cache → LLM → Mensch) · `fuzzy` (nie LLM) · `operator` |
 | `llm` | `provider`: `claude-cli` (Abo) · `anthropic` (API-Key) · `none`; `model`: `haiku` |
+| `boardgen` | `model`: `sonnet`, `review`, `maxCostUsd`, `creatorIds`, `defaults` (Kategorien, Stufen, Niveau, Sprache, MC-Anteil, Sichtbarkeit) |
 | `voice` | `tts` (`piper`/`say`), `autoJoin`, `silenceMs`, `wakeWords`, `extraTimeSec` – siehe [VOICE.md](docs/VOICE.md) |
 | `discord` | `channelIds` (nur dort reagiert der Bot), `prefix` (`!quiz`), `autoStart`, `lobbyTimeoutMin` |
 | `browser` | `driver`, `headless`, `pollMs` |
@@ -129,6 +141,9 @@ Defaults stehen in [`src/config.ts`](src/config.ts). Für Anpassungen `qbhost.co
 qbhost discord          Discord-Bot starten
 qbhost host             ein Spiel mit Terminal + Web-Spieler-Pult hosten
 qbhost boards [suche]   öffentliche Tafelquiz-Boards auflisten / suchen
+qbhost login            bei quiz-base anmelden (für eigene Boards; du meldest dich im Browserfenster selbst an)
+qbhost board-create     Board per KI erzeugen und auf quiz-base anlegen (--help für Optionen)
+qbhost board-delete     eigenes Board auf quiz-base löschen ("<Name>", lokaler Entwurf bleibt)
 qbhost probe            aktuellen Seitenzustand als JSON (Debug)
 qbhost judge "<Frage>" "<Lösung>" "<Antwort>"
 qbhost voice-setup      Sprachsteuerung einrichten (lokales STT/TTS)

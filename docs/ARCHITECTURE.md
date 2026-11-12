@@ -10,8 +10,10 @@
 
 ```
 src/
-├── cli.ts                 Kommandozeile (discord, host, boards, probe, judge, doctor)
+├── cli.ts                 Kommandozeile (discord, host, boards, login, board-create, probe, judge, doctor)
 ├── app.ts                 CLI-Modus: eine Runde mit Terminal + Spieler-Pult
+├── board-cli.ts           `qbhost login` (sichtbarer Browser, Nutzer meldet sich selbst an) und `qbhost board-create`
+├── board-studio.ts        BoardStudio = Generator + Register + Board-Editor im eingeloggten Browser; vom CLI und vom Bot genutzt
 ├── session.ts             GameSession = eine Runde (Browser, Bus, Controller, Judge); vom CLI und vom Bot genutzt
 ├── config.ts              Zod-Schema mit allen Einstellungen + Defaults
 │
@@ -26,7 +28,11 @@ src/
 │   └── orca-driver.ts     Orca-Built-in-Browser über `orca eval/goto/screenshot`
 │
 ├── site/                  "Wie sieht quiz-base aus?"  – das gesamte DOM-Wissen
-│   ├── lobby.ts           Wizard: Format → öffentliches Board → Vorschau → Warteraum
+│   ├── lobby.ts           Wizard: Format → öffentliches oder eigenes Board → Vorschau → Warteraum
+│   ├── editor/            Account-Menü, Tafelquiz-Board-Editor (`/configure-lobby?format=tafelquiz`), „Meine Boards“
+│   │   ├── probe.browser.js   In-Page-Skript: Login-Status, Editor-Schritte, Speichern-Dialog, Meine Boards (reines Browser-JS)
+│   │   ├── page.ts            BoardEditorPort + Fassade über dem Probe (speichern, Editor-Link, löschen)
+│   │   └── writer.ts          writeBoard(): Board über den Port eintragen, jede Eingabe zurücklesen, speichern
 │   └── tafelquiz/
 │       ├── probe.browser.js   In-Page-Skript: readState() + Aktionen (reines Browser-JS)
 │       └── page.ts            typisierte Fassade (TafelquizPort) über dem Probe
@@ -50,11 +56,23 @@ src/
 │   ├── claude-cli.ts      `claude -p` headless, ohne Tools/MCP/Settings → Abo statt API-Key
 │   └── anthropic-api.ts   offizielles SDK, messages.parse + Zod, effort "low"
 │
+├── boardgen/              "Wie entsteht ein neues Board?"  – ohne Browser
+│   ├── spec.ts            BoardSpec (Parameter), Niveaus, Fingerprint (gleiche Anfrage = gleiches Board), MC-Plätze
+│   ├── schema.ts          Zod-Schemas der LLM-Ausgabe (bewusst locker) + fertiges Board
+│   ├── prompts.ts         Erzeugung, Prüfrunde, gezielte Reparatur (stabile System-Prompts)
+│   ├── validate.ts        deterministische Prüfregeln: Anzahl, Längen, Dubletten, Lösung in der Frage, Notiz-Trenner
+│   ├── generator.ts       erzeugen → prüfen → Retry mit Fehlerliste → Prüfrunde → Reparatur → Board bauen
+│   ├── cost.ts            Kostenschätzung vorab (Abo vs. API)
+│   ├── store.ts           .qbhost/boards/: Entwürfe mit Lösungen + Register (Fingerprint → Board → Link)
+│   └── format.ts          öffentliche Vorschau (ohne Lösungen) / volle Vorschau (DM, Terminal)
+│
 ├── discord/               Discord-Bot (Hauptbedienung)
 │   ├── gateway.ts         ChatGateway-Interface (testbar ohne Discord)
 │   ├── discord-gateway.ts discord.js-Implementierung
 │   ├── bot.ts             Befehle, Verknüpfung Discord↔quiz-base, Kartenwahl, Antworten, Rendering
 │   ├── pick-parser.ts     "nin 200" → Karte + Prüfung frei/schon weg (reine Funktion)
+│   ├── board-flow.ts      `!quiz erstellen`: Rückfrage + Kosten → erzeugen → Vorschau (Channel) / Lösungen (DM) → anlegen
+│   ├── create-parser.ts   "Star Wars 5x4 profi mc 25%" → BoardSpec (reine Funktion)
 │   ├── store.ts           pro Server: Verknüpfungen + Regeln (.qbhost/discord/)
 │   └── format.ts          Hilfe-/Regeltexte
 │
@@ -98,7 +116,23 @@ Jeder Warteschritt läuft über `whilePage()`: Ändert ein Mensch im Browser den
 
 **Spielende mitten in der Frage:** `GameSession.endGame()` stoppt zuerst den Controller (AbortSignal) und klickt erst dann „Spiel beenden“. Der Controller prüft das Signal nach jedem Warten und nach der Bewertung: Eine abgeschnittene Frage bekommt kein Verdict, keine Punkte, keine Auflösung und keine weiteren Klicks. `close()` wartet, bis „Spiel beenden“ durch ist, bevor der Browser zugeht.
 
-**Geheimhaltung:** Was die Lösung enthalten kann (Notiz, LLM-Lösung, LLM-Begründung), geht vor `host:reveal` nur in `host:notice.detail` (DM an die Spielleitung, Operator-Konsole). `host:say` ist öffentlich (Web-Pult). Das Web-Pult bekommt `verdict.reason` nie, Discord hält Begründungen bis zur Auflösung zurück, und das `info`-Log zeigt weder LLM-Lösung noch LLM-Begründung (nur `debug`).
+**Geheimhaltung:** Was die Lösung enthalten kann (Notiz, LLM-Lösung, LLM-Begründung), geht vor `host:reveal` nur in `host:notice.detail` (DM an die Spielleitung, Operator-Konsole). Für erzeugte Boards gilt dasselbe: Fragen, Lösungen, Prüfbefunde und Warnungen gehen nur per DM an die anfragende Person bzw. ins Terminal, nie in einen Channel oder ins `info`-Log. `host:say` ist öffentlich (Web-Pult). Das Web-Pult bekommt `verdict.reason` nie, Discord hält Begründungen bis zur Auflösung zurück, und das `info`-Log zeigt weder LLM-Lösung noch LLM-Begründung (nur `debug`).
+
+## Ein Board erzeugen und anlegen
+
+```
+!quiz erstellen … / board-create   BoardSpec (Parameter) ── Fingerprint im Register? → vorhandenes Board / Entwurf
+                                   Kostenschätzung ── Bestätigung
+BoardGenerator                     1 Aufruf: ganzes Board als JSON ── validate() ─(Strukturfehler)→ Retry mit Fehlerliste
+                                   Prüfrunde: Faktencheck + Ersatzfragen im selben Aufruf ── validate() ─(offen)→ 1 Reparatur-Aufruf
+                                   Code: nach Schwierigkeit sortieren, Punkte, MC mischen, Notiz "Antwort / Variante / …"
+BoardStore                         .qbhost/boards/<id>.json (mit Lösungen), Register: Entwurf
+                                   Vorschau: Channel = Name, Kategorien, Punkte · DM/Terminal = alles
+writeBoard(BoardEditorPort)        Editor: Benutzerdefiniert → 1/2 Boards → Kategorien → Fragen (zurücklesen, nachbessern) → speichern
+BoardStore                         Register: angelegt + Link → `!quiz neu <Name>` startet die Lobby mit dem eigenen Board
+```
+
+Das LLM sieht nie den Browser, und der Browser-Teil ruft kein LLM. Spiel und Editor teilen sich das eingeloggte Browser-Profil, deshalb laufen sie nie gleichzeitig (Chromium sperrt ein Profil für eine zweite Instanz).
 
 ## Erweiterungspunkte
 

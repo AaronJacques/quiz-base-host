@@ -20,7 +20,7 @@ export class ClaudeCliClient implements LlmClient {
     const imagePaths = await this.materializeImages(req.images ?? []);
     const args = [
       '-p',
-      '--model', this.opts.model,
+      '--model', req.model ?? this.opts.model,
       '--output-format', 'json',
       '--json-schema', JSON.stringify(cliSchema(req.schema)),
       '--system-prompt', req.system,
@@ -29,6 +29,7 @@ export class ClaudeCliClient implements LlmClient {
       '--disable-slash-commands',
       '--no-session-persistence',
     ];
+    if (req.effort) args.push('--effort', req.effort);
     let prompt = req.prompt;
     if (imagePaths.length) {
       // Only the Read tool, only for the image directory – needed to "see" the picture.
@@ -38,7 +39,7 @@ export class ClaudeCliClient implements LlmClient {
       args.push('--tools', '');
     }
 
-    const stdout = await this.exec(args, prompt);
+    const stdout = await this.exec(args, prompt, req.timeoutMs ?? this.opts.timeoutMs);
     let parsed: { structured_output?: unknown; result?: string; total_cost_usd?: number; is_error?: boolean };
     try {
       parsed = JSON.parse(stdout);
@@ -50,15 +51,15 @@ export class ClaudeCliClient implements LlmClient {
     return { data: req.schema.parse(raw), costUsd: parsed.total_cost_usd, ms: Date.now() - started };
   }
 
-  private exec(args: string[], stdin: string): Promise<string> {
+  private exec(args: string[], stdin: string, timeoutMs: number): Promise<string> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.opts.bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
       let out = '';
       let err = '';
       const timer = setTimeout(() => {
         child.kill('SIGTERM');
-        reject(new Error(`claude CLI Timeout nach ${this.opts.timeoutMs} ms`));
-      }, this.opts.timeoutMs);
+        reject(new Error(`claude CLI Timeout nach ${timeoutMs} ms`));
+      }, timeoutMs);
       child.stdout.on('data', (d) => (out += d));
       child.stderr.on('data', (d) => (err += d));
       child.on('error', (e) => {

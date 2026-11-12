@@ -56,10 +56,10 @@ Bot:   🏁 Spiel vorbei! 🥇 …
 
 ### Quiz auswählen
 
-Der Bot nimmt nie einfach irgendein Board:
+Der Bot nimmt nie einfach irgendein Board. Eine Lobby öffnet nur `!quiz neu` (`!quiz erstellen` schreibt ein neues Board, siehe [Abschnitt 4](#4-eigene-boards-von-claude-schreiben-lassen)):
 
 - `!quiz neu` ohne Namen → er **fragt**, welches Quiz ihr spielen wollt, und zeigt beliebte Boards mit Nummern. Die nächste Nachricht der fragenden Person ist die Antwort (Name, Teil des Namens oder Nummer; `abbrechen` bricht ab).
-- `!quiz neu <Name>` → er sucht mit der **Suche von quiz-base**, findet also auch Boards, die nicht in der Standardauswahl stehen:
+- `!quiz neu <Name>` → zuerst unter den Boards, die der Bot selbst angelegt hat (eigener quiz-base-Account), sonst mit der **Suche von quiz-base**, findet also auch Boards, die nicht in der Standardauswahl stehen:
   - genauer Titel oder genau ein Treffer → Lobby wird erstellt
   - mehrere Treffer → nummerierte Liste, Antwort mit der Nummer
   - kein Treffer → ähnliche Titel als Vorschlag („Meintest du …“), sonst neuer Versuch
@@ -119,6 +119,50 @@ Wer die Lobby erstellt hat, und alle mit der Berechtigung „Server verwalten“
 `!quiz ende` mitten in einer Frage beendet das Spiel ohne Bewertung der offenen Antwort: kein Abzug, keine Klicks mehr auf der Seite.
 
 Ist die automatische Bewertung unsicher, fragt der Bot die Spielleitung. Die Lösung bekommt sie **per DM**, damit sie im Channel nicht vor der Buzzer-Runde verraten wird. Aus demselben Grund erscheinen Begründungen zu falschen Antworten erst mit der Auflösung.
+
+## 4. Eigene Boards von Claude schreiben lassen
+
+`!quiz erstellen <Thema> [Optionen]` lässt Claude (Standard: Sonnet) ein komplettes Tafelquiz schreiben und legt es auf quiz-base als **eigenes Board** an. Danach spielt ihr es wie jedes andere: `!quiz neu <Name>`.
+
+**Einmalig:** Auf dem Rechner des Bots `npx qbhost login` ausführen. Es öffnet sich ein Browserfenster, du meldest dich selbst bei quiz-base an (eigene Boards brauchen einen Account). qbhost gibt nichts ein und liest nichts mit, das Profil bleibt gespeichert.
+
+```
+Admin: !quiz erstellen Star Wars 5x4 profi       → Bot zeigt Aufbau, Niveau und geschätzte Kosten
+Admin: ja                                        → Claude schreibt das Board, eine Prüfrunde checkt die Fakten (1–3 Min.)
+Bot:   📋 Star Wars für Kenner · 5 Kategorien × 4 Stufen (100–400) · Kategorien: …
+       📬 Fragen und Lösungen hab ich dir per DM geschickt.
+Admin: anlegen                                   → Bot trägt das Board im Board-Editor von quiz-base ein (ca. 1 Min.)
+Bot:   ✅ Star Wars für Kenner ist auf quiz-base angelegt (privater Entwurf). Mit !quiz neu Star Wars für Kenner spielen.
+       📬 Den Link hab ich dir per DM geschickt. Veröffentlichen kannst du selbst unter „Meine Boards“ auf quiz-base.
+```
+
+Boards landen auf quiz-base immer als **privater Entwurf** unter „Meine Boards“; quiz-base fragt beim Speichern keine Sichtbarkeit ab. Wer ein Board der Community zeigen will, klickt dort selbst auf „Veröffentlichen“ (quiz-base prüft es dann). Der Bot reicht nie etwas ein. Ein Board wieder löschen: dort „Löschen“ oder im Terminal `npx qbhost board-delete "<Name>"`.
+
+**Optionen** (in beliebiger Reihenfolge, Rest = Thema):
+
+| Option | Beispiel | Standard |
+|---|---|---|
+| Kategorien × Stufen | `5x4`, `6 kategorien`, `5 stufen` | 4 × 4 (100–400 Punkte), max. 8 × 10 |
+| Punkteschritt | `schritt 200` (200, 400, …) | 100 |
+| Zwei Boards | `2 boards` (jedes Board eigene Kategorien) | 1 |
+| Niveau | `kinder` (8–10), `schule` (Klasse 5–7), `oberstufe`, `kneipe`, `profi` | `kneipe` |
+| Sprache | `sprache en`, `englisch` | Deutsch |
+| Multiple Choice | `mc 25%`, `mc` (= 25 %) | 0 % |
+| Name | `; name: Krieg der Sterne` | Vorschlag von Claude |
+| Themenbereiche | `; themen: Jedi, Raumschiffe, Planeten` (je einer pro Kategorie) | Claude wählt |
+| Neuer Entwurf | `nochmal` | – |
+
+**Wer darf?** Server-Admins („Server verwalten“) **auf dem Server, auf dem der Befehl geschrieben wird**, und die Discord-User-IDs in `boardgen.creatorIds`. Die Channel-Beschränkung `discord.channelIds` gilt auch hier. Bestätigen (`ja`, `anlegen`, `nochmal`, `abbrechen`) kann nur, wer gefragt hat.
+
+**Geheimhaltung:** Im Channel stehen nur Name, Kategorien und Punkte. Fragen, Lösungen und den Link zum Board (der Editor von quiz-base zeigt die Lösungen) bekommt nur die anfragende Person **per DM** (DMs von Server-Mitgliedern müssen erlaubt sein). Erzeugte Boards liegen mit Lösungen lokal in `.qbhost/boards/`.
+
+**Kosten:** Vor dem Erzeugen nennt der Bot die Schätzung, nach dem Anlegen die gemessenen Kosten. Über das Claude-Abo (`claude-cli`) fallen keine Zusatzkosten an; über die API kostet ein 4×4-Board ca. $0.10.
+
+**Kein Board doppelt:** Kommt dieselbe Anfrage noch einmal, verweist der Bot auf das vorhandene Board (oder bietet den vorhandenen Entwurf ohne neue Kosten an). `nochmal` erzwingt einen neuen Entwurf. Doppeltes `anlegen` legt nur einmal an.
+
+**Nicht während eines Spiels:** Spiel und Board-Editor nutzen dasselbe eingeloggte Browser-Profil. Während ein Spiel läuft, legt der Bot keine Boards an, und während er anlegt, startet `!quiz neu` keine Lobby.
+
+Wie gut die Fragen werden: Claude hält sich an feste Regeln (eine eindeutige, kurze Lösung, keine sich ändernden Fakten, Schwierigkeit steigt mit den Punkten, keine Dubletten). qbhost prüft das zusätzlich im Code, und eine zweite Prüfrunde ersetzt falsche oder mehrdeutige Fragen. Lies die DM-Vorschau trotzdem kurz, bevor du `anlegen` schreibst. Im Spiel kann die Spielleitung wie immer mit `!quiz richtig`/`falsch` überstimmen.
 
 ## Sprache
 

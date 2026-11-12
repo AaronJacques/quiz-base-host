@@ -9,6 +9,7 @@ export function helpText(prefix: string): string {
     `\`${p} neu\` – neue Lobby: ich frage, welches Quiz ihr spielen wollt, und poste den Link`,
     `\`${p} neu <Name|Nr>\` – direkt mit diesem Quiz (ich suche auf quiz-base und frage nach, wenn mehrere passen)`,
     `\`${p} boards [suche]\` – öffentliche Tafelquiz-Boards anzeigen / suchen`,
+    `\`${p} erstellen <Thema> [Optionen]\` – neues Board von Claude schreiben lassen und auf quiz-base anlegen (Server-Admins; \`${p} erstellen\` zeigt die Optionen)`,
     `\`${p} ich <quiz-base-Name>\` – deinen Discord-Account mit deinem Namen in quiz-base verknüpfen`,
     `\`${p} lobby\` – wer ist drin, bereit, verknüpft`,
     `\`${p} brett\` · \`${p} stand\` – freie Karten · Punktestand`,

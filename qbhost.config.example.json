@@ -37,6 +37,23 @@
     "claudeBin": "claude",
     "timeoutMs": 30000
   },
+  "boardgen": {
+    "provider": "inherit",
+    "model": "sonnet",
+    "effort": "medium",
+    "review": true,
+    "maxCostUsd": 1,
+    "creatorIds": [],
+    "defaults": {
+      "categories": 4,
+      "rows": 4,
+      "step": 100,
+      "boards": 1,
+      "level": "kneipe",
+      "language": "de",
+      "mcShare": 0
+    }
+  },
   "discord": {
     "tokenEnv": "DISCORD_TOKEN",
     "channelIds": [],

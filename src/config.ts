@@ -85,6 +85,47 @@ export const ConfigSchema = z.object({
     })
     .prefault({}),
 
+  /** Board-Generator: Claude schreibt ein Tafelquiz, qbhost legt es im Board-Editor von quiz-base an (`qbhost board-create`, `!quiz erstellen`). */
+  boardgen: z
+    .object({
+      /** `inherit` = wie `llm.provider`. `claude-cli` = Abo (`claude -p`), `anthropic` = API-Key. */
+      provider: z.enum(['inherit', 'claude-cli', 'anthropic']).default('inherit'),
+      /** Modell für Erzeugung und Prüfrunde (Alias wie `sonnet` oder volle Modell-ID). */
+      model: z.string().default('sonnet'),
+      /** Denkaufwand: mehr = gründlicher, aber langsamer und teurer. */
+      effort: z.enum(['low', 'medium', 'high']).default('medium'),
+      timeoutMs: z.number().int().default(300_000),
+      /** Zweite Prüfrunde (Faktencheck), die falsche oder mehrdeutige Fragen ersetzt. */
+      review: z.boolean().default(true),
+      /** Versuche, bis die Ausgabe gültig ist (Schema + Prüfregeln). */
+      maxAttempts: z.number().int().min(1).max(5).default(3),
+      /** Abbruch, sobald die gemessenen Kosten eines Boards darüber liegen (API; über das Abo fällt nichts an). */
+      maxCostUsd: z.number().min(0).default(1),
+      /** Ablage der erzeugten Boards (enthalten die Lösungen!) und des Registers. */
+      dir: z.string().default('.qbhost/boards'),
+      /** Discord: außer Server-Admins dürfen diese User-IDs Boards erstellen. */
+      creatorIds: z.array(z.string()).default([]),
+      /** Standardwerte, wenn eine Anfrage nichts anderes sagt. */
+      defaults: z
+        .object({
+          /** Kategorien pro Board (2–8). */
+          categories: z.number().int().min(2).max(8).default(4),
+          /** Punktestufen pro Kategorie (quiz-base: 1–10). */
+          rows: z.number().int().min(1).max(10).default(4),
+          /** Punkte pro Stufe (100 → 100, 200, …); quiz-base erlaubt Vielfache von 50. */
+          step: z.number().int().min(50).multipleOf(50).default(100),
+          boards: z.number().int().min(1).max(2).default(1),
+          /** Zielgruppe: kinder (8–10), schule (Kl. 5–7), oberstufe, kneipe (Erwachsene), profi. */
+          level: z.enum(['kinder', 'schule', 'oberstufe', 'kneipe', 'profi']).default('kneipe'),
+          /** Sprache der Fragen (ISO-Code). */
+          language: z.string().default('de'),
+          /** Anteil Multiple-Choice-Fragen (0–1). */
+          mcShare: z.number().min(0).max(1).default(0),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
+
   discord: z
     .object({
       /** Token kommt aus der Umgebung (DISCORD_TOKEN bzw. .env), nie aus der Config-Datei. */

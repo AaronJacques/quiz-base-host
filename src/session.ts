@@ -7,7 +7,7 @@ import { createJudge } from './judge/index.ts';
 import { createLlm, UsageMeter } from './llm/index.ts';
 import { TafelquizController } from './modes/tafelquiz/controller.ts';
 import type { GameRules } from './modes/tafelquiz/rules.ts';
-import { createLobbyWithPublicBoard, listPublicBoards } from './site/lobby.ts';
+import { createLobbyWithOwnBoard, createLobbyWithPublicBoard, listPublicBoards } from './site/lobby.ts';
 import { TafelquizPage } from './site/tafelquiz/page.ts';
 
 const log = createLogger('session');
@@ -65,10 +65,11 @@ export class GameSession {
     await this.driver.open(this.config.baseUrl);
   }
 
-  /** Creates a Tafelquiz lobby for a public board and returns code + invite link. */
-  async createLobby(boardTitle: string): Promise<LobbyInfo> {
+  /** Creates a Tafelquiz lobby for a public board (or, with `own`, one of the account's boards) and returns code + invite link. */
+  async createLobby(boardTitle: string, opts: { own?: boolean } = {}): Promise<LobbyInfo> {
     await this.open();
-    await createLobbyWithPublicBoard(this.driver, this.config.baseUrl, 'Tafelquiz', boardTitle);
+    if (opts.own) await createLobbyWithOwnBoard(this.driver, this.config.baseUrl, boardTitle);
+    else await createLobbyWithPublicBoard(this.driver, this.config.baseUrl, 'Tafelquiz', boardTitle);
     await this.page.revealCode();
     const s = await this.page.waitFor((x) => !!x.lobbyCode, 8000, 300);
     if (!s?.lobbyCode) throw new Error('Lobby-Code nicht lesbar');

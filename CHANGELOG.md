@@ -17,10 +17,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung:
   - ein Browserfehler beendet den Prozess nicht mehr
 
 ### Geändert
+- `!quiz erstellen` ist kein Alias von `!quiz neu` mehr, sondern startet den Board-Generator. Eine Lobby öffnet nur noch `!quiz neu`.
 - `qbhost voice-setup` lädt jedes konfigurierte `ggml-*.bin`-Whisper-Modell und bricht ohne Homebrew mit einer klaren Anleitung ab statt mit `spawn brew ENOENT`.
 - `qbhost doctor` nennt Lösungen: fehlender Chromium, fehlende Claude CLI, keine Konfigurationsdatei. Orca und Claude CLI werden nur geprüft, wenn sie konfiguriert sind.
 
 ### Hinzugefügt
+- **Eigene Boards per KI:** `qbhost board-create` und `!quiz erstellen <Thema> [Optionen]` lassen Claude (Standard Sonnet, Einstellungen unter `boardgen`) ein komplettes Tafelquiz schreiben – mit Prüfregeln im Code, zweiter Prüfrunde (Faktencheck), Kostenschätzung vorab und Schutz gegen doppelte Boards – und legen es über den Board-Editor von quiz-base als eigenes Board an. Im Discord-Channel stehen nur Name, Kategorien und Punkte; Fragen und Lösungen gehen per DM an die anfragende Person. `!quiz neu <Name>` findet die eigenen Boards. Boards landen als privater Entwurf unter „Meine Boards“ (quiz-base kennt beim Speichern keine Sichtbarkeit); den Link zum Board gibt es nur per DM bzw. im Terminal, weil der Editor die Lösungen zeigt.
+- `qbhost board-delete "<Name>"`: eigenes Board auf quiz-base löschen (z.B. Test-Boards); der lokale Entwurf bleibt und lässt sich mit `board-create --from <id>` wieder anlegen.
+- `qbhost login`: einmal selbst im sichtbaren Browser bei quiz-base anmelden; das Profil (`browser.profileDir`) bleibt gespeichert.
 - Öffentliches Repo: Lizenz (MIT), Installationsanleitung ([docs/INSTALL.md](docs/INSTALL.md)), Konfigurationsreferenz ([docs/CONFIG.md](docs/CONFIG.md)), Beitragsrichtlinien, Sicherheitsmeldungen, Issue- und PR-Vorlagen, Dependabot.
 - Deployment für einen Server per Docker-Image: [docs/DEPLOY.md](docs/DEPLOY.md). Dort nutzt der Judge die Anthropic-API (`llm.provider: "anthropic"`), die Claude CLI ist im Image nicht enthalten.
 

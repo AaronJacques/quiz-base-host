@@ -12,6 +12,11 @@ export interface JsonRequest<S extends z.ZodType> {
   images?: ImageInput[];
   /** Short tag for logs / usage accounting. */
   purpose: string;
+  /** Per-request overrides – board generation needs a larger model and longer answers than judging. */
+  model?: string;
+  maxTokens?: number;
+  effort?: 'low' | 'medium' | 'high';
+  timeoutMs?: number;
 }
 
 export interface JsonResponse<T> {

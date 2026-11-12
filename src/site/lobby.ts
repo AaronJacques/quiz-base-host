@@ -38,6 +38,7 @@ const H = `({
     return {ok:true};
   },
   heading(){ return this.t(document.querySelector('main h1')) },
+  mainText(){ return this.t(document.querySelector('main')) },
 })`;
 
 async function call<T>(driver: BrowserDriver, expr: string): Promise<T> {
@@ -55,8 +56,7 @@ async function until(driver: BrowserDriver, expr: string, timeoutMs = 10000): Pr
 
 /**
  * Creates a lobby for a public community board. Returns once the waiting room
- * is shown. (Own/saved boards require login – do that once in the persistent
- * browser profile, then extend this with "Eigenes Board".)
+ * is shown.
  */
 export async function createLobbyWithPublicBoard(
   driver: BrowserDriver,
@@ -67,6 +67,30 @@ export async function createLobbyWithPublicBoard(
   log.info(`Erstelle Lobby: ${format} / "${boardTitle}"`);
   await openPublicBoards(driver, baseUrl, format);
   await searchBoards(driver, boardTitle);
+  await pickAndOpen(driver, boardTitle);
+}
+
+/**
+ * Creates a Tafelquiz lobby with one of the account's own boards (needs the quiz-base login in
+ * the browser profile): format → "Eigenes Board verwenden" → board → preview → waiting room.
+ */
+export async function createLobbyWithOwnBoard(driver: BrowserDriver, baseUrl: string, boardTitle: string): Promise<void> {
+  log.info(`Erstelle Lobby: Tafelquiz / eigenes Board "${boardTitle}"`);
+  await openFormat(driver, baseUrl, 'Tafelquiz');
+  const own = await call<{ ok: boolean; error?: string }>(driver, `clickButton('Eigenes Board verwenden')`);
+  if (!own.ok) throw new Error('„Eigenes Board verwenden“ fehlt – ist der Browser bei quiz-base angemeldet? (npx qbhost login)');
+  await sleep(400);
+  const listed = await until(
+    driver,
+    `boardTitles().some(t=>t.toLowerCase().includes(${JSON.stringify(boardTitle.toLowerCase())}))||mainText().includes('Keine eigenen Boards gefunden')`,
+    15000,
+  );
+  if (!listed) throw new Error('Liste der eigenen Boards lädt nicht');
+  await pickAndOpen(driver, boardTitle);
+}
+
+/** Selects a board in the list, then "Board verwenden →" → preview → "Lobby erstellen" → waiting room. */
+async function pickAndOpen(driver: BrowserDriver, boardTitle: string): Promise<void> {
   const picked = await call<{ ok: boolean; title?: string; error?: string }>(driver, `pickBoard(${JSON.stringify(boardTitle)})`);
   if (!picked.ok) throw new Error(`Board ${picked.error}`);
   log.info(`Board gewählt: ${picked.title}`);
@@ -88,11 +112,15 @@ export async function listPublicBoards(driver: BrowserDriver, baseUrl: string, f
   return call<string[]>(driver, 'boardTitles()');
 }
 
-async function openPublicBoards(driver: BrowserDriver, baseUrl: string, format: QuizFormat): Promise<void> {
+async function openFormat(driver: BrowserDriver, baseUrl: string, format: QuizFormat): Promise<void> {
   await driver.goto(`${baseUrl}/create-lobby`);
   await until(driver, `boardTitles().includes(${JSON.stringify(format)})`);
   await expectOk(call(driver, `clickButton(${JSON.stringify(format)}, true)`), 'Format wählen');
   await until(driver, `heading()===${JSON.stringify(format)}`);
+}
+
+async function openPublicBoards(driver: BrowserDriver, baseUrl: string, format: QuizFormat): Promise<void> {
+  await openFormat(driver, baseUrl, format);
   await expectOk(call(driver, `clickButton('Öffentliches Board verwenden')`), 'Öffentliches Board');
   if (!(await until(driver, `boardTitles().length>3`, 15000))) throw new Error('Board-Liste lädt nicht');
 }

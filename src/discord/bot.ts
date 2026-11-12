@@ -1,3 +1,4 @@
+import type { BoardStudio } from '../board-studio.ts';
 import type { Config } from '../config.ts';
 import type { EventBus, HostEvents } from '../core/events.ts';
 import { createLogger } from '../core/logger.ts';
@@ -5,6 +6,7 @@ import type { PlayerState } from '../core/types.ts';
 import { normalize, similarity } from '../judge/normalize.ts';
 import { applyRule, findRule, formatRuleValue, pickRules, scoreFor, type GameRules } from '../modes/tafelquiz/rules.ts';
 import type { LobbyInfo } from '../session.ts';
+import { BoardCreateFlow } from './board-flow.ts';
 import { helpText, rankingLines, rulesText } from './format.ts';
 import { mention, type ChatGateway, type ChatMessage } from './gateway.ts';
 import { formatBoard, parsePick, parsePickWithContext } from './pick-parser.ts';
@@ -24,7 +26,8 @@ export interface SessionLike {
   readonly bus: EventBus;
   readonly rules: GameRules;
   readonly meter: { summary(): string };
-  createLobby(board: string): Promise<LobbyInfo>;
+  /** `own`: the board was created by this bot (own quiz-base account), not a public one. */
+  createLobby(board: string, opts?: { own?: boolean }): Promise<LobbyInfo>;
   run(): Promise<void>;
   endGame(): Promise<void>;
   close(): Promise<void>;
@@ -39,6 +42,8 @@ export interface BotDeps {
   listBoards: (query?: string) => Promise<string[]>;
   /** Local speech recognition + synthesis; without it the voice commands report "not set up". */
   voice?: VoiceKit | null;
+  /** Board generator (`!quiz erstellen`); without it the command reports "not set up". */
+  boards?: BoardStudio | null;
 }
 
 export interface VoiceKit {
@@ -141,13 +146,31 @@ export class QuizBot {
   private commands: Record<string, Handler>;
   private voice: VoiceSession | null = null;
   private voiceJoining: Promise<void> | null = null;
+  private boards: BoardCreateFlow | null;
 
   constructor(private d: BotDeps) {
+    this.boards = d.boards
+      ? new BoardCreateFlow({
+          gateway: d.gateway,
+          config: d.config,
+          studio: d.boards,
+          say: (channelId, text) => this.say(channelId, text),
+          blockedBy: (guildId) =>
+            this.game
+              ? this.game.guildId === guildId
+                ? `🎲 Während ein Spiel läuft, lege ich keine Boards an (Spiel und Editor teilen sich den Browser). Nach dem Spiel gern.`
+                : BUSY_ELSEWHERE
+              : null,
+        })
+      : null;
     const c = this.commands = {} as Record<string, Handler>;
     const alias = (names: string[], h: Handler) => names.forEach((n) => (c[n] = h));
     alias(['hilfe', 'help', '?'], (m) => this.reply(m, helpText(this.prefix), VOICE_HELP));
     alias(['boards', 'karten', 'liste'], (m, a) => this.cmdBoards(m, a));
-    alias(['neu', 'new', 'lobby-neu', 'erstellen'], (m, a, g) => this.cmdNew(m, a, g));
+    alias(['neu', 'new', 'lobby-neu'], (m, a, g) => this.cmdNew(m, a, g));
+    alias(['erstellen', 'generiere', 'generieren', 'baue', 'bauen'], (m, a) =>
+      this.boards ? this.boards.command(m, a) : this.reply(m, '🔇 Der Board-Generator ist hier nicht eingerichtet.'),
+    );
     alias(['ich', 'name', 'bin'], (m, a, g) => this.cmdMe(m, a, g));
     alias(['link', 'verknuepfe', 'verknüpfe'], (m, a, g) => this.cmdLink(m, a, g));
     alias(['lobby', 'wer', 'status'], (m, _a, g) => this.cmdStatus(m, g));
@@ -191,6 +214,7 @@ export class QuizBot {
       return this.reply(msg, `Kenne ich nicht: \`${cmd.name}\`. \`${this.prefix} hilfe\` zeigt alle Befehle.`);
     }
     if (game && msg.channelId === game.channelId) return this.onGameInput(msg, game, msg.content);
+    if (this.boards && (await this.boards.onMessage(msg))) return;
     const menu = this.menu;
     if (!game && menu?.askedBy === msg.author.id && menu.channelId === msg.channelId && Date.now() < menu.expires) {
       const raw = msg.content.trim();
@@ -234,6 +258,7 @@ export class QuizBot {
   private async cmdNew(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
     if (game) return this.reply(msg, `Es läuft schon ein Spiel in <#${game.channelId}>. Die Spielleitung kann es mit \`${this.prefix} ende\` beenden.`);
     if (this.game) return this.reply(msg, BUSY_ELSEWHERE);
+    if (this.boards?.creating) return this.reply(msg, '⏳ Ich lege gerade ein Board auf quiz-base an. In einer Minute bin ich frei.');
     const text = args.join(' ').trim();
     if (text) return this.chooseBoard(msg, text);
     // No board named → ask instead of picking one.
@@ -259,6 +284,9 @@ export class QuizBot {
       return this.createGame(msg, board);
     }
     const query = text.replace(/^["„“']+|["„“']+$/g, '').replace(/[.!?]+$/, '').trim();
+    // Boards this bot created (own quiz-base account) are not in the public search.
+    const own = this.d.boards?.findOwn(query) ?? [];
+    if (own.length === 1) return this.createGame(msg, own[0]!.title, true);
     if (msg.viaVoice) void this.speak(`Ich suche ${query}.`);
     let results = await this.getBoards(msg.channelId, query);
     if (!results) return;
@@ -289,7 +317,7 @@ export class QuizBot {
     ].filter(Boolean).join('\n'), `Dazu passen ${results.length} Boards. ${this.spokenMenu(options, 5)} Welche Nummer?`);
   }
 
-  private async createGame(msg: ChatMessage, board: string): Promise<void> {
+  private async createGame(msg: ChatMessage, board: string, own = false): Promise<void> {
     if (this.game) return this.reply(msg, this.game.guildId === msg.guildId ? `Es läuft schon ein Spiel in <#${this.game.channelId}>.` : BUSY_ELSEWHERE);
     this.menu = null;
     const guild = this.d.store.get(msg.guildId!);
@@ -310,7 +338,7 @@ export class QuizBot {
     await this.say(msg.channelId, `⏳ Erstelle eine Tafelquiz-Lobby mit **${board}** …`);
     void this.speakFor(g.guildId, `Alles klar, ich erstelle eine Lobby mit ${board}.`);
     try {
-      g.lobby = await session.createLobby(board);
+      g.lobby = await session.createLobby(board, own ? { own: true } : undefined);
     } catch (e) {
       log.error(`Lobby: ${(e as Error).message}`);
       await this.reply(msg, `⚠️ Lobby konnte nicht erstellt werden: ${(e as Error).message}`, 'Die Lobby konnte ich leider nicht erstellen. Details stehen im Chat.');

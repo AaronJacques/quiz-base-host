@@ -66,6 +66,46 @@ Live erkundet mit Host + 2 Testspielern. Diese Datei dokumentiert, worauf `src/s
 
 - Sieht Frage + Bild, aber nie die Notiz. Buzzer: Button `BUZZER! (Leertaste)` nur wenn freigegeben, sonst „Buzzer deaktiviert“.
 
+## Account (Benutzermenü)
+
+- Header: `button[aria-label="Benutzermenu"]` öffnet ein Menü. Abgemeldet enthält es das Login-Formular: `input[type=email]` (`deine@email.com`), `input[type=password]`, Button `Anmelden`, `Passwort vergessen?`, `Noch kein Account? Registrieren`. Nur E-Mail + Passwort, kein OAuth.
+- Angemeldet (live 13.11.2026) enthält das Menü die Buttons `Profil`, `Postfach`, `Meine Boards`, `Frage einreichen`, `Meine Einreichungen`, `Premium`, `Abmelden`. Nach dem Anmelden **klappt quiz-base das Menü zu** – `qbhost login` öffnet es dann einmal kurz zum Prüfen.
+- `src/site/editor/probe.browser.js` `account()` erkennt den Login nur an festen Menü-Beschriftungen und liest weder Namen noch E-Mail.
+
+## Board-Editor Tafelquiz (`/configure-lobby?format=tafelquiz`, Stand 12.11.2026)
+
+Weg: `/create-lobby` → `Tafelquiz` → `Neues Board erstellen`. Auch ohne Login erreichbar; ohne Login gibt es am Ende nur `Lobby erstellen` (Board wird nicht gespeichert). Text „Schritt n von 4“.
+
+1. **Template:** `h3`-Karten (selbst klickbar) `Klassisches Spiel` (4 Kategorien), `Schnelles Spiel` (3), `Benutzerdefiniert` (0). qbhost nimmt `Benutzerdefiniert`.
+2. **Board-Anzahl:** Buttons `1 Board` / `2 Boards`, dann `Weiter →` (`← Zurück`).
+3. **Kategorien bearbeiten:**
+   - `input[placeholder="Oberkategorie eingeben..."]` („wird in der Lobby angezeigt“), bei 2 Boards zwei Felder (Oberkategorie 1/2).
+   - Pro Kategorie: `input[placeholder="Kategorienamen eingeben..."]`, Text „Fragen: n“ mit `aria-label="Frage entfernen"` / `"Frage hinzufügen"`, `aria-label="Kategorie löschen"`; bei 2 Boards ein Button `Board 1`, Klick schaltet auf `Board 2`.
+   - `+ Kategorie hinzufügen`: neue Kategorie mit 1 Frage. **1–10 Fragen** pro Kategorie (Plus ist bei 10 gesperrt); 16 Kategorien gingen ohne Grenze.
+   - `Weiter →` ohne Namen → Dialog „Kategorienamen fehlen“ (`data-testid=dialog-backdrop` fängt Klicks ab).
+4. **Fragen** (`h2` „Fragen für: <Kategorie>“), Tabs `aria-label="Kategorie <n>"` (oben und unten):
+   - Zeile: `input[placeholder="Frage eingeben..."]`, `span` „<n> Punkte“, `aria-label="Ausklappen"`/`"Einklappen"`, `Frage löschen`, Drag-Handle `aria-label="Frage verschieben"`. Punkte nach Zeile: 100, 200, … (Fragenanzahl aus Schritt 3); `+ Frage hinzufügen` startet bei 100.
+   - Ausgeklappt: `Bild-URL (optional)` (`placeholder="https://beispiel.de/bild.jpg"`), `Audio-URL (optional)` (YouTube), Stepper `Punkte verringern`/`Punkte erhöhen` in **50er-Schritten** (min. 50), Checkbox **„Antwortmöglichkeiten anzeigen“** – im leeren Editor **an**:
+     - an = Multiple Choice: `input[placeholder="Antwort 1"]` … `"Antwort 4"` + Radio `name="correct-q-<kat>-<zeile>"` für die richtige.
+     - aus = `textarea[placeholder="Hier können Sie die richtige Antwort notieren..."]` („Notiz für die richtige Antwort (nur für Host sichtbar)“).
+     - MC und Notiz schließen sich aus: MC-Fragen haben keine Host-Notiz.
+   - Keine `maxLength` an den Feldern. Werte per React-Setter + `input`-Event setzen (wie überall).
+
+### Speichern und „Meine Boards“ (mit Login, live 13.11.2026)
+
+- Schritt 4 hat angemeldet zwei Buttons: `Lobby erstellen` und `Board speichern` (`title="Board für später speichern"`). qbhost klickt nie `Lobby erstellen` im Editor.
+- `Board speichern` öffnet ein Modal „Board speichern“ (schließt nicht per Klick daneben): `input#save-board-name` (Pflicht, `placeholder="z.B. Allgemeinwissen Quiz"`), `textarea#save-board-description` (optional), Buttons `Abbrechen` / `Speichern` (gesperrt ohne Namen). **Keine Sichtbarkeit:** gespeicherte Boards sind immer `Entwurf` (privat).
+- Erfolg: Toast „Board wurde erfolgreich gespeichert“, das Modal schließt, die Seite bleibt im Editor **ohne Board-ID in der URL** – ein zweiter Klick auf „Board speichern“ legt ein zweites Board an. Fehler: Toast „Fehler beim Speichern des Boards“, das Modal bleibt offen.
+- **Meine Boards** (`/profil/boards`, Menü → `Meine Boards`): leer „Noch keine Quiz Boards erstellt“, sonst „n Board(s) gefunden“. Pro Board eine Karte: `h3` Name, Status-Badge `Entwurf` / `In Prüfung` / `Veröffentlicht` (dazu `Fork` bei Kopien), Beschreibung, „2 Kategorien · 1 Board · 4 Fragen“, Datum, Button `aria-label="Mehr Optionen"` (`aria-haspopup=menu`).
+- Das Menü (`[role=menu]`, Einträge `[role=menuitem]`) eines Entwurfs: `Bearbeiten` (→ `/profil/boards/edit/<uuid>?format=tafelquiz`, der Editor-Link – **zeigt die Lösungen**), `Lobby erstellen` (→ `/configure-lobby?boardId=<uuid>&mode=lobby&format=tafelquiz`), `Umbenennen`, `Veröffentlichen`, `Duplizieren`, `Löschen`.
+- `Veröffentlichen` reicht das Board bei quiz-base zur Prüfung ein (Status `In Prüfung`, danach `Veröffentlicht` und in der öffentlichen Suche). qbhost macht das nie selbst.
+- `Löschen` fragt nach: `[role=alertdialog]` „Board löschen?“ („… kann nicht rückgängig gemacht werden“) mit `Abbrechen` / `Löschen`. Danach geht ein `DELETE` an die Seite, und **solange er läuft, zeigt die Liste keine Karten** (Ladezustand). Wer dann schon „Karte weg“ annimmt und den Browser schließt, bricht das Löschen ab – `deleteOwnBoard()` wartet deshalb auf die fertige Liste und prüft nach einem Neuladen.
+
+### Lobby mit eigenem Board
+
+- `/create-lobby` → `Tafelquiz` → angemeldet zusätzlich **`Eigenes Board verwenden`** (vor „Öffentliches Board verwenden“). Danach `h1` „Eigenes Board auswählen“, Suchfeld `Nach Boards suchen...` (filtert die eigenen Boards), dieselben Karten (`h3`) wie bei öffentlichen Boards, leer: „Keine eigenen Boards gefunden“.
+- Karte anklicken → `Board verwenden →` → `Board Vorschau` → `Lobby erstellen` → `Lobby Warteraum`, genau wie bei öffentlichen Boards (`createLobbyWithOwnBoard` in `src/site/lobby.ts`, live 4 s).
+
 ## Punktejagd (für später)
 
 - Host nach Start: „Warte auf Spieler – x von y bereit – Gäste aktivieren am Handy den Ton“ → `Spiel starten`.

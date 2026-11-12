@@ -5,13 +5,15 @@ import { describe, expect, it } from 'vitest';
 import { ConfigSchema, type Config } from '../src/config.ts';
 import { EventBus } from '../src/core/events.ts';
 import { setLogLevel } from '../src/core/logger.ts';
-import { QuizBot, type SessionLike } from '../src/discord/bot.ts';
+import { QuizBot, type BotDeps, type SessionLike } from '../src/discord/bot.ts';
 import type { ChatGateway, ChatMessage } from '../src/discord/gateway.ts';
 import { rankingLines } from '../src/discord/format.ts';
 import { GuildStore } from '../src/discord/store.ts';
 import { createJudge } from '../src/judge/index.ts';
 import { UsageMeter } from '../src/llm/client.ts';
 import { TafelquizController } from '../src/modes/tafelquiz/controller.ts';
+import type { BoardStudio } from '../src/board-studio.ts';
+import { BoardStore, buildBoard, defaultSpec, fingerprint, type BoardOut, type BoardSpec, type CostEstimate } from '../src/boardgen/index.ts';
 import { FakeTafelquizPage } from './fake-page.ts';
 
 setLogLevel('error');
@@ -55,6 +57,7 @@ class FakeSession implements SessionLike {
   page: FakeTafelquizPage;
   private ac = new AbortController();
   board = '';
+  lobbyOpts: { own?: boolean } | undefined;
   constructor(
     private config: Config,
     names: string[] = ['Anna', 'Ben'],
@@ -72,8 +75,9 @@ class FakeSession implements SessionLike {
       if (command === 'punkte') void this.page.award(args.slice(0, -1).join(' '), Number(args.at(-1)));
     });
   }
-  async createLobby(board: string) {
+  async createLobby(board: string, opts?: { own?: boolean }) {
     this.board = board;
+    this.lobbyOpts = opts;
     return { code: 'ABC123', joinUrl: 'https://www.quiz-base.de/join?code=ABC123' };
   }
   async run() {
@@ -98,7 +102,7 @@ async function until(fn: () => boolean, ms = 5000) {
   throw new Error('timeout');
 }
 
-function setup(discord: Record<string, unknown> = {}, game: Record<string, unknown> = {}, players?: string[]) {
+function setup(discord: Record<string, unknown> = {}, game: Record<string, unknown> = {}, players?: string[], extra: Partial<BotDeps> = {}) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbbot-'));
   const config = ConfigSchema.parse({
     game: { revealPauseSec: 0, answerTimeoutSec: 2, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2, ...game },
@@ -119,6 +123,7 @@ function setup(discord: Record<string, unknown> = {}, game: Record<string, unkno
       const all = ['Test Board', 'Anderes Board', 'Allgemeinwissen Quiz v1', 'Allgemeinwissen Quiz v2', 'Dragon Ball Quiz'];
       return q ? all.filter((t) => t.toLowerCase().includes(q.toLowerCase())) : all.slice(0, 4);
     },
+    ...extra,
   });
   return { gw, bot, session: () => session!, created: () => session, searches, config };
 }
@@ -443,4 +448,223 @@ describe('QuizBot – reveal and ranking', () => {
     await gw.write(anna, '!quiz ende');
     await until(() => bot.activeGame === null);
   }, 10000);
+});
+
+// ───────────────────────────── !quiz erstellen (board generator) ─────────────────────────────
+
+/** Board studio without LLM and browser: generates a fixed board, "creates" it in memory. */
+class FakeStudio implements BoardStudio {
+  generated = 0;
+  created = 0;
+  failCreate = false;
+  store = new BoardStore(mkdtempSync(path.join(os.tmpdir(), 'qbboards-')));
+  private cfg = ConfigSchema.parse({});
+  unavailable() {
+    return null;
+  }
+  defaults(topic: string) {
+    return defaultSpec(this.cfg, topic);
+  }
+  estimate(): CostEstimate {
+    return { usd: 0.1, calls: 2, model: 'claude-sonnet-5-5', viaSubscription: true };
+  }
+  existing(spec: BoardSpec) {
+    return this.store.byFingerprint(fingerprint(spec));
+  }
+  async generate(spec: BoardSpec, onProgress?: (t: string) => void) {
+    this.generated++;
+    onProgress?.('🔎 Prüfrunde …');
+    const out: BoardOut = {
+      title: `${spec.topic} Quiz`,
+      description: 'Ein Test.',
+      supercategories: [spec.topic],
+      categories: Array.from({ length: spec.categories * spec.boards }, (_, c) => ({
+        name: `Rubrik${c + 1}`,
+        questions: Array.from({ length: spec.rows }, (_, r) => ({
+          question: `Geheimfrage ${c}/${r} über ${'abcdefgh'[c]} mit Stufe ${'wxyz'[r]}?`,
+          answer: `Geheimlösung${c}${r}`,
+          variants: [],
+          wrongOptions: [],
+          difficulty: r + 1,
+        })),
+      })),
+    };
+    const board = buildBoard(out, spec, { model: 'sonnet', costUsd: 0.08, calls: 2, reviewed: [], warnings: [] });
+    return { board, record: this.store.saveDraft(board) };
+  }
+  load(id: string) {
+    return this.store.load(id);
+  }
+  async create(id: string) {
+    if (this.failCreate) throw new Error('Editor lädt nicht');
+    this.created++;
+    return this.store.markCreated(id, `https://www.quiz-base.de/profil/boards/edit/${id}?format=tafelquiz`);
+  }
+  findOwn(name: string) {
+    return this.store.findCreated(name);
+  }
+}
+
+const admin = { id: 'u-admin', name: 'Chefin', admin: true };
+
+describe('QuizBot: !quiz erstellen', () => {
+  function boardSetup(discord: Record<string, unknown> = {}) {
+    const studio = new FakeStudio();
+    return { ...setup(discord, {}, undefined, { boards: studio }), studio };
+  }
+
+  it('Rückfrage mit Kosten → ja → öffentliche Vorschau ohne Lösungen, DM mit Lösungen → anlegen → Link per DM', async () => {
+    const { gw, studio } = boardSetup();
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2 profi');
+    expect(gw.all()).toContain('Neues Board erzeugen?');
+    expect(gw.all()).toContain('2 Kategorien × 2 Stufen');
+    expect(gw.all()).toContain('Profis');
+    expect(gw.all()).toContain('Claude-Abo');
+    expect(studio.generated).toBe(0);
+
+    await gw.write(admin, 'ja');
+    await until(() => gw.all().includes('Schreib `anlegen`'));
+    expect(studio.generated).toBe(1);
+    expect(gw.all()).toContain('Weltraum Quiz');
+    expect(gw.all()).toContain('Rubrik1');
+    // Never questions or solutions in the channel …
+    expect(gw.all()).not.toMatch(/Geheimfrage|Geheimlösung/);
+    // … but in the DM to the creator.
+    expect(gw.dms.join('\n')).toContain('Geheimlösung00');
+    expect(gw.dms.join('\n')).toContain('Geheimfrage 0/0');
+
+    await gw.write(admin, 'anlegen');
+    await until(() => gw.all().includes('ist auf quiz-base angelegt'));
+    expect(studio.created).toBe(1);
+    expect(gw.all()).toContain('`!quiz neu Weltraum Quiz`');
+    expect(gw.all()).toContain('privater Entwurf');
+    expect(gw.all()).toContain('Veröffentlichen kannst du selbst');
+    expect(gw.all()).not.toMatch(/Geheimfrage|Geheimlösung/);
+    // The editor link shows the solutions: DM only, never in the channel.
+    expect(gw.all()).not.toContain('quiz-base.de/profil/boards/edit/');
+    expect(gw.dms.join('\n')).toMatch(/https:\/\/www\.quiz-base\.de\/profil\/boards\/edit\/weltraum-quiz-/);
+  });
+
+  it('„öffentlich“: Hinweis, dass Boards als Entwurf gespeichert werden; nicht Teil des Themas', async () => {
+    const { gw } = boardSetup();
+    await gw.write(admin, '!quiz erstellen Weltraum öffentlich');
+    expect(gw.all()).toContain('Thema: **Weltraum**');
+    expect(gw.all()).toContain('Veröffentlichen kannst du selbst');
+  });
+
+  it('nur Server-Admins oder boardgen.creatorIds', async () => {
+    const { gw, studio } = boardSetup();
+    await gw.write(anna, '!quiz erstellen Weltraum');
+    expect(gw.all()).toContain('🔒');
+    expect(studio.generated).toBe(0);
+  });
+
+  it('boardgen.creatorIds schaltet einzelne Nutzer frei', async () => {
+    const studio = new FakeStudio();
+    const { gw, bot } = setup({}, {}, undefined, { boards: studio });
+    (bot as unknown as { d: BotDeps }).d.config.boardgen.creatorIds = [anna.id];
+    await gw.write(anna, '!quiz erstellen Weltraum');
+    expect(gw.all()).toContain('Neues Board erzeugen?');
+  });
+
+  it('nur die anfragende Person kann bestätigen', async () => {
+    const { gw, studio } = boardSetup();
+    await gw.write(admin, '!quiz erstellen Weltraum');
+    await gw.write(anna, 'ja');
+    expect(studio.generated).toBe(0);
+  });
+
+  it('gilt nur in den erlaubten Channels', async () => {
+    const { gw, studio } = boardSetup({ channelIds: ['anderer-channel'] });
+    await gw.write(admin, '!quiz erstellen Weltraum');
+    expect(gw.sent).toEqual([]);
+    expect(studio.generated).toBe(0);
+  });
+
+  it('dieselbe Anfrage legt kein zweites Board an; „nochmal“ erzwingt einen neuen Entwurf', async () => {
+    const { gw, studio } = boardSetup();
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2');
+    await gw.write(admin, 'ja');
+    await until(() => gw.all().includes('Schreib `anlegen`'));
+    await gw.write(admin, 'anlegen');
+    await until(() => gw.all().includes('ist auf quiz-base angelegt'));
+
+    gw.sent = [];
+    await gw.write(admin, '!quiz erstellen  weltraum   2x2');
+    expect(gw.all()).toContain('Das gleiche Board gibt es schon');
+    expect(gw.all()).not.toContain('quiz-base.de/profil/boards/edit/');
+    expect(gw.dms.at(-1)).toContain('quiz-base.de/profil/boards/edit/');
+    expect(studio.generated).toBe(1);
+
+    gw.sent = [];
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2 nochmal');
+    expect(gw.all()).toContain('Neues Board erzeugen?');
+  });
+
+  it('doppeltes „anlegen“ legt nur einmal an', async () => {
+    const { gw, studio } = boardSetup();
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2');
+    await gw.write(admin, 'ja');
+    await until(() => gw.all().includes('Schreib `anlegen`'));
+    await Promise.all([gw.write(admin, 'anlegen'), gw.write(admin, 'anlegen')]);
+    await until(() => gw.all().includes('ist auf quiz-base angelegt'));
+    expect(studio.created).toBe(1);
+  });
+
+  it('ein vorhandener Entwurf wird ohne neue Kosten wieder angeboten', async () => {
+    const { gw, studio } = boardSetup();
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2');
+    await gw.write(admin, 'ja');
+    await until(() => gw.all().includes('Schreib `anlegen`'));
+    await gw.write(admin, 'abbrechen');
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2');
+    expect(gw.all()).toContain('schon einen Entwurf');
+    expect(studio.generated).toBe(1);
+    await gw.write(admin, 'anlegen');
+    await until(() => gw.all().includes('ist auf quiz-base angelegt'));
+  });
+
+  it('Fehler beim Anlegen: Entwurf bleibt, „anlegen“ versucht es erneut', async () => {
+    const { gw, studio } = boardSetup();
+    studio.failCreate = true;
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2');
+    await gw.write(admin, 'ja');
+    await until(() => gw.all().includes('Schreib `anlegen`'));
+    await gw.write(admin, 'anlegen');
+    await until(() => gw.all().includes('Anlegen hat nicht geklappt'));
+    studio.failCreate = false;
+    await gw.write(admin, 'anlegen');
+    await until(() => gw.all().includes('ist auf quiz-base angelegt'));
+  });
+
+  it('nicht während eines Spiels', async () => {
+    const { gw, studio } = boardSetup();
+    await gw.write(anna, '!quiz neu 1');
+    await until(() => gw.all().includes('join?code=ABC123'));
+    await gw.write(admin, '!quiz erstellen Weltraum');
+    expect(gw.all()).toContain('Während ein Spiel läuft');
+    expect(studio.generated).toBe(0);
+  });
+
+  it('ohne Thema: Hilfe zu den Optionen; „erstellen“ öffnet keine Lobby mehr', async () => {
+    const { gw, created } = boardSetup();
+    await gw.write(admin, '!quiz erstellen');
+    expect(gw.all()).toContain('Board erzeugen:');
+    expect(gw.all()).toContain('5x4');
+    expect(created()).toBeNull();
+  });
+
+  it('!quiz neu <eigenes Board> startet die Lobby mit dem eigenen Board', async () => {
+    const { gw, studio, session } = boardSetup();
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2');
+    await gw.write(admin, 'ja');
+    await until(() => gw.all().includes('Schreib `anlegen`'));
+    await gw.write(admin, 'anlegen');
+    await until(() => gw.all().includes('ist auf quiz-base angelegt'));
+    await gw.write(anna, '!quiz neu weltraum quiz');
+    await until(() => gw.all().includes('join?code=ABC123'));
+    expect(session().board).toBe('Weltraum Quiz');
+    expect(session().lobbyOpts).toEqual({ own: true });
+    expect(studio.created).toBe(1);
+  });
 });

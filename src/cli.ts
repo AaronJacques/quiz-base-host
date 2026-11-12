@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { parseArgs } from 'node:util';
 import { runHost } from './app.ts';
+import { BOARD_CLI_OPTIONS, runBoardCreate, runBoardDelete, runLogin } from './board-cli.ts';
 import { runDiscordBot } from './discord/index.ts';
 import { setupVoice, voiceProblems } from './voice/index.ts';
 import { createDriver } from './browser/index.ts';
@@ -24,6 +25,9 @@ Befehle:
   discord  Als Discord-Bot laufen (Token in DISCORD_TOKEN bzw. .env)
   boards   Öffentliche Tafelquiz-Boards auflisten (qbhost boards [suche])
   voice-setup  Sprachsteuerung einrichten (whisper.cpp, Modelle, Piper) – einmalig
+  login    Bei quiz-base anmelden (sichtbarer Browser, du meldest dich selbst an) – für eigene Boards
+  board-create  Tafelquiz-Board per KI erzeugen und auf quiz-base anlegen (qbhost board-create --help)
+  board-delete  Eigenes Board auf quiz-base löschen: qbhost board-delete "<Name>" [--yes]
   probe    Aktuellen Seitenzustand als JSON ausgeben (Debug)
   judge    Bewertung testen:  qbhost judge "<Frage>" "<Lösung>" "<Antwort>"
   doctor   Umgebung prüfen
@@ -58,6 +62,7 @@ const { values, positionals } = parseArgs({
     config: { type: 'string' },
     verbose: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
+    ...BOARD_CLI_OPTIONS,
   },
 });
 
@@ -68,7 +73,7 @@ try {
   /* no .env */
 }
 
-if (values.help) {
+if (values.help && positionals[0] !== 'board-create') {
   console.log(USAGE);
   process.exit(0);
 }
@@ -110,6 +115,20 @@ switch (command) {
     await setupVoice(config);
     break;
   }
+
+  case 'login':
+    await runLogin(config);
+    break;
+
+  case 'board-create':
+  case 'board-delete':
+    try {
+      await (command === 'board-create' ? runBoardCreate(config, values, rest) : runBoardDelete(config, rest, !!values.yes));
+    } catch (e) {
+      console.error(`❌ ${(e as Error).message}`);
+      process.exit(1);
+    }
+    break;
 
   case 'probe': {
     const driver = createDriver(config);

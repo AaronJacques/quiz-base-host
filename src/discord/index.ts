@@ -1,3 +1,4 @@
+import { QuizBaseBoardStudio } from '../board-studio.ts';
 import type { Config } from '../config.ts';
 import { createLogger } from '../core/logger.ts';
 import { onStopSignal } from '../core/signals.ts';
@@ -32,6 +33,7 @@ export async function runDiscordBot(config: Config): Promise<void> {
     createSession: (cfg) => new GameSession(cfg, []),
     listBoards: (query) => fetchPublicBoards(config, query),
     voice,
+    boards: new QuizBaseBoardStudio(config),
   });
   await gateway.login(token);
   log.info(`Bereit. Befehle mit "${config.discord.prefix} hilfe" oder @Mention.${voice ? ' Sprachsteuerung: an.' : ''}`);
