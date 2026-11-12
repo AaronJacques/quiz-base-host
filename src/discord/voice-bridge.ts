@@ -3,6 +3,7 @@ import type { PlayerState } from '../core/types.ts';
 
 type TimingRules = { answerTimeoutSec: number; buzzWindowSec: number; buzzAnswerTimeoutSec: number };
 import {
+  ANSWER_HOW_LINE,
   askLine,
   BUZZER_OPEN_LINE,
   freeCardsLine,
@@ -31,7 +32,6 @@ export class VoiceBridge {
   private announcedBoard = 0;
   private questions = 0;
   private solved = false;
-  private voiceAnswer = false;
   private _buzzerOpen = false;
   private questionOpen = false;
 
@@ -39,11 +39,6 @@ export class VoiceBridge {
 
   get buzzerOpen(): boolean {
     return this._buzzerOpen;
-  }
-
-  /** The next verdict echoes the recognised answer ("„Luigi Mario“ – richtig"). */
-  markVoiceAnswer(): void {
-    this.voiceAnswer = true;
   }
 
   say(text: string, key?: string): Promise<void> {
@@ -73,7 +68,7 @@ export class VoiceBridge {
     on('host:notice', (n) => {
       switch (n.kind) {
         case 'started':
-          void this.say(`Los geht's mit ${this.opts.board()}! ${this.rules ? rulesLine(this.rules) : ''}`);
+          void this.say(`Los geht's mit ${this.opts.board()}! ${this.rules ? `${rulesLine(this.rules)} ` : ''}${ANSWER_HOW_LINE}`);
           break;
         case 'reminder':
           if (n.player) void this.say(reminderLine(n.player, this.turn?.open[0]), 'turn');
@@ -116,13 +111,11 @@ export class VoiceBridge {
     });
     on('host:await-answer', (a) => {
       this.lastAsk = a;
-      this.voiceAnswer = false;
       void this.say(a.viaBuzzer ? `${a.player} war am schnellsten. Deine Antwort?` : askLine(a), 'ask');
     });
     on('host:verdict', (v) => {
       if (v.correct) this.solved = true;
-      void this.say(verdictLine(v, this.voiceAnswer));
-      this.voiceAnswer = false;
+      void this.say(verdictLine(v, false)); // spoken answers were already repeated back for confirmation
     });
     on('host:reveal', ({ answer }) => {
       this._buzzerOpen = false;

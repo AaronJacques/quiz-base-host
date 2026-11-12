@@ -37,10 +37,12 @@ Bot:   „Anna ist da. Ben ist da. Los geht's mit Allgemeinwissen Quiz v1!
         Die Kategorien sind: Flaggen, Sport, … Anna, du bist dran. Welche Karte?“
 Anna:  „Sport für zweihundert“
 Bot:   „Sport für 200. Wie lang ist ein Marathon? Anna, deine Antwort?“
-Anna:  „Ähm … 42 Kilometer“
-Bot:   „‚42 Kilometer‘. Leider falsch. Minus 100. Jetzt die anderen! Wer es weiß, ruft: Hier!“
-Ben:   „Hier!“
-Bot:   „Ben war am schnellsten. Deine Antwort?“ …
+Anna:  „Ähm … Ben, waren das nicht 40 Kilometer?“         (laut nachgedacht → zählt nicht)
+Ben:   „Meine Antwort wäre 50“                             (Ben ist nicht dran → wird gar nicht erst erkannt)
+Anna:  „Okay, meine Antwort ist 42 Kilometer“
+Bot:   „42 Kilometer?“
+Anna:  „Ja“
+Bot:   „Richtig! Plus 200.“
 ```
 
 Wer im Voice-Channel ist und auf quiz-base **denselben Namen** wie in Discord benutzt, wird automatisch verknüpft. Sonst: „Quizmaster, ich bin Benjamin“.
@@ -49,11 +51,18 @@ Wer im Voice-Channel ist und auf quiz-base **denselben Namen** wie in Discord be
 
 **Ohne Rufname** – nur von der Person, die gerade dran ist:
 - Karte: „Sport für 200“, „Geschichte dreihundert“, „die zweite Kategorie für 100“
-- Antwort, wenn er dich fragt. Füllwörter („Ähm, ich glaube das ist …“) werden entfernt, „Moment“ oder „warte“ zählt nicht als Antwort.
+- **Antwort nur mit Schlüsselwort**, wenn er dich fragt: „Meine Antwort ist …“, „Die Antwort lautet …“, „Meine finale Antwort ist …“, „Antwort: …“, „Ich antworte mit …“ (Füllwörter davor wie „Okay, äh“ sind egal). Alles andere ist lautes Nachdenken und zählt nicht. Der Bot wiederholt die Antwort einmal kurz („42 Kilometer?“):
+  - „Ja“ / „Genau“ / „Richtig“ → abgegeben
+  - „Nein“ / „Warte“ → verworfen, neu antworten
+  - ein neues „Meine Antwort ist …“ ersetzt die alte
+  - läuft die Zeit ab, bevor du bestätigst, gilt die zuletzt genannte Antwort.
+  Wer das Schlüsselwort vergisst, wird einmal pro Spiel daran erinnert. Getippte Antworten im Chat brauchen kein Schlüsselwort.
 - In Menüs: „Nummer zwei“, „das erste“
-- Nach einer falschen Antwort („Jetzt die anderen!“), alle, die noch nicht geantwortet haben: „Hier!“, „Ich!“ oder „Buzzer!“. Der Buzzer auf quiz-base geht weiterhin auch; wer zuerst ist, gewinnt. (Der Bot selbst sagt nicht „Buzzer“ – die deutsche Stimme spricht es als „Butzer“.)
+- Nach einer falschen Antwort („Jetzt die anderen!“), alle, die noch nicht geantwortet haben: „Hier!“, „Ich!“ oder „Buzzer!“ (ein bloßes „Ja“ zählt nicht). Der Buzzer auf quiz-base geht weiterhin auch; wer zuerst ist, gewinnt. (Der Bot selbst sagt nicht „Buzzer“ – die deutsche Stimme spricht es als „Butzer“.)
 
-**Mit Rufname „Quizmaster, …“** (auch „Quiz Master“, „Quizmeister“) – alle:
+**Wer nicht dran ist, ist für den Bot stumm.** Er prüft bei diesen Personen nur die ersten 2 Sekunden einer Äußerung auf „Quizmaster“; der Rest wird nicht einmal transkribiert. Ihr könnt also frei mitraten und diskutieren.
+
+**Mit Rufname „Quizmaster, …“** (auch „Quiz Master“, „Quizmeister“) – alle, jederzeit:
 
 | Sagen | Wirkung |
 |---|---|
@@ -73,7 +82,7 @@ Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel (`🎙️
 ## Datenschutz
 
 - Der Bot sagt beim Beitritt an, dass er zuhört. Er verarbeitet Sprache nur, solange er im Channel ist, und **speichert keine Aufnahmen**.
-- Erkannte Sätze landen nur dann im Text-Channel, wenn der Bot darauf reagiert (Karte, Antwort, Befehl). Gespräche nebenbei werden zwar kurz erkannt, aber weder gespeichert noch gepostet.
+- Erkannte Sätze landen nur dann im Text-Channel, wenn der Bot darauf reagiert (Karte, Antwort mit Schlüsselwort, Ja/Nein, Befehl). Von allen, die nicht dran sind, wird nur der Anfang einer Äußerung auf den Rufnamen geprüft. Lautes Nachdenken der Person, die dran ist, wird erkannt, aber weder gespeichert noch gepostet.
 - Nach 20 Minuten ohne Spiel und ohne Sprache verlässt der Bot den Channel von selbst.
 
 ## Tipps & Grenzen

@@ -12,7 +12,7 @@ import { createJudge } from '../src/judge/index.ts';
 import { UsageMeter } from '../src/llm/client.ts';
 import { TafelquizController } from '../src/modes/tafelquiz/controller.ts';
 import { decodeWav, durationMs, encodeWav, resample, rms, toChannels, type Pcm } from '../src/voice/audio.ts';
-import { isBuzz, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
+import { confirmReply, extractAnswer, isBuzz, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
 import { gameOverLine, questionLine, turnLine, verdictLine } from '../src/voice/narration.ts';
 import { cleanTranscript, type SpeechToText } from '../src/voice/stt.ts';
 import type { Speaker, Utterance, VoiceTransport } from '../src/voice/transport.ts';
@@ -69,8 +69,36 @@ describe('voice: commands', () => {
     expect(spokenNumber('Allgemeinwissen')).toBeNull();
     expect(spokenToDigits('Sport für zweihundert')).toBe('Sport für 200');
     expect(spokenToDigits('Filme hundert')).toBe('Filme 100');
+    expect(spokenToDigits('Sport4300')).toBe('Sport für 300'); // Whisper hears "für" as "four"
+    expect(spokenToDigits('Sport 4 200')).toBe('Sport für 200');
+    expect(spokenToDigits('Sport 400')).toBe('Sport 400');
     expect(spokenToDigits('fünfhundertfünfzig bitte')).toBe('550 bitte');
     expect(spokenToDigits('Musik tausend')).toBe('Musik 1000');
+  });
+
+  it('takes spoken answers only with the keyword, and understands the confirmation', () => {
+    expect(extractAnswer('Meine Antwort ist Paris.')).toBe('Paris');
+    expect(extractAnswer('Okay, äh, meine Antwort ist: Luigi Mario')).toBe('Luigi Mario');
+    expect(extractAnswer('Die Antwort lautet 42 Kilometer')).toBe('42 Kilometer');
+    expect(extractAnswer('Meine finale Antwort ist B')).toBe('B');
+    expect(extractAnswer('Antwort: Breaking Bad')).toBe('Breaking Bad');
+    expect(extractAnswer('Nein, meine Antwort ist Berlin')).toBe('Berlin');
+    expect(extractAnswer('Ich antworte mit Rom')).toBe('Rom');
+    expect(extractAnswer('Meine Antwort ist')).toBe('');
+    expect(extractAnswer('Antwort Istanbul')).toBe('Istanbul');
+    expect(extractAnswer('Paris')).toBeNull();
+    expect(extractAnswer('Ich weiß die Antwort nicht')).toBeNull();
+    expect(extractAnswer('Was ist denn die Antwort?')).toBeNull();
+    expect(extractAnswer('Antworten ist schwer')).toBeNull();
+    expect(confirmReply('Ja.')).toBe('yes');
+    expect(confirmReply('Ja, genau')).toBe('yes');
+    expect(confirmReply('Richtig')).toBe('yes');
+    expect(confirmReply('Nein')).toBe('no');
+    expect(confirmReply('Nö, warte')).toBe('no');
+    expect(confirmReply('Ja, nein, doch nicht')).toBe('no');
+    expect(confirmReply('Keine Ahnung')).toBeNull();
+    expect(isBuzz('Ja')).toBe(false);
+    expect(isBuzz('Hier!')).toBe(true);
   });
 
   it('cleans transcripts and spoken answers', () => {
@@ -84,6 +112,7 @@ describe('voice: commands', () => {
   });
 
   it('narrates naturally', () => {
+    expect(gameOverLine([{ name: 'Ben', score: -50 }, { name: 'Anna', score: -150 }] as never)).toContain('Vorne liegt Ben mit -50 Punkten');
     const t = { player: 'Anna', open: [{ col: 0, row: 0, category: 'Sport', points: 100, answered: false }], grid: [], categories: ['Sport', 'Film'], board: { active: 1, count: 1 } };
     expect(turnLine(t, true)).toBe('Die Kategorien sind: Sport und Film. Anna, du bist dran. Welche Karte? Noch frei: Sport 100.');
     expect(questionLine({ player: 'Anna', category: 'Sport', points: 100, text: 'Wie viele Pins?', hasImage: true, hasAudio: false, options: ['8', '10'] }))
@@ -146,8 +175,16 @@ class FakeRoom implements VoiceTransport {
   }
 }
 
-function voiceKit(texts: Map<number, string>): VoiceKit {
-  const stt: SpeechToText = { transcribe: async (p) => texts.get(p.samples[0]!) ?? '', close: async () => {} };
+/** `calls` records every full transcription (a wake-word check uses only the wake words as prompt). */
+function voiceKit(texts: Map<number, string>, calls: string[] = []): VoiceKit {
+  const stt: SpeechToText = {
+    transcribe: async (p, prompt = '') => {
+      const text = texts.get(p.samples[0]!) ?? '';
+      if (prompt.includes('Meine Antwort ist')) calls.push(text);
+      return text;
+    },
+    close: async () => {},
+  };
   const tts: TextToSpeech = {
     synth: async (text) => {
       const id = 1000 + texts.size;
@@ -212,6 +249,7 @@ describe('QuizBot voice', () => {
       voice: { ignoreWhileSpeaking: false, scoresEvery: 1 },
     });
     const texts = new Map<number, string>();
+    const sttCalls: string[] = [];
     const room = new FakeRoom(texts);
     const anna: Speaker = { id: 'u-anna', username: 'anna', displayName: 'Anna' };
     const ben: Speaker = { id: 'u-ben', username: 'ben', displayName: 'Ben' };
@@ -233,7 +271,7 @@ describe('QuizBot voice', () => {
       store: new GuildStore(tmp),
       createSession: (cfg) => (session = new FakeSession(cfg)),
       listBoards: async (q) => ['Test Board', 'Anderes Board'].filter((t) => !q || t.toLowerCase().includes(q.toLowerCase())),
-      voice: voiceKit(texts),
+      voice: voiceKit(texts, sttCalls),
     });
 
     await handler({ id: '1', channelId: 'chan', guildId: 'guild', author: { ...anna, isBot: false }, content: '!quiz voice', mentionsBot: false, mentions: [], canManage: false, voiceChannelId: 'vc' });
@@ -250,24 +288,41 @@ describe('QuizBot voice', () => {
     room.speak(anna, 'Sport für hundert');
     await until(() => !!bot.activeGame?.awaiting);
     expect(room.all()).toContain('Sport für 100. Wie viele Pins beim Bowling?');
-    room.speak(anna, 'Ähm, zehn');
-    await until(() => room.all().includes('„zehn“. Richtig! Plus 100.'));
+    room.speak(ben, 'Meine Antwort ist zwölf'); // not Ben's question → never even transcribed in full
+    room.speak(anna, 'Ähm, zehn, oder?'); // thinking aloud, no keyword → does not count
+    room.speak(anna, 'Okay, meine Antwort ist zehn.');
+    await until(() => room.played.includes('zehn?'));
+    expect(bot.activeGame?.awaiting?.player).toBe('Anna'); // not submitted before "Ja"
+    room.speak(anna, 'Ja, genau.');
+    await until(() => room.all().includes('Richtig! Plus 100.'));
 
     await until(() => bot.activeGame?.turn?.player === 'Ben' && !bot.activeGame.questionOpen);
     room.speak(ben, 'Film zweihundert');
     await until(() => bot.activeGame?.awaiting?.player === 'Ben');
-    room.speak(ben, 'sieben');
+    room.speak(ben, 'Meine Antwort ist acht');
+    await until(() => room.played.includes('acht?'));
+    room.speak(ben, 'Nein, warte.');
+    await until(() => room.played.includes('Okay. Deine Antwort?'));
+    room.speak(ben, 'Die Antwort ist sieben');
+    await until(() => room.played.includes('sieben?'));
+    room.speak(ben, 'Ja');
     await until(() => room.all().includes('Jetzt die anderen! Wer es weiß'));
+    room.speak(anna, 'Ja'); // side talk, not a buzz
     room.speak(anna, 'Hier!');
     await until(() => bot.activeGame?.awaiting?.player === 'Anna');
-    room.speak(anna, 'neun');
+    room.speak(anna, 'Meine Antwort lautet neun');
+    await until(() => room.played.includes('neun?'));
+    room.speak(anna, 'Richtig');
     await until(() => room.all().includes('Das Spiel ist vorbei'), 8000);
 
     expect(session!.page.players.find((p) => p.name === 'Anna')!.score).toBe(300);
     expect(session!.page.players.find((p) => p.name === 'Ben')!.score).toBe(-100);
     expect(room.all()).toContain('Gewonnen hat Anna mit 300 Punkten');
-    expect(sent.join('\n')).toContain('🎙️ Anna: „neun“');
+    expect(sent.join('\n')).toContain('🎙️ Anna: „Meine Antwort lautet neun“');
     expect(sent.join('\n')).not.toContain('Sport hundert'); // ignored chatter is not transcribed into the chat
+    expect(sent.join('\n')).not.toContain('oder?'); // nor is thinking aloud
+    expect(sttCalls).not.toContain('Meine Antwort ist zwölf'); // Ben was muted: only the wake-word check ran
+    expect(sttCalls).toContain('Ähm, zehn, oder?'); // Anna was on turn → heard in full (and ignored)
     await bot.shutdown();
   }, 30000);
 });

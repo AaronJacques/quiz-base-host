@@ -40,7 +40,7 @@ Ausführlich: `docs/ARCHITECTURE.md`. DOM-Fakten: `docs/SITE-NOTES.md`. Discord-
 5. **Keine Lösungen leaken.** Nichts, was die Lösung enthalten kann (Notiz, LLM-Begründung, Bild-URL), darf vor `host:reveal` in einen öffentlichen Kanal. Rückfragen an die Spielleitung mit Lösung nur per DM (`host:notice.detail`).
 6. **Einstellungen** immer in `src/config.ts` (Zod, Default, Kommentar). Zur Laufzeit änderbare Spielregeln zusätzlich in `RULES` (`src/modes/tafelquiz/rules.ts`), dann sind sie automatisch per Discord einstellbar.
 7. **Sprache:** UI, Logs, Doku und Discord-Texte auf Deutsch; Code, Bezeichner und Code-Kommentare auf Englisch.
-8. **Sprache:** Gesprochene Sätze stehen in `src/voice/narration.ts` (kurz, ohne Markdown). Der STT-Prompt (`voicePrompt`) darf Kategorien und Namen enthalten, **nie die Lösung**. Der Bot reagiert nur auf die Person, die gerade dran ist; Nebengespräche werden weder gepostet noch auf `info` geloggt.
+8. **Sprache:** Gesprochene Sätze stehen in `src/voice/narration.ts` (kurz, ohne Markdown). Der STT-Prompt (`voicePrompt`) darf Kategorien und Namen enthalten, **nie die Lösung**. Der Bot hört nur der Person zu, die gerade dran ist (`QuizBot.attention`); von allen anderen prüft `VoiceHost` nur den Anfang auf den Rufnamen. Gesprochene Antworten zählen nur mit Schlüsselwort („Meine Antwort ist …“, `extractAnswer`) und nach Bestätigung („Ja“). Nebengespräche werden weder gepostet noch auf `info` geloggt.
 9. Neue Logik bekommt Tests. Spielabläufe testet man gegen `FakeTafelquizPage`, Discord-Abläufe mit dem `FakeGateway` in `test/discord-bot.test.ts`, also ohne Netzwerk und Token.
 
 ## Live testen (gegen das echte quiz-base)

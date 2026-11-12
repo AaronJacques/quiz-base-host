@@ -18,7 +18,7 @@ Discord-Channel                         qbhost (läuft auf deinem Rechner)      
 ## Highlights
 
 - **Komplett per Discord-Chat bedienbar:** Quiz per Name aussuchen (der Bot fragt nach, statt irgendeins zu nehmen), Lobby erstellen, Beitrittslink, Namen verknüpfen, Karten wählen, antworten, Regeln einstellen, Spielleitung.
-- **Sprachsteuerung im Voice-Channel:** Der Bot liest Fragen vor, sagt Punkte und Lösungen an und versteht Karten, Antworten, „Hier!“ (Buzzer) und „Quizmaster, …“-Befehle. Spracherkennung (whisper.cpp) und Stimme (Piper) laufen lokal und kostenlos. → [docs/VOICE.md](docs/VOICE.md)
+- **Sprachsteuerung im Voice-Channel:** Der Bot liest Fragen vor, sagt Punkte und Lösungen an und versteht Karten, Antworten („Meine Antwort ist …“, mit kurzer Rückfrage), „Hier!“ (Buzzer) und „Quizmaster, …“-Befehle. Wer nicht dran ist, kann frei mitreden. Spracherkennung (whisper.cpp) und Stimme (Piper) laufen lokal und kostenlos. → [docs/VOICE.md](docs/VOICE.md)
 - **Kartenwahl in natürlicher Sprache:** `Nintendo 200`, `nin 200`, `2 200`, `ich nehme Filme für 300`. Der Bot prüft, ob die Karte existiert, frei oder schon weg ist.
 - **Punkteregeln per Chat einstellbar:** `!quiz regel minus 0`, `!quiz regel buzzerplus 50%`, `!quiz regel zeit 30`. Sie werden pro Server gespeichert.
 - **Sparsam:** Die Engine spielt deterministisch. Claude wird nur bei unklaren Antworten oder Bildfragen ohne Lösung gefragt, standardmäßig Haiku über dein Claude-Code-Abo. Ein Board mit Lösungsnotizen kostet oft **0 Aufrufe**, ein reines Bilder-Board ohne Notizen ca. **1–2 Cent**.

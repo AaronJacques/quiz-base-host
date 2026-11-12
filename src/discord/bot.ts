@@ -7,15 +7,15 @@ import { applyRule, findRule, formatRuleValue, type GameRules } from '../modes/t
 import type { LobbyInfo } from '../session.ts';
 import { helpText, medal, rulesText } from './format.ts';
 import { mention, type ChatGateway, type ChatMessage } from './gateway.ts';
-import { formatBoard, parsePick } from './pick-parser.ts';
+import { formatBoard, parsePick, parsePickWithContext } from './pick-parser.ts';
 import type { GuildStore } from './store.ts';
 import { VoiceBridge } from './voice-bridge.ts';
-import { isBuzz, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
+import { confirmReply, extractAnswer, isBuzz, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
 import { gameOverLine, VOICE_HELP } from '../voice/narration.ts';
 import type { SpeechToText } from '../voice/stt.ts';
 import type { Speaker } from '../voice/transport.ts';
 import type { TextToSpeech } from '../voice/tts.ts';
-import { forSpeech, VoiceHost } from '../voice/voice-host.ts';
+import { forSpeech, VoiceHost, type Attention } from '../voice/voice-host.ts';
 
 const log = createLogger('discord');
 
@@ -89,9 +89,15 @@ interface ActiveGame {
   lastTurnSig: string;
   questionOpen: boolean;
   awaiting: HostEvents['host:await-answer'] | null;
+  /** A spoken answer that was repeated back ("Paris?") and waits for "Ja". */
+  pending: { player: string; answer: string } | null;
+  /** Submits a pending answer unconfirmed just before the answer time runs out. */
+  pendingTimer?: NodeJS.Timeout;
   /** Authors who wrote in the game channel – used for automatic name linking. */
   seen: Map<string, { username: string; displayName: string }>;
   hinted: Set<string>;
+  /** The last ambiguous pick ("Sport" → "Wie viele Punkte?"), so the reply ("300") completes it. */
+  pickContext: string | null;
   /** LLM reasons are held back until the reveal – they often contain the solution. */
   reasons: string[];
   lobbyStatusSig: string;
@@ -270,8 +276,8 @@ export class QuizBot {
     const g: ActiveGame = {
       guildId: msg.guildId!, channelId: msg.channelId, leaderId: msg.author.id, board, session, lobby: null, phase: 'creating',
       lobbyPlayers: [], canStart: false, startRequested: false, players: [], turn: null, lastTurnSig: '', questionOpen: false,
-      awaiting: null, seen: new Map([[msg.author.id, { username: msg.author.username, displayName: msg.author.displayName }]]),
-      hinted: new Set(), reasons: [], lobbyStatusSig: '', offs: [],
+      awaiting: null, pending: null, seen: new Map([[msg.author.id, { username: msg.author.username, displayName: msg.author.displayName }]]),
+      hinted: new Set(), pickContext: null, reasons: [], lobbyStatusSig: '', offs: [],
     };
     this.game = g;
     this.attach(g);
@@ -458,11 +464,8 @@ export class QuizBot {
     }
 
     if (game.awaiting && game.awaiting.player === name) {
-      const answer = msg.viaVoice ? cleanSpokenAnswer(trimmed) : trimmed;
-      if (!answer) return; // "ähm, Moment …" – keep listening
-      game.session.bus.emit('player:answer', { player: name, answer: answer.slice(0, 200), spoken: !!msg.viaVoice });
-      game.awaiting = null;
-      if (msg.viaVoice) this.voice?.bridge.markVoiceAnswer();
+      if (msg.viaVoice) return this.onSpokenAnswer(game, name, trimmed);
+      this.submitAnswer(game, name, trimmed, false);
       await this.d.gateway.react(msg, '📝');
       return;
     }
@@ -474,8 +477,53 @@ export class QuizBot {
     }
   }
 
+  /**
+   * Spoken answers: only "Meine Antwort ist …" counts – everything else the answerer says
+   * is thinking aloud. The bot repeats the answer once ("Paris?"); "Ja" submits it,
+   * "Nein" discards it, a new "Meine Antwort ist …" replaces it.
+   */
+  private onSpokenAnswer(game: ActiveGame, name: string, text: string): void {
+    const said = extractAnswer(text);
+    if (said !== null) {
+      const answer = cleanSpokenAnswer(said);
+      if (!answer) return; // "Meine Antwort ist … ähm" – keep listening
+      this.transcript(name, text);
+      game.pending = { player: name, answer: answer.slice(0, 200) };
+      void this.speak(`${answer}?`, 'confirm');
+      return;
+    }
+    const reply = game.pending?.player === name ? confirmReply(text) : null;
+    if (reply) {
+      this.transcript(name, text);
+      if (reply === 'yes') return this.submitAnswer(game, name, game.pending!.answer, true);
+      game.pending = null;
+      return void this.speak('Okay. Deine Antwort?', 'confirm');
+    }
+    // Thinking aloud. Remind once per game, in case someone forgets the keyword.
+    const hint = `answer-keyword:${name}`;
+    if (!game.pending && !game.hinted.has(hint) && text.split(/\s+/).length <= 5 && !text.trim().endsWith('?')) {
+      game.hinted.add(hint);
+      void this.speak('Sag: Meine Antwort ist, und dann deine Antwort.', 'confirm');
+    }
+  }
+
+  private submitAnswer(game: ActiveGame, name: string, answer: string, spoken: boolean): void {
+    clearTimeout(game.pendingTimer);
+    game.pending = null;
+    game.session.bus.emit('player:answer', { player: name, answer: answer.slice(0, 200), spoken });
+    game.awaiting = null;
+  }
+
+  private transcript(name: string, text: string): void {
+    const v = this.voice;
+    if (!v) return;
+    log.info(`🎙 ${name}: „${text}“`);
+    this.queue(v.textChannelId, `-# 🎙️ ${name}: „${text}“`);
+  }
+
   private async handlePick(msg: ChatMessage, game: ActiveGame, text: string, player: string, verbose: boolean): Promise<void> {
-    const res = parsePick(text, game.turn!.grid);
+    const { res, context } = parsePickWithContext(text, game.turn!.grid, game.pickContext);
+    game.pickContext = context;
     switch (res.kind) {
       case 'ok':
         game.session.bus.emit('player:pick', { player, col: res.cell.col, row: res.cell.row });
@@ -547,9 +595,11 @@ export class QuizBot {
       g.turn = t;
       g.questionOpen = false;
       g.awaiting = null;
+      this.dropPending(g);
       const sig = `${t.player}|${t.board.active}|${t.open.length}`;
       if (sig === g.lastTurnSig) return; // re-emitted after a reminder – no need to repost the board
       g.lastTurnSig = sig;
+      g.pickContext = null;
       this.queue(ch, this.turnText(g, t));
     });
     on('host:question', (q) => {
@@ -560,10 +610,17 @@ export class QuizBot {
     });
     on('host:await-answer', (a) => {
       g.awaiting = a;
-      this.queue(ch, `✍️ ${this.who(g, a.player)}, deine Antwort? Schreib sie einfach hier rein (${a.timeoutSec} s).`);
+      this.dropPending(g);
+      // Time is nearly up and an answer is still waiting for "Ja" → take it as said.
+      g.pendingTimer = setTimeout(() => {
+        if (g.awaiting === a && g.pending?.player === a.player) this.submitAnswer(g, a.player, g.pending.answer, true);
+      }, Math.max(0, a.timeoutSec * 1000 - 1500));
+      const how = this.voice ? 'Schreib sie hier rein oder sag „Meine Antwort ist …“' : 'Schreib sie einfach hier rein';
+      this.queue(ch, `✍️ ${this.who(g, a.player)}, deine Antwort? ${how} (${a.timeoutSec} s).`);
     });
     on('host:verdict', (v) => {
       g.awaiting = null;
+      this.dropPending(g);
       const delta = v.delta ? ` **${v.delta > 0 ? '+' : '−'}${Math.abs(v.delta)}**` : '';
       this.queue(ch, `${v.correct ? '✅' : '❌'} **${v.player}**: „${v.answer}“ ist ${v.correct ? 'richtig' : 'falsch'}${delta}`);
       if (v.reason && !v.correct && v.answer && !v.answer.startsWith('(')) g.reasons.push(`${v.player}: ${v.reason}`);
@@ -651,6 +708,11 @@ export class QuizBot {
 
   private knownNames(g: ActiveGame): string[] {
     return (g.phase === 'lobby' || !g.players.length ? g.lobbyPlayers : g.players).map((p) => p.name);
+  }
+
+  private dropPending(g: ActiveGame): void {
+    clearTimeout(g.pendingTimer);
+    g.pending = null;
   }
 
   private nameFor(g: ActiveGame, userId: string): string | null {
@@ -834,6 +896,7 @@ export class QuizBot {
         cfg: vc,
         prompt: () => this.voicePrompt(),
         onSpeech: (speaker, text) => this.onSpeech(speaker, text),
+        attention: (speaker) => this.attention(speaker.id),
         onClose: () => {
           if (this.voice?.host === host) {
             clearTimeout(this.voice.idleTimer);
@@ -883,11 +946,31 @@ export class QuizBot {
   /** Vocabulary hints for the recogniser – categories, names, board titles. Never solutions. */
   private voicePrompt(): string {
     const g = this.game;
-    const words = ['Quizmaster', 'Buzzer'];
+    const words = ['Quizmaster', 'Meine Antwort ist', 'Hier'];
     if (g?.turn) words.push(...g.turn.categories);
     if (g) words.push(...this.knownNames(g));
     if (!g && this.menu) words.push(...this.menu.options.slice(0, 6));
     return words.join(', ').slice(0, 400);
+  }
+
+  /**
+   * Who the bot listens to right now. Only the person whose turn it is (and, while the
+   * buzzer is open, everyone who may still buzz) is transcribed in full; for everyone
+   * else only "Quizmaster, …" at the start of an utterance gets through.
+   */
+  private attention(userId: string): Attention {
+    const g = this.game;
+    if (!g) return this.menu?.askedBy === userId ? 'full' : 'wake';
+    if (g.phase !== 'running') return 'wake';
+    const name = this.nameFor(g, userId);
+    const expected = (n: string) => (g.awaiting ? g.awaiting.player === n : !!g.turn && !g.questionOpen && g.turn.player === n);
+    if (!name) {
+      // Unlinked: listen only if the expected speaker is unlinked too – it might be them (→ hint).
+      const now = g.awaiting?.player ?? (g.turn && !g.questionOpen ? g.turn.player : null);
+      return now && !this.userFor(g, now) ? 'full' : 'wake';
+    }
+    if (this.voice?.bridge.buzzerOpen) return 'full';
+    return expected(name) ? 'full' : 'wake';
   }
 
   private async onSpeech(speaker: Speaker, text: string): Promise<void> {
@@ -943,7 +1026,8 @@ export class QuizBot {
         if (!name && g.phase === 'running') return this.onMessage(msg); // unlinked → hint once
         return;
       }
-      transcript();
+      // Answers post their own transcript (only keyword answers and "Ja/Nein"); picks only when they are picks.
+      if (!g.awaiting && g.turn && parsePick(spokenToDigits(text), g.turn.grid).kind !== 'none') transcript();
       return this.onMessage(msg);
     }
     if (this.menu?.askedBy === speaker.id) {

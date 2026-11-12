@@ -115,3 +115,17 @@ export function formatBoard(grid: BoardCell[]): string {
     })
     .join('\n');
 }
+
+/**
+ * Picks across two messages: after "Sport" → "Wie viele Punkte?", the reply "300" is read
+ * as "Sport 300" (and "300" → "Welche Kategorie?" → "Sport" likewise). `context` is the last
+ * ambiguous pick; the returned `context` is what to remember for the next message.
+ */
+export function parsePickWithContext(text: string, grid: BoardCell[], context: string | null): { res: PickResult; context: string | null } {
+  let res = parsePick(text, grid);
+  if ((res.kind === 'ambiguous' || res.kind === 'none') && context) {
+    const combined = parsePick(`${context} ${text}`, grid);
+    if (combined.kind === 'ok' || combined.kind === 'taken') res = combined;
+  }
+  return { res, context: res.kind === 'ambiguous' ? text : res.kind === 'none' ? context : null };
+}

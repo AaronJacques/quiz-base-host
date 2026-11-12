@@ -10,6 +10,12 @@ export function durationMs(p: Pcm): number {
   return (p.samples.length / p.channels / p.rate) * 1000;
 }
 
+/** The first `ms` milliseconds (the whole clip if it is shorter). */
+export function head(p: Pcm, ms: number): Pcm {
+  const n = Math.round((ms / 1000) * p.rate) * p.channels;
+  return n >= p.samples.length ? p : { ...p, samples: p.samples.subarray(0, n) };
+}
+
 export function toMono(p: Pcm): Pcm {
   if (p.channels === 1) return p;
   const n = Math.floor(p.samples.length / p.channels);

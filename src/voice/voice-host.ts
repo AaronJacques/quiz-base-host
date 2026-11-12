@@ -1,6 +1,7 @@
 import type { Config } from '../config.ts';
 import { createLogger } from '../core/logger.ts';
-import { durationMs, rms, type Pcm } from './audio.ts';
+import { durationMs, head, rms, type Pcm } from './audio.ts';
+import { stripWakeWord } from './commands.ts';
 import type { SpeechToText } from './stt.ts';
 import type { Speaker, Utterance, VoiceTransport } from './transport.ts';
 import type { TextToSpeech } from './tts.ts';
@@ -15,8 +16,19 @@ export interface VoiceHostDeps {
   /** Vocabulary hints for the recogniser (categories, player names). Must never contain solutions. */
   prompt: () => string;
   onSpeech: (speaker: Speaker, text: string) => void | Promise<void>;
+  /**
+   * How closely to listen to someone right now. 'full': everything is transcribed (the
+   * person whose turn it is). 'wake': only the start of an utterance is checked for the
+   * wake word – side talk of everyone else is never transcribed as a whole. Default 'full'.
+   */
+  attention?: (speaker: Speaker) => Attention;
   onClose?: () => void;
 }
+
+export type Attention = 'full' | 'wake';
+
+/** How much of an utterance is checked for "Quizmaster" when someone is not on turn. */
+const WAKE_HEAD_MS = 2000;
 
 interface QueueItem {
   text: string;
@@ -139,7 +151,15 @@ export class VoiceHost {
     const who = u.speaker.displayName;
     if (ms < this.d.cfg.minSpeechMs || loud < this.d.cfg.minRms) return log.debug(`verworfen (${who}, ${Math.round(ms)} ms, rms ${Math.round(loud)})`);
     if (this.overlapsBotSpeech(u)) return log.info(`🙉 ${who} sprach, während ich sprach – ignoriert`);
-    const text = await this.d.stt.transcribe(u.pcm, this.d.prompt());
+    let text: string;
+    if ((this.d.attention?.(u.speaker) ?? 'full') === 'wake') {
+      const start = head(u.pcm, WAKE_HEAD_MS);
+      const heard = await this.d.stt.transcribe(start, this.d.cfg.wakeWords.join(', '));
+      if (stripWakeWord(heard, this.d.cfg.wakeWords) === null) return log.debug(`🔇 ${who} ist nicht dran – kein Rufname, verworfen`);
+      text = start === u.pcm ? heard : await this.d.stt.transcribe(u.pcm, this.d.prompt());
+    } else {
+      text = await this.d.stt.transcribe(u.pcm, this.d.prompt());
+    }
     if (!text) return log.debug(`nichts erkannt (${who})`);
     log.debug(`🎙 ${who}: „${text}“`); // side talk stays out of the normal log
     await this.d.onSpeech(u.speaker, text);

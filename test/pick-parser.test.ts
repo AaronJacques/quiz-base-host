@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BoardCell } from '../src/core/types.ts';
-import { formatBoard, parsePick } from '../src/discord/pick-parser.ts';
+import { formatBoard, parsePick, parsePickWithContext } from '../src/discord/pick-parser.ts';
 
 const cats = ['Nintendo', 'Playstation', 'Serien/Filme', 'PC'];
 const grid: BoardCell[] = cats.flatMap((category, col) =>
@@ -69,5 +69,24 @@ describe('parsePick – speech mix-ups', () => {
     const r = parsePick('Flecken für 200', grid);
     expect(r.kind).toBe('ok');
     if (r.kind === 'ok') expect(r.cell.category).toBe('Flaggen');
+  });
+});
+
+describe('parsePickWithContext', () => {
+  it('completes a pick across the follow-up question', () => {
+    const a = parsePickWithContext('Playstation', grid, null);
+    expect(a.res.kind).toBe('ambiguous'); // "Wie viele Punkte in Playstation?"
+    const b = parsePickWithContext('300', grid, a.context);
+    expect(b.res.kind === 'ok' && `${b.res.cell.category} ${b.res.cell.points}`).toBe('Playstation 300');
+    expect(b.context).toBeNull();
+
+    const c = parsePickWithContext('100', grid, null); // "Welche Kategorie?"
+    const d = parsePickWithContext('PC', grid, c.context);
+    expect(d.res.kind === 'ok' && `${d.res.cell.category} ${d.res.cell.points}`).toBe('PC 100');
+  });
+
+  it('does not let an old context override a complete pick', () => {
+    const r = parsePickWithContext('Nintendo 300', grid, 'Playstation');
+    expect(r.res.kind === 'ok' && r.res.cell.category).toBe('Nintendo');
   });
 });

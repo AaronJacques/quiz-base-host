@@ -11,6 +11,9 @@ const LETTERS = 'ABCDEFGH';
 /** The TTS voice says "Buzzer" the German way ("Butzer") – so the spoken call avoids the word. */
 export const BUZZER_OPEN_LINE = 'Jetzt die anderen! Wer es weiß, ruft: Hier!';
 
+/** Said once at the start – spoken answers need the keyword and are confirmed. */
+export const ANSWER_HOW_LINE = 'Antwortet immer mit: Meine Antwort ist, und dann eure Antwort. Ich wiederhole sie kurz, ihr bestätigt mit Ja.';
+
 export function categoriesLine(categories: string[]): string {
   if (!categories.length) return '';
   return `Die Kategorien sind: ${joinList(categories)}.`;
@@ -101,11 +104,12 @@ export function gameOverLine(players: PlayerState[]): string {
   if (!first) return 'Das Spiel ist vorbei.';
   if (second && second.score === first.score) return `Das Spiel ist vorbei! Unentschieden zwischen ${sorted.filter((p) => p.score === first.score).map((p) => p.name).join(' und ')} mit ${first.score} Punkten.`;
   const rest = sorted.slice(1).map((p) => `${p.name} ${p.score}`).join(', ');
-  return `Das Spiel ist vorbei! Gewonnen hat ${first.name} mit ${first.score} Punkten.${rest ? ` Dahinter: ${rest}.` : ''} Danke fürs Mitspielen!`;
+  const lead = first.score > 0 ? `Gewonnen hat ${first.name} mit ${first.score} Punkten.` : `Vorne liegt ${first.name} mit ${first.score === 0 ? 'null' : first.score} Punkten.`;
+  return `Das Spiel ist vorbei! ${lead}${rest ? ` Dahinter: ${rest}.` : ''} Danke fürs Mitspielen!`;
 }
 
 export const VOICE_HELP =
-  'Sag einfach die Karte, zum Beispiel: Sport für 200. Wenn ich dich frage, sag deine Antwort. Wenn die anderen dürfen, ruf Hier. ' +
+  'Sag einfach die Karte, zum Beispiel: Sport für 200. Antworten immer mit: Meine Antwort ist, und dann die Antwort. Ich frage einmal nach, bestätige mit Ja. Wenn die anderen dürfen, ruf Hier. ' +
   'Mit Quizmaster davor gehen auch Befehle: Quizmaster Stand, Quizmaster was ist frei, Quizmaster wiederholen, ' +
   'Quizmaster neues Quiz und der Name, Quizmaster ich bin und dein Name.';
 
