@@ -1,0 +1,9 @@
+node_modules
+.qbhost
+.env
+.env.*
+qbhost.config.json
+scratch
+.git
+*.log
+coverage

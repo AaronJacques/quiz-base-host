@@ -1,0 +1,9 @@
+{
+  "browser": { "driver": "playwright", "headless": true },
+  "llm": { "provider": "anthropic", "model": "haiku" },
+  "discord": {
+    "channelIds": ["<Channel-ID>"],
+    "prefix": "!quiz"
+  },
+  "voice": { "enabled": true, "whisperModel": "models/ggml-small-q5_1.bin" }
+}

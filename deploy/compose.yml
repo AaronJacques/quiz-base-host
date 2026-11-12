@@ -1,0 +1,33 @@
+# Quizmaster on the VPS. Started by deploy/remote-deploy.sh; by hand:
+#   QBHOST_HOME=/opt/quizmaster QBHOST_UID=$(id -u) QBHOST_GID=$(id -g) docker compose -f /opt/quizmaster/app/deploy/compose.yml up -d
+# Layout on the server (QBHOST_HOME, default /opt/quizmaster):
+#   .env                 secrets (DISCORD_TOKEN, ANTHROPIC_API_KEY) – created once by hand, mode 600
+#   qbhost.config.json   server config (headless browser, channels, …) – created once by hand
+#   data/                runtime data (.qbhost in the container), survives deploys
+#   app/                 current release (written by the CI), app.prev = previous one
+name: quizmaster
+services:
+  bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: quizmaster:latest
+    restart: unless-stopped
+    init: false # tini is the entrypoint
+    user: "${QBHOST_UID:-1000}:${QBHOST_GID:-1000}"
+    env_file: ${QBHOST_HOME:-/opt/quizmaster}/.env
+    volumes:
+      - ${QBHOST_HOME:-/opt/quizmaster}/data:/app/.qbhost
+      - ${QBHOST_HOME:-/opt/quizmaster}/qbhost.config.json:/app/qbhost.config.json:ro
+    # Least privilege: no Linux capabilities, no privilege escalation, bounded processes.
+    # (Playwright starts Chromium without its own sandbox, which needs none of these.)
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 512
+    # Chromium needs more than Docker's default 64 MB /dev/shm.
+    shm_size: 1gb
+    # Time to end a running game on quiz-base cleanly (SIGTERM → bot.shutdown()).
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "5" }

@@ -1,0 +1,57 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Typecheck & Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+
+  deploy:
+    name: Deploy auf den VPS
+    needs: test
+    # Only main, and only once the server is set up (repo variable DEPLOY_ENABLED=true).
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    timeout-minutes: 30
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER || 'deploy' }}
+      QBHOST_HOME: /opt/quizmaster
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH einrichten
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Release übertragen
+        run: |
+          git archive --format=tar HEAD \
+            | ssh "$VPS_USER@$VPS_HOST" "rm -rf $QBHOST_HOME/app.new && mkdir -p $QBHOST_HOME/app.new && tar -x -C $QBHOST_HOME/app.new"
+      - name: Bauen, umschalten, prüfen
+        run: ssh "$VPS_USER@$VPS_HOST" "QBHOST_HOME=$QBHOST_HOME bash $QBHOST_HOME/app.new/deploy/remote-deploy.sh"
