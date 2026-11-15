@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { createLogger, sleep } from '../core/logger.ts';
 import { decodeWav, durationMs, encodeWav, type Pcm } from './audio.ts';
-import type { Speaker, Utterance, VoiceTransport } from './transport.ts';
+import type { PlayOptions, Speaker, Utterance, VoiceTransport } from './transport.ts';
 
 const log = createLogger('loopback');
 
@@ -16,6 +16,7 @@ const log = createLogger('loopback');
  */
 export class LoopbackTransport implements VoiceTransport {
   readonly label = 'loopback';
+  readonly reportsStart = true;
   private server: http.Server;
   private handlers: ((u: Utterance) => void)[] = [];
   private closeHandlers: (() => void)[] = [];
@@ -80,9 +81,10 @@ export class LoopbackTransport implements VoiceTransport {
     return this.played.at(-1)?.seq ?? this.firstSeq;
   }
 
-  async play(pcm: Pcm): Promise<void> {
+  async play(pcm: Pcm, opts: PlayOptions = {}): Promise<void> {
     const seq = this.lastSeq + 1;
     this.played.push({ seq, pcm, at: Date.now() });
+    opts.onStart?.();
     if (this.played.length > 500) this.played.shift();
     this.waiters.splice(0).forEach((w) => w());
     await new Promise<void>((resolve) => {

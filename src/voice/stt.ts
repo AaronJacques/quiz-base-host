@@ -12,6 +12,8 @@ export interface SpeechToText {
   /** `prompt` = vocabulary hints (categories, names). Never put the solution in there. */
   transcribe(pcm: Pcm, prompt?: string): Promise<string>;
   close(): Promise<void>;
+  /** Engine and model for `⏱` lines, e.g. `whisper:large-v3-turbo-q5_0`. */
+  readonly engine?: string;
 }
 
 /**
@@ -53,10 +55,12 @@ export class WhisperServerStt implements SpeechToText {
   private readonly url: string;
   private readonly model: string;
   readonly port: number;
+  readonly engine: string;
 
   constructor(private cfg: Config['voice'], opts: { model?: string; port?: number } = {}) {
     this.model = opts.model ?? cfg.whisperModel;
     this.port = opts.port ?? cfg.whisperPort;
+    this.engine = `whisper:${path.basename(this.model, '.bin').replace(/^ggml-/, '')}`;
     this.url = `http://127.0.0.1:${this.port}`;
   }
 

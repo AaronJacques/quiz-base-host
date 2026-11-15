@@ -1,0 +1,17 @@
+[36m20:01:02 [voice][0m Im Voice-Channel 123
+[36m20:01:05 [voice][0m ⏱ ansage engine=piper:de_DE-thorsten-high zeichen=58 tts=520ms cache=nein warte=0ms
+[36m20:01:05 [voice][0m 🔊 Willkommen zum Tafelquiz.
+[36m20:01:09 [voice][0m ⏱ erkennung engine=whisper:base-q5_1 attention=full audio=1200ms stt=150ms rueckfall=nein
+[36m20:01:09 [voice][0m ⏱ ansage engine=piper:de_DE-thorsten-high zeichen=22 tts=290ms cache=nein warte=0ms
+[36m20:01:09 [voice][0m ⏱ reaktion gesamt=1500ms pause=900ms stt=150ms logik=40ms tts=290ms start=120ms
+[36m20:01:20 [voice][0m ⏱ erkennung engine=whisper:large-v3-turbo-q5_0 attention=answer audio=2300ms stt=412ms rueckfall=nein
+[36m20:01:21 [voice][0m ⏱ ansage engine=piper:de_DE-thorsten-high zeichen=42 tts=310ms cache=nein warte=0ms
+[36m20:01:21 [voice][0m ⏱ reaktion gesamt=1840ms pause=900 stt=412 logik=35 tts=310 start=183
+[36m20:01:30 [voice][0m ⏱ erkennung engine=whisper:large-v3-turbo-q5_0 attention=answer audio=4100ms stt=900ms rueckfall=ja
+[36m20:01:31 [voice][0m ⏱ erkennung engine=whisper:base-q5_1 attention=confirm audio=600ms stt=180ms rueckfall=nein
+[36m20:01:31 [voice][0m ⏱ ansage engine=piper:de_DE-thorsten-high zeichen=12 tts=250ms cache=ja warte=0ms
+[36m20:01:32 [voice][0m ⏱ reaktion gesamt=2600ms pause=900ms stt=1080ms logik=60ms tts=250ms start=310ms
+[36m20:01:40 [voice][0m ⏱ erkennung engine=whisper:large-v3-turbo-q5_0 attention=answer audio=1900ms stt=380ms rueckfall=nein
+[36m20:01:41 [voice][0m ⏱ ansage engine=piper:de_DE-thorsten-high zeichen=30 tts=330ms cache=nein warte=410ms
+[33m20:01:45 [voice][0m Erkennung: whisper-server 500: boom
+[36m20:02:00 [voice][0m ⏱ bilanz n=5 stt_p50=380ms stt_p90=900ms tts_p50=310ms tts_p90=520ms reaktion_p50=1840ms reaktion_p90=2600ms verworfen=3 rueckfaelle=1

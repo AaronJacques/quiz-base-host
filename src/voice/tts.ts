@@ -16,6 +16,10 @@ const run = promisify(execFile);
 export interface TextToSpeech {
   synth(text: string): Promise<Pcm>;
   close(): Promise<void>;
+  /** Engine and voice for `⏱` lines, e.g. `piper:de_DE-thorsten-high`. */
+  readonly engine?: string;
+  /** Would `synth(text)` be served from a cache (no new synthesis)? For `⏱ ansage cache=ja`. */
+  cached?(text: string): boolean;
 }
 
 export function createTts(cfg: Config['voice']): TextToSpeech {
@@ -23,9 +27,15 @@ export function createTts(cfg: Config['voice']): TextToSpeech {
 }
 
 /** Fixed phrases ("Buzzer frei!", "deine Antwort?") repeat all game – synthesise them once. */
-class CachedTts implements TextToSpeech {
+export class CachedTts implements TextToSpeech {
   private cache = new Map<string, Promise<Pcm>>();
   constructor(private inner: TextToSpeech) {}
+  get engine(): string | undefined {
+    return this.inner.engine;
+  }
+  cached(text: string): boolean {
+    return this.cache.has(text);
+  }
   synth(text: string): Promise<Pcm> {
     const hit = this.cache.get(text);
     if (hit) return hit;
@@ -46,8 +56,11 @@ export class PiperTts implements TextToSpeech {
   private ready: Promise<void> | null = null;
   private pending = new Map<number, { resolve: (p: Pcm) => void; reject: (e: Error) => void }>();
   private nextId = 1;
+  readonly engine: string;
 
-  constructor(private cfg: Config['voice']) {}
+  constructor(private cfg: Config['voice']) {
+    this.engine = `piper:${path.basename(cfg.piperVoice, '.onnx')}`;
+  }
 
   private get python(): string {
     return path.resolve(this.cfg.dir, 'venv/bin/python');
@@ -118,7 +131,10 @@ export class PiperTts implements TextToSpeech {
 export class SayTts implements TextToSpeech {
   private dir = mkdtempSync(path.join(os.tmpdir(), 'qbhost-say-'));
   private n = 0;
-  constructor(private voice: string) {}
+  readonly engine: string;
+  constructor(private voice: string) {
+    this.engine = `say:${voice}`;
+  }
   async synth(text: string): Promise<Pcm> {
     const file = path.join(this.dir, `${++this.n}.wav`);
     await run('say', ['-v', this.voice, '-o', file, '--file-format=WAVE', '--data-format=LEI16@22050', text]);

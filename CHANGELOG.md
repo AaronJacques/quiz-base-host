@@ -27,6 +27,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung:
 - `qbhost login`: einmal selbst im sichtbaren Browser bei quiz-base anmelden; das Profil (`browser.profileDir`) bleibt gespeichert.
 - Öffentliches Repo: Lizenz (MIT), Installationsanleitung ([docs/INSTALL.md](docs/INSTALL.md)), Konfigurationsreferenz ([docs/CONFIG.md](docs/CONFIG.md)), Beitragsrichtlinien, Sicherheitsmeldungen, Issue- und PR-Vorlagen, Dependabot.
 - Deployment für einen Server per Docker-Image: [docs/DEPLOY.md](docs/DEPLOY.md). Dort nutzt der Judge die Anthropic-API (`llm.provider: "anthropic"`), die Claude CLI ist im Image nicht enthalten.
+- **Latenz messen:** Der Voice-Bot loggt für jede erkannte Äußerung, jede Ansage und die Reaktionszeit (Ende der Äußerung bis zum ersten Ton der Antwort) `⏱`-Zeilen auf `info`, dazu eine Bilanz mit p50/p90 bei Spielende und beim Verlassen des Voice-Channels. Die Zeilen enthalten nur Engines, Zähler und Millisekunden, keine Texte; Äußerungen, die der Bot nicht verwendet (Nebengespräche), bekommen keine Zeile. `npx tsx tools/voice-latency.ts < log` wertet sie je Schritt und Engine aus. Abschalten mit `voice.latencyLog: false`, siehe [docs/VOICE.md](docs/VOICE.md#latenz-messen).
 
 ## [0.3.0] – 2026-11-12
 

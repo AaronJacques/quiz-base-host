@@ -122,6 +122,7 @@ Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel des Spiel
 | `wakeWords` | `quizmaster`, … | Rufnamen |
 | `scoresEvery` | `3` | Zwischenstand nach jeder n-ten Frage |
 | `extraTimeSec` | `10` | zusätzliche Antwort-/Buzzerzeit, solange der Bot spricht (setzt `game.bonusTimeSec`) |
+| `latencyLog` | `true` | `⏱`-Zeilen zur Latenz auf `info`, siehe [Latenz messen](#latenz-messen) |
 
 ## Zwei Modelle für langsame Rechner
 
@@ -136,6 +137,50 @@ Während der Rückfrage („Tatooine?“) hört zuerst das schnelle Modell, dami
 ```
 
 `npx qbhost voice-setup` lädt beide Modelle, `npm run doctor` prüft beide.
+
+## Latenz messen
+
+Mit `voice.latencyLog` (Standard `true`) schreibt der Bot `⏱`-Zeilen auf die Log-Ebene `info`. Sie enthalten nur Schlüssel=Wert-Paare mit Engine, Zählern und Millisekunden, nie erkannten oder gesprochenen Text, Namen oder Lösungen. So lassen sich Mac, VPS, lokale und Cloud-Engines mit demselben Log vergleichen. Gemessen wird nur über Zeitstempel, der Sprachpfad wartet auf nichts davon. Mit `latencyLog: false` entsteht keine einzige `⏱`-Zeile.
+
+```
+⏱ erkennung engine=whisper:large-v3-turbo-q5_0 attention=answer audio=2300ms stt=412ms rueckfall=nein
+⏱ ansage engine=piper:de_DE-thorsten-high zeichen=42 tts=310ms cache=nein warte=0ms
+⏱ reaktion gesamt=1840ms pause=900ms stt=412ms logik=35ms tts=310ms start=183ms
+⏱ bilanz n=12 stt_p50=… stt_p90=… tts_p50=… tts_p90=… reaktion_p50=… reaktion_p90=… verworfen=7 rueckfaelle=0
+```
+
+**`erkennung`** – eine Zeile je Äußerung, die der Bot verwendet, also genau die, deren Transkript er in den Chat schreibt: Sprachbefehl, Buzzer, Kartenwahl, Menüauswahl, Antwort mit Schlüsselwort, „Ja“/„Nein“ in der Rückfrage. Alles andere bekommt keine Zeile und zählt nur in `verworfen` der Bilanz (Regel 8: Nebengespräche nicht auf `info`): eine Prüfung auf den Rufnamen ohne „Quizmaster“, Nebengespräch und lautes Nachdenken, nichts erkannt, Echo. Die Zeile entsteht in dem Moment, in dem der Bot die Äußerung verwendet; ihre Zeiten sind dann schon gemessen, eine lange oder fehlschlagende Bewertung verschiebt sie nicht.
+- `engine`: Spracherkennung und Modell. Liefen zwei Durchgänge mit verschiedenen Modellen (Rückfrage mit neuer Antwort, schnelles Modell fiel aus), stehen beide mit `+` verbunden.
+- `attention`: wie genau der Bot zuhörte (`answer`, `confirm`, `full`, `wake`).
+- `audio`: Länge der Aufnahme.
+- `stt`: Zeit vom Eingang der fertigen Äußerung bis zum erkannten Text, alle Durchgänge zusammen.
+- `rueckfall`: ob eine andere Engine übernehmen musste. Heute immer `nein`, die Provider-Schicht (Cloud → lokal) füllt das Feld. Auch der Ausfall des schnellen Modells, bei dem das Hauptmodell übernimmt, zählt noch nicht als Rückfall (dann steht nur `engine=schnell+haupt`).
+
+**`ansage`** – eine Zeile je Satz, sobald er hörbar startet. Ein Satz, der nie abgespielt wird (Wiedergabe scheitert, Discord startet nicht), bekommt keine Zeile.
+- `engine`: Sprachausgabe und Stimme.
+- `zeichen`: Länge des gesprochenen Satzes in Zeichen.
+- `tts`: reine Synthesedauer, vom tatsächlichen Start der Synthese bis zum fertigen Audio. Wartet ein Satz hinter einer noch laufenden Synthese (Piper arbeitet einen Satz nach dem anderen ab), beginnt die Messung erst, wenn diese fertig ist.
+- `cache`: ob das Audio aus dem Satz-Cache kam (`CachedTts`, wiederkehrende Sätze wie „Buzzer frei!“). Dann ist `tts` die Wartezeit auf das schon vorhandene Audio, zählt nicht in `tts_p50/p90` der Bilanz und hält den nächsten Satz nicht auf.
+- `warte`: Zeit, die der Satz ohne eigene Synthese verbrachte, also das Warten auf eine laufende Synthese davor plus das Warten, bis der vorige Satz zu Ende gesprochen war.
+
+**`reaktion`** – Zeit vom Ende einer Äußerung bis zum ersten Ton der Antwort. Gezählt wird der erste Satz, der in die Schlange kommt, nachdem der Bot eine Äußerung verwendet hat (siehe `erkennung`); auf Nebengespräche und lautes Nachdenken folgt also nie eine Reaktion. Kommt der Satz später als 15 s nach dem Ende der Spiellogik, gibt es keine Zeile. Eine neuere verwendete Äußerung ersetzt eine ältere, die noch auf ihre Antwort wartet; ein Nebengespräch dazwischen ändert nichts. Bei der Kartenwahl ist die Reaktion die vorgelesene Frage. Wird der Antwortsatz vor dem Abspielen ersetzt, verworfen oder scheitert seine Synthese, gibt es keine Reaktionszeile. Die Teile ergeben zusammen `gesamt`.
+- `gesamt`: Ende des Sprechens bis zum Wiedergabestart der Antwort.
+- `pause`: Ende des Sprechens bis zum Eingang beim Bot, also vor allem die Stille, an der das Ende erkannt wird (`silenceMs`).
+- `stt`: Eingang bis erkannter Text, wie in `erkennung`.
+- `logik`: erkannter Text bis zum Einreihen der Antwort, also Spiellogik und Bewertung (auch ein LLM-Aufruf).
+- `tts`: reine Synthesedauer der Antwort, wie in `ansage`.
+- `start`: alles zwischen Einreihen und Ton außer der Synthese: Warten auf eine laufende Synthese, auf den vorigen Satz und bis der Transport wirklich abspielt.
+
+**`bilanz`** – am Ende jedes Spiels (auch bei `!quiz ende` und wenn das Spiel abbricht) und beim Verlassen des Voice-Channels, danach beginnt die Zählung neu. `n` ist die Zahl der `erkennung`-Zeilen. `stt_p50/p90` zählen alle vollständig erkannten Äußerungen, auch die verworfenen (ohne die kurze Prüfung auf den Rufnamen), denn die Erkennung kostet dieselbe Zeit. Dazu kommen p50/p90 von `tts` (ohne Cache-Treffer) und `reaktion.gesamt`, `verworfen` und `rueckfaelle`. Hat seit der letzten Bilanz niemand gesprochen, gibt es keine; Spielende und Verlassen direkt nacheinander ergeben also nur eine.
+
+**Auswerten:** `tools/voice-latency.ts` liest ein Log von stdin und gibt p50/p90 je Schritt und Engine aus. Es nimmt nur Zeilen im Format des Loggers (`12:00:00 [voice] ⏱ …`, auch hinter dem Präfix von `docker compose logs`) und verträgt ANSI-Farben und CRLF.
+
+```sh
+npx tsx tools/voice-latency.ts < .qbhost/voice-e2e.log
+ssh quizmaster-vps 'docker compose -f /opt/quizmaster/app/deploy/compose.yml logs --no-color bot' | npx tsx tools/voice-latency.ts
+```
+
+Grenzen: Der Wiedergabestart kommt vom Transport (`play(pcm, { onStart })`). Discord meldet ihn, sobald der Player auf „Playing“ wechselt, Loopback sofort. Ein Transport ohne `onStart` (`reportsStart`) zählt den Aufruf von `play`. Der Start der Synthese wird für Engines geschätzt, die einen Satz nach dem anderen bearbeiten (Piper). Bei `say`, das parallel synthetisiert, kann `tts` deshalb zu kurz sein. Im Loopback-Raum (Harness) ist `pause` fast 0, weil der Client eine fertige WAV schickt und es keine Stillerkennung gibt. In Discord steckt dort `silenceMs`, Loopback-Reaktionen sind also um diese Zeit kürzer.
 
 ## Ohne Discord testen
 

@@ -194,6 +194,11 @@ export const ConfigSchema = z.object({
       extraTimeSec: z.number().int().default(10),
       /** Punktestand nach jeder n-ten Frage ansagen (0 = nie). */
       scoresEvery: z.number().int().default(3),
+      /**
+       * Latenz messen: `⏱`-Zeilen auf `info` für jede erkannte Äußerung, jede Ansage, die Reaktionszeit
+       * und eine Bilanz bei Spielende (ohne Texte). Auswertung: `npx tsx tools/voice-latency.ts < log`.
+       */
+      latencyLog: z.boolean().default(true),
     })
     // A smaller audio window hears only its first n/50 seconds – longer utterances would be cut off unheard.
     .transform((v) => ({ ...v, maxSpeechSec: v.whisperAudioCtx > 0 ? Math.min(v.maxSpeechSec, audioCtxSeconds(v.whisperAudioCtx)) : v.maxSpeechSec }))

@@ -145,6 +145,8 @@ export class QuizBot {
   private outbox = new Map<string, { lines: string[]; timer?: NodeJS.Timeout }>();
   private commands: Record<string, Handler>;
   private voice: VoiceSession | null = null;
+  /** `used` of a spoken message (⏱ measurement), for the answer path that posts its own transcript. */
+  private voiceUsed = new WeakMap<ChatMessage, () => void>();
   private voiceJoining: Promise<void> | null = null;
   private boards: BoardCreateFlow | null;
 
@@ -565,7 +567,7 @@ export class QuizBot {
     }
 
     if (game.awaiting && game.awaiting.player === name) {
-      if (msg.viaVoice) return this.onSpokenAnswer(game, name, trimmed);
+      if (msg.viaVoice) return this.onSpokenAnswer(game, name, trimmed, this.voiceUsed.get(msg));
       this.submitAnswer(game, name, trimmed, false);
       await this.d.gateway.react(msg, '📝');
       return;
@@ -583,11 +585,12 @@ export class QuizBot {
    * is thinking aloud. The bot repeats the answer once ("Paris?"); "Ja" submits it,
    * "Nein" discards it, a new "Meine Antwort ist …" replaces it.
    */
-  private onSpokenAnswer(game: ActiveGame, name: string, text: string): void {
+  private onSpokenAnswer(game: ActiveGame, name: string, text: string, used?: () => void): void {
     const said = extractAnswer(text);
     if (said !== null) {
       const answer = cleanSpokenAnswer(said);
       if (!answer) return; // "Meine Antwort ist … ähm" – keep listening
+      used?.();
       this.transcript(name, text);
       // Time is (nearly) up – no time left for "Ja": the answer counts as said.
       if (Date.now() >= game.answerDeadline - PENDING_SUBMIT_MS) {
@@ -600,6 +603,7 @@ export class QuizBot {
     }
     const reply = game.pending?.player === name ? confirmReply(text) : null;
     if (reply) {
+      used?.();
       this.transcript(name, text);
       if (reply === 'yes') return this.submitAnswer(game, name, game.pending!.answer, true);
       game.pending = null;
@@ -942,7 +946,10 @@ export class QuizBot {
     clearTimeout(g.lobbyTimeout);
     clearTimeout(g.lobbyStatusTimer);
     g.offs.forEach((off) => off());
-    if (this.voice?.guildId === g.guildId) this.voice.bridge.detach();
+    if (this.voice?.guildId === g.guildId) {
+      this.voice.bridge.detach();
+      this.voice.host.latencySummary(); // ⏱ bilanz of this game – also when it broke off
+    }
     this.touchVoice();
     await g.session.close().catch(() => {});
     await this.flush(g.channelId);
@@ -1048,7 +1055,7 @@ export class QuizBot {
         tts: kit.tts,
         cfg: vc,
         prompt: () => this.voicePrompt(),
-        onSpeech: (speaker, text) => this.onSpeech(speaker, text),
+        onSpeech: (speaker, text, used) => this.onSpeech(speaker, text, used),
         attention: (speaker) => this.attention(speaker.id),
         mayInterrupt: (speaker) => this.onTurn(speaker.id),
         onClose: () => {
@@ -1152,7 +1159,7 @@ export class QuizBot {
     return !!name && this.expectedPlayer(g) === name;
   }
 
-  private async onSpeech(speaker: Speaker, text: string): Promise<void> {
+  private async onSpeech(speaker: Speaker, text: string, used: () => void = () => {}): Promise<void> {
     const v = this.voice;
     if (!v) return;
     this.touchVoice();
@@ -1169,8 +1176,10 @@ export class QuizBot {
       voiceChannelId: v.voiceChannelId,
       viaVoice: true,
     };
+    this.voiceUsed.set(msg, used); // spoken answers mark it where they post their transcript
     const g = this.voiceGame();
     const transcript = () => {
+      used(); // ⏱: the bot acts on this utterance
       log.info(`🎙 ${speaker.displayName}: „${text}“`);
       this.queue(msg.channelId, `-# 🎙️ ${speaker.displayName}: „${text}“`);
     };

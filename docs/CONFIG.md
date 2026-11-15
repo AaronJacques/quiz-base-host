@@ -155,6 +155,7 @@ Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennu
 | `wakeWords` | `quizmaster`, `quiz master`, `quizmeister`, `quizhost`, `quiz host` | Rufnamen für Sprachbefehle. |
 | `extraTimeSec` | `10` | Zusätzliche Antwort- und Buzzerzeit, solange der Bot spricht. |
 | `scoresEvery` | `3` | Punktestand nach jeder n-ten Frage ansagen. `0` = nie. |
+| `latencyLog` | `true` | `⏱`-Zeilen mit Messwerten (Erkennung, Ansage, Reaktion, Bilanz) auf `info`, ohne Texte. Siehe [VOICE.md](VOICE.md#latenz-messen). `false` = keine einzige `⏱`-Zeile. |
 
 ## `companion`
 

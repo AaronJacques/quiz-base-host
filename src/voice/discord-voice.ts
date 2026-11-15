@@ -15,7 +15,7 @@ import {
 import { createLogger } from '../core/logger.ts';
 import { durationMs, pcmFromBuffer, pcmToBuffer, resample, toChannels, type Pcm } from './audio.ts';
 import { OpusDecoders, OpusEncoder, opusSelfTest } from './opus.ts';
-import type { Speaker, Utterance, VoiceTransport } from './transport.ts';
+import type { PlayOptions, Speaker, Utterance, VoiceTransport } from './transport.ts';
 
 const log = createLogger('voice');
 
@@ -37,6 +37,7 @@ export interface DiscordVoiceOptions {
  */
 export class DiscordVoiceTransport implements VoiceTransport {
   readonly label: string;
+  readonly reportsStart = true;
   private player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
   private handlers: ((u: Utterance) => void)[] = [];
   private startHandlers: ((s: Speaker) => void)[] = [];
@@ -118,13 +119,14 @@ export class DiscordVoiceTransport implements VoiceTransport {
     opus.once('close', () => safely(finish));
   }
 
-  async play(pcm: Pcm): Promise<void> {
+  async play(pcm: Pcm, opts: PlayOptions = {}): Promise<void> {
     if (this.closed || !pcm.samples.length) return;
     const raw = pcmToBuffer(toChannels(resample(pcm, 48000), 2));
     const resource = createAudioResource(Readable.from(this.encoder.packets(raw)), { inputType: StreamType.Opus });
     this.player.play(resource);
     try {
       await entersState(this.player, AudioPlayerStatus.Playing, 5000);
+      safely(() => opts.onStart?.());
       await entersState(this.player, AudioPlayerStatus.Idle, durationMs(pcm) + 10_000);
     } catch {
       /* stopped or stuck – carry on */

@@ -5,13 +5,15 @@ import { describe, expect, it } from 'vitest';
 import { ConfigSchema, type Config } from '../src/config.ts';
 import { EventBus } from '../src/core/events.ts';
 import { setLogLevel } from '../src/core/logger.ts';
-import { QuizBot, type BotDeps, type SessionLike } from '../src/discord/bot.ts';
+import { QuizBot, type BotDeps, type SessionLike, type VoiceKit } from '../src/discord/bot.ts';
 import type { ChatGateway, ChatMessage } from '../src/discord/gateway.ts';
 import { rankingLines } from '../src/discord/format.ts';
 import { GuildStore } from '../src/discord/store.ts';
 import { createJudge } from '../src/judge/index.ts';
 import { UsageMeter } from '../src/llm/client.ts';
 import { TafelquizController } from '../src/modes/tafelquiz/controller.ts';
+import type { Pcm } from '../src/voice/audio.ts';
+import type { Speaker, Utterance, VoiceTransport } from '../src/voice/transport.ts';
 import type { BoardStudio } from '../src/board-studio.ts';
 import { BoardStore, buildBoard, defaultSpec, fingerprint, type BoardOut, type BoardSpec, type CostEstimate } from '../src/boardgen/index.ts';
 import { FakeTafelquizPage } from './fake-page.ts';
@@ -667,4 +669,139 @@ describe('QuizBot: !quiz erstellen', () => {
     expect(session().lobbyOpts).toEqual({ own: true });
     expect(studio.created).toBe(1);
   });
+});
+
+describe('QuizBot voice: ⏱ latency lines follow what the bot acts on (T1 review F1, F5, F6)', () => {
+  /** Plays instantly and remembers what was said; no `onStart` → the play call counts as start. */
+  class VoiceRoom implements VoiceTransport {
+    label = 'room';
+    played: string[] = [];
+    private handlers: ((u: Utterance) => void)[] = [];
+    constructor(private texts: Map<number, string>) {}
+    async play(pcm: Pcm) {
+      this.played.push(this.texts.get(pcm.samples[0]!) ?? '?');
+    }
+    stop() {}
+    onUtterance(h: (u: Utterance) => void) {
+      this.handlers.push(h);
+    }
+    onClose() {}
+    async close() {}
+    speak(speaker: Speaker, text: string) {
+      const id = 1000 + this.texts.size;
+      this.texts.set(id, text);
+      const samples = new Int16Array(8000).fill(4000);
+      samples[0] = id;
+      const now = Date.now();
+      for (const h of this.handlers) h({ speaker, pcm: { rate: 16000, channels: 1, samples }, startedAt: now - 500, endedAt: now });
+    }
+  }
+
+  it('answers and picks get a line and a reaction (the pick → the question read out); thinking aloud only counts; one summary per game', async () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbvoicelat-'));
+    const config = ConfigSchema.parse({
+      game: { revealPauseSec: 0, answerTimeoutSec: 5, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2 },
+      judge: { cacheFile: path.join(tmp, 'cache.json'), strategy: 'fuzzy' },
+      llm: { provider: 'none' },
+      discord: { dataDir: tmp },
+      voice: { ignoreWhileSpeaking: false },
+    });
+    const texts = new Map<number, string>();
+    const room = new VoiceRoom(texts);
+    const anna: Speaker = { id: 'u-anna', username: 'anna', displayName: 'Anna' };
+    const ben: Speaker = { id: 'u-ben', username: 'ben', displayName: 'Ben' };
+    const voice: VoiceKit = {
+      stt: { engine: 'whisper:test', transcribe: async (p) => texts.get(p.samples[0]!) ?? '', close: async () => {} },
+      tts: {
+        engine: 'piper:test',
+        synth: async (text) => {
+          const id = 1000 + texts.size;
+          texts.set(id, text);
+          return { rate: 16000, channels: 1, samples: Int16Array.from([id, 0, 0]) };
+        },
+        close: async () => {},
+      },
+      warmup: async () => {},
+    };
+    let handler: (m: ChatMessage) => Promise<void> | void = () => {};
+    const gw: ChatGateway = {
+      botUserId: 'bot',
+      onMessage: (h) => (handler = h),
+      send: async () => {},
+      sendDirect: async () => {},
+      react: async () => {},
+      joinVoice: async () => room,
+      voiceMembers: () => [anna, ben],
+    };
+    const type = (content: string) =>
+      handler({ id: content, channelId: 'chan', guildId: 'guild', author: { ...anna, isBot: false }, content, mentionsBot: false, mentions: [], canManage: false, voiceChannelId: 'vc' });
+    const bot = new QuizBot({
+      gateway: gw,
+      config,
+      store: new GuildStore(tmp),
+      createSession: (cfg) => new FakeSession(cfg),
+      listBoards: async (q) => ['Test Board', 'Anderes Board'].filter((t) => !q || t.toLowerCase().includes(q.toLowerCase())),
+      voice,
+    });
+
+    // The ⏱ lines go to the voice logger on info (stderr): collect them, drop other info noise, keep warnings.
+    const lines: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      const s = String(chunk).replace(/\x1b\[[0-9;]*m/g, '');
+      const m = s.match(/\[voice\] (⏱ [^\n]*)/);
+      if (m) lines.push(m[1]!);
+      else if (/^\x1b\[3[13]m/.test(String(chunk))) write.call(process.stderr, chunk);
+      return true;
+    }) as typeof process.stderr.write;
+    setLogLevel('info');
+    const erkennung = () => lines.filter((l) => l.startsWith('⏱ erkennung'));
+    try {
+      await type('!quiz voice');
+      await until(() => room.played.some((t) => t.includes('Quizmaster')));
+
+      room.speak(anna, 'Quizmaster, neues Quiz Board');
+      await until(() => room.played.some((t) => t.includes('Dazu passen 2 Boards')));
+      room.speak(anna, 'Nummer eins');
+      await until(() => !!bot.activeGame?.turn, 8000);
+      expect(erkennung()).toHaveLength(2); // the command and the menu choice
+
+      // Pick → its reaction is the question read out.
+      const before = lines.length;
+      room.speak(anna, 'Sport für hundert');
+      await until(() => lines.slice(before).some((l) => l.startsWith('⏱ reaktion')));
+      const question = room.played.find((t) => t.includes('Wie viele Pins'))!;
+      const after = lines.slice(before);
+      const r = after.findIndex((l) => l.startsWith('⏱ reaktion'));
+      expect(after[r - 1]).toMatch(new RegExp(`^⏱ ansage engine=piper:test zeichen=${question.length} `));
+      await until(() => !!bot.activeGame?.awaiting);
+
+      // Thinking aloud: no line, no reaction.
+      const n = lines.length;
+      room.speak(anna, 'Ähm, zehn, oder?');
+      await new Promise((res) => setTimeout(res, 300));
+      expect(lines.length).toBe(n);
+
+      room.speak(anna, 'Okay, meine Antwort ist zehn.');
+      await until(() => room.played.includes('zehn?'));
+      await until(() => lines.slice(n).some((l) => l.startsWith('⏱ reaktion')));
+      expect(lines.slice(n)).toContainEqual(expect.stringMatching(/^⏱ ansage engine=piper:test zeichen=5 /)); // "zehn?"
+      const said = room.played.length;
+      room.speak(anna, 'Ja, genau.');
+      await until(() => room.played.slice(said).some((t) => t.startsWith('Richtig')));
+      expect(erkennung()).toHaveLength(5);
+
+      await type('!quiz ende');
+      await until(() => !bot.activeGame);
+      await until(() => lines.some((l) => l.startsWith('⏱ bilanz')));
+      await bot.shutdown(); // leaving the channel right after: no second summary
+      const bilanz = lines.filter((l) => l.startsWith('⏱ bilanz'));
+      expect(bilanz).toHaveLength(1);
+      expect(bilanz[0]).toMatch(/^⏱ bilanz n=5 .* verworfen=1 rueckfaelle=0$/);
+      for (const l of lines) expect(l).not.toMatch(/Anna|Ben|zehn|Pins|Sport|Board/);
+    } finally {
+      process.stderr.write = write;
+      setLogLevel('error');
+    }
+  }, 30000);
 });

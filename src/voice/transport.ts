@@ -15,14 +15,24 @@ export interface Utterance {
   endedAt: number;
 }
 
+export interface PlayOptions {
+  /** Playback really started. Must not throw (it runs inside the transport's event handling). */
+  onStart?: () => void;
+}
+
 /**
  * Audio in and out of a voice room. `DiscordVoiceTransport` is the real one;
  * `LoopbackTransport` lets local test clients (or agents) talk to the bot over HTTP.
  */
 export interface VoiceTransport {
   readonly label: string;
-  /** Plays audio and resolves when playback has finished (or was stopped). */
-  play(pcm: Pcm): Promise<void>;
+  /** Calls `play`'s `onStart` when sound really starts. Without it the `play` call counts as start (`⏱` lines). */
+  readonly reportsStart?: boolean;
+  /**
+   * Plays audio and resolves when playback has finished (or was stopped). `onStart` is called once when
+   * the sound actually starts (latency measurement); transports may leave it out.
+   */
+  play(pcm: Pcm, opts?: PlayOptions): Promise<void>;
   stop(): void;
   onUtterance(handler: (u: Utterance) => void): void;
   /** Someone started to speak (before the utterance is complete) – for barge-in. Optional: transports without it deliver whole utterances only. */
