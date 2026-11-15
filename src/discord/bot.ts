@@ -428,6 +428,16 @@ export class QuizBot {
       const current = this.d.store.get(msg.guildId!).links[msg.author.id];
       return this.reply(msg, current ? `Du bist mit **${current}** verknüpft.` : `Schreib \`${this.prefix} ich <dein Name in quiz-base>\`.`);
     }
+    // Spoken "ich bin …" is often no name at all ("ich bin dran", "ich bin fertig"): by voice only names of the lobby count.
+    if (msg.viaVoice) {
+      const inLobby = game ? this.knownNames(game) : [];
+      if (!inLobby.some((n) => normalize(n) === normalize(name)))
+        return this.reply(
+          msg,
+          `🔗 „${name}“ ist kein Name aus der Lobby${inLobby.length ? ` (gerade drin: ${inLobby.join(', ')})` : ''}. Verknüpfen: \`${this.prefix} ich <dein quiz-base-Name>\`.`,
+          'Den Namen finde ich nicht in der Lobby.',
+        );
+    }
     await this.link(msg, msg.author.id, name, game);
   }
 

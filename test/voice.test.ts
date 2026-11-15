@@ -453,8 +453,9 @@ describe('voice: commands (review fixes)', () => {
   it('ends the game only on whole, unambiguous phrases (F13)', () => {
     for (const s of ['kannst du aufhören zu reden', 'ist das die Schlussrunde?', 'wie ist der Stand zum Schluss', 'ich will noch nicht aufhören', 'aufhören'])
       expect(voiceCommand(s)?.name).not.toBe('ende');
-    for (const s of ['Spiel beenden', 'beende das Spiel', 'bitte das Spiel beenden', 'Quiz beenden', 'ende', 'wir hören auf', 'Spiel beenden bitte', 'Spiel abbrechen'])
+    for (const s of ['Spiel beenden', 'beende das Spiel', 'bitte das Spiel beenden', 'Quiz beenden', 'wir hören auf', 'Spiel beenden bitte', 'Spiel abbrechen'])
       expect(voiceCommand(s)?.name).toBe('ende');
+    expect(voiceCommand('ende')?.name).toBe('ende?'); // a bare word asks back
     expect(voiceCommand('wie ist der Stand zum Schluss')?.name).toBe('stand');
   });
 
@@ -1459,11 +1460,15 @@ describe('QuizBot voice: review fixes for ending and leaving (F1, F2, F4–F6, F
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     try {
       void t.write(annaS, '!quiz ende');
-      for (let i = 0; i < 25; i++) await tick();
+      // Measured relative to the game's end (F16): how fast the game ends depends on the machine (real timers), the 30 s do not.
+      let ended = 0;
+      while (t.bot.activeGame && ended < 60) (await tick(), ended++);
       expect(t.bot.activeGame).toBeNull();
-      expect(room.closed).toBe(false); // still waiting for the goodbye
-      for (let i = 0; i < 10; i++) await tick();
+      let waited = 0;
+      while (!room.closed && waited < 60) (await tick(), waited++);
       expect(room.closed).toBe(true);
+      expect(waited).toBeGreaterThanOrEqual(29); // waited for the hanging goodbye …
+      expect(waited).toBeLessThanOrEqual(31); // … but not longer than GOODBYE_MAX_MS
     } finally {
       vi.useRealTimers();
     }
@@ -1510,4 +1515,26 @@ describe('QuizBot voice: review fixes for ending and leaving (F1, F2, F4–F6, F
     expect(room.played).not.toContain('Ich muss leider los. Tschüss!');
     expect(room.closed).toBe(true);
   }, 20000);
+});
+
+describe('QuizBot voice: "ich bin …" links only names of the lobby (review F17)', () => {
+  it('"ich bin dran / fertig / bereit / da / raus / weg / neu" links nobody, "ich bin Ben" links Ben', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    const links = () => t.bot['d'].store.get('guild').links as Record<string, string>;
+    expect(links()[annaS.id]).toBe('Anna');
+    for (const word of ['dran', 'fertig', 'bereit', 'da', 'raus', 'weg', 'neu']) {
+      t.room().speak(annaS, `Quizmaster, ich bin ${word}`);
+      await until(() => t.chat().includes(`„${word}“ ist kein Name aus der Lobby`));
+      expect(links()[annaS.id], word).toBe('Anna');
+    }
+    // Still linked as Anna: her pick is taken.
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+    // A real player name of the game links.
+    t.room().speak(benS, 'Quizmaster, ich bin Ben');
+    await until(() => t.chat().includes('= **Ben**'));
+    expect(links()[benS.id]).toBe('Ben');
+    await t.bot.shutdown();
+  }, 25000);
 });

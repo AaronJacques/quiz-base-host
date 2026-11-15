@@ -187,6 +187,7 @@ export const FIXED_LINES: readonly string[] = [
   END_KEEP_LINE,
   GOODBYE_LINE,
   'Das habe ich nicht verstanden. Sag: Quizmaster, Hilfe.',
+  'Den Namen finde ich nicht in der Lobby.',
   'Gerade gibt es nichts zu wiederholen.',
   'Gerade ist kein Brett offen.',
   'Noch keine Punkte.',

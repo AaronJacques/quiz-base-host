@@ -185,12 +185,12 @@ const TABLE: Record<string, [string, Expect][]> = {
     ["neues Spiel", 'nichts'],
     ["lass uns Geschichte spielen", 'nichts'],
     ["Bende", 'nichts'],
-    ["beenden", 'direkt'],
-    ["Ende", 'direkt'],
+    ["beenden", 'Rückfrage'],
+    ["Ende", 'Rückfrage'],
     ["Ende?", 'Rückfrage'],
     ["ende jetzt", 'nichts'],
-    ["Spiel Ende", 'direkt'],
-    ["Spiel-Ende", 'direkt'],
+    ["Spiel Ende", 'Rückfrage'],
+    ["Spiel-Ende", 'Rückfrage'],
     ["Spielende jetzt", 'nichts'],
   ],
   "Antworten mit Schlüsselwort / Namen": [
@@ -455,11 +455,11 @@ const TABLE2: Record<string, [string, Expect][]> = {
     ["das Spiel ist zu Ende", 'Rückfrage'],
     ["Quiz ist zu Ende?", 'Rückfrage'],
     ["Ende?", 'Rückfrage'],
-    ["Ende!", 'direkt'],
+    ["Ende!", 'Rückfrage'],
     ["Ende gut alles gut", 'nichts'],
     ["Ende der Runde", 'nichts'],
     ["beenden?", 'Rückfrage'],
-    ["beenden", 'direkt'],
+    ["beenden", 'Rückfrage'],
     ["wir hören auf", 'direkt'],
     ["wir hören auf?", 'Rückfrage'],
     ["lass uns aufhören", 'direkt'],
@@ -468,7 +468,7 @@ const TABLE2: Record<string, [string, Expect][]> = {
     ["Quiz stoppen", 'direkt'],
     ["stopp das Spiel", 'direkt'],
     ["kannst du das Spiel beenden?", 'Rückfrage'],
-    ["kannst du das Spiel beenden", 'direkt'],
+    ["kannst du das Spiel beenden", 'Rückfrage'],
     ["das Spiel beenden", 'direkt'],
     ["dieses Spiel beenden", 'direkt'],
     ["das Spiel", 'nichts'],
@@ -479,7 +479,7 @@ const TABLE2: Record<string, [string, Expect][]> = {
     ["Quiz beendet", 'Rückfrage'],
     ["Spiel beenden bitte", 'direkt'],
     ["bitte Spiel beenden", 'direkt'],
-    ["mal das Spiel beenden", 'direkt'],
+    ["mal das Spiel beenden", 'Rückfrage'],
   ],
 };
 
@@ -503,11 +503,10 @@ describe('voice: ending the game – review table round 2 (F13)', () => {
     const direct = [...Object.values(TABLE), ...Object.values(TABLE2)].flat().filter(([, e]) => e === 'direkt').map(([t]) => t);
     expect([...new Set(direct)].sort((a, b) => a.localeCompare(b, 'de'))).toEqual(
       [
-        'beende das Spiel', 'Bende das Quiz', 'Bende das Spiel', 'beenden', 'bente das Quiz', 'Bente das Spiel', 'Bente, das Spiel', 'bitte Spiel beenden',
-        'brich das Quiz ab', 'brich das Spiel ab', 'Brich das Spielab', 'das Spiel beenden', 'dieses Spiel beenden', 'Ende', 'Ende!', 'kannst du das Spiel beenden',
-        'lass uns aufhören', 'mal das Spiel beenden', 'Pente das Spiel', 'Quiz abrechen', 'Quiz Bänden', 'Quiz beenden', 'Quiz Benden', 'Quiz Benten', 'Quiz penden',
+        'beende das Spiel', 'Bende das Quiz', 'Bende das Spiel', 'bente das Quiz', 'Bente das Spiel', 'Bente, das Spiel', 'bitte Spiel beenden',
+        'brich das Quiz ab', 'brich das Spiel ab', 'Brich das Spielab', 'das Spiel beenden', 'dieses Spiel beenden', 'lass uns aufhören', 'Pente das Spiel', 'Quiz abrechen', 'Quiz Bänden', 'Quiz beenden', 'Quiz Benden', 'Quiz Benten', 'Quiz penden',
         'Quiz stoppen', 'Quizabrechen', 'Quizbeenden', 'Schluss für heute', 'Spiel ab brechen', 'Spiel abbrechen', 'Spiel abrächen', 'Spiel abrechen', 'Spiel Aprechen',
-        'Spiel bänden', 'Spiel beenden bitte', 'Spiel beenten', 'Spiel benden', 'Spiel Ende', 'Spiel penden', 'Spiel stoppen', 'Spiel-Ende', 'Spielabbrechen',
+        'Spiel bänden', 'Spiel beenden bitte', 'Spiel beenten', 'Spiel benden', 'Spiel penden', 'Spiel stoppen', 'Spielabbrechen',
         'Spielbänden', 'Spielbeenden', 'stopp das Spiel', 'wir hören auf',
       ].sort((a, b) => a.localeCompare(b, 'de')),
     );
@@ -521,5 +520,80 @@ describe('voice: column words in conversation (F14)', () => {
     for (const s of ['Ich achte drauf', 'Das ist das erste Mal', 'zum ersten Mal hier', 'Die Kategorie ist schwer', 'die Kategorie ist neu'])
       expect(mentionsCard(s, grid), s).toBe(false);
     for (const s of ['die zweite', 'den dritten', 'zweite', 'Kategorie eins', 'Nummer drei', 'Spalte 2']) expect(mentionsCard(s, grid), s).toBe(true);
+  });
+
+  it('an ordinal before a column word is a card attempt again (F15)', () => {
+    for (const s of ['zweite Kategorie', 'erste Spalte', 'erste Reihe', 'die dritte Kategorie']) expect(mentionsCard(s, grid), s).toBe(true);
+    for (const s of ['Ich achte drauf', 'das erste Mal', 'Die Kategorie ist schwer']) expect(mentionsCard(s, grid), s).toBe(false);
+  });
+});
+
+describe('voice: bare words and polite questions ask back (review delta 2)', () => {
+  it('"Ende", "beenden", "kannst du …", "sollen wir …", "mal …" ask back; the clear commands still end', () => {
+    for (const text of ['Ende', 'beenden', 'Spiel Ende', 'kannst du das Spiel beenden', 'könntest du das Spiel beenden', 'kannst du Spiel beenden', 'sollen wir aufhören', 'sollen wir das Spiel beenden', 'mal das Spiel beenden'])
+      expect(outcome(text), text).toBe('Rückfrage');
+    for (const text of ['Spiel beenden', 'Quiz abbrechen', 'Spiel stoppen', 'beende das Spiel', 'stopp das Spiel', 'brich das Spiel ab', 'wir hören auf', 'Schluss für heute', 'lass uns aufhören', 'Spiel beenden bitte', 'bitte Spiel beenden', 'Spielbeenden'])
+      expect(outcome(text), text).toBe('direkt');
+  });
+});
+
+/**
+ * Review delta 3 (F18): the wider polite prefix is only for ending the game. Every other command behaves
+ * exactly as on main 89de88e – these results were recorded with the voiceCommand of 89de88e.
+ */
+const AS_ON_MAIN: [string, { name: string; args: string[] } | null][] = [
+  ["sollen wir weiter?", null],
+  ["kannst du mal skippen", null],
+  ["wollen wir die Regeln ändern", null],
+  ["weiter", {"name":"skip","args":[]}],
+  ["kannst du weiter", {"name":"skip","args":[]}],
+  ["mal weiter", {"name":"skip","args":[]}],
+  ["bitte weiter", {"name":"skip","args":[]}],
+  ["Stand", {"name":"stand","args":[]}],
+  ["kannst du den Stand sagen", {"name":"stand","args":[]}],
+  ["sollen wir den Stand sagen", {"name":"stand","args":[]}],
+  ["wie steht es", {"name":"stand","args":[]}],
+  ["wiederholen", {"name":"wiederholen","args":[]}],
+  ["kannst du das wiederholen", {"name":"wiederholen","args":[]}],
+  ["könntest du nochmal", {"name":"wiederholen","args":[]}],
+  ["was ist frei", {"name":"brett","args":[]}],
+  ["kannst du mal sagen was frei ist", null],
+  ["Hilfe", {"name":"hilfe","args":[]}],
+  ["kannst du mir helfen", null],
+  ["das war richtig", {"name":"richtig","args":[]}],
+  ["sollen wir das richtig geben", null],
+  ["das war falsch", {"name":"falsch","args":[]}],
+  ["willst du falsch sagen", null],
+  ["los", {"name":"los","args":[]}],
+  ["kannst du starten", {"name":"los","args":[]}],
+  ["sollen wir los", null],
+  ["würdest du starten", null],
+  ["neues Quiz Geschichte", {"name":"neu","args":["geschichte"]}],
+  ["wollen wir ein neues Quiz", null],
+  ["ich bin Anna", {"name":"ich","args":["anna"]}],
+  ["mal ich bin Anna", {"name":"ich","args":["anna"]}],
+  ["tschüss", {"name":"voice","args":["aus"]}],
+  ["würdest du den Channel verlassen", {"name":"voice","args":["aus"]}],
+  ["Regeln", {"name":"regeln","args":[]}],
+  ["wollen wir Regeln", null],
+  ["nächste Frage", {"name":"skip","args":[]}],
+  ["sollten wir die nächste Frage", null],
+  ["lass uns Geschichte spielen", {"name":"neu","args":["geschichte"]}],
+  ["kannst du lass uns Geschichte spielen", {"name":"neu","args":["geschichte"]}],
+  ["überspringen", {"name":"skip","args":[]}],
+  ["willst du überspringen", null],
+];
+
+describe('voice: polite questions change only ending the game (F18, F19)', () => {
+  it('all other commands behave exactly as on main 89de88e', () => {
+    expect(AS_ON_MAIN.length).toBeGreaterThanOrEqual(20);
+    for (const [text, cmd] of AS_ON_MAIN) expect(voiceCommand(text, { question: /\?\s*$/.test(text) }), text).toEqual(cmd);
+    // Reviewer's case: "Quizmaster, sollen wir weiter?" of the leader must not skip the question.
+    for (const text of ['sollen wir weiter?', 'kannst du mal skippen', 'wollen wir die Regeln ändern']) expect(voiceCommand(text), text).toBeNull();
+  });
+
+  it('"kannst du mal …" and "sollen wir …" before ending the game ask back (F19)', () => {
+    for (const text of ['kannst du mal das Spiel beenden', 'könntest du mal das Spiel beenden', 'sollen wir das Spiel beenden', 'sollen wir aufhören', 'würdest du das Spiel beenden'])
+      expect(outcome(text), text).toBe('Rückfrage');
   });
 });

@@ -34,7 +34,14 @@ export function stripWakeWord(text: string, wakeWords: string[]): string | null 
  * Ending the game is the one command that cannot be undone – only whole, unambiguous phrases count
  * ("Spiel beenden", "Spiel abbrechen"), never a word inside a sentence ("kannst du aufhören zu reden", "Schlussrunde").
  */
-const END_RE = /^(?:(?:das |dieses )?(?:spiel|quiz) (?:beenden|abbrechen|stoppen|ende)|(?:beende|stoppe?|stopp) (?:das|dieses) (?:spiel|quiz)|brich (?:das|dieses) (?:spiel|quiz) ab|wir beenden (?:das|dieses) (?:spiel|quiz)|beenden|ende|schluss für heute|lass uns aufhören|wir hören auf)$/;
+const END_RE = /^(?:(?:das |dieses )?(?:spiel|quiz) (?:beenden|abbrechen|stoppen)|(?:beende|stoppe?|stopp) (?:das|dieses) (?:spiel|quiz)|brich (?:das|dieses) (?:spiel|quiz) ab|wir beenden (?:das|dieses) (?:spiel|quiz)|schluss für heute|lass uns aufhören|wir hören auf)$/;
+/** A bare word ("Ende", "beenden", "Spiel-Ende") may be cut off or mean something else: it asks back. */
+const END_SHORT_RE = /^(?:beenden|ende|(?:das |dieses )?(?:spiel|quiz) ende)$/;
+/**
+ * A question or polite request ("kannst du das Spiel beenden", "sollen wir aufhören", "mal das Spiel beenden") –
+ * Whisper often drops the "?". It asks back instead of ending right away.
+ */
+const END_POLITE_RE = /^(?:kannst du mal|könntest du mal|kannst du|könntest du|sollen wir|sollten wir|wollen wir|willst du|würdest du|mal)\s+/;
 /**
  * Statements about the game, no commands ("Spiel ist vorbei", "bricht das Spiel ab", "das Spiel endet") – often
  * a question with the "?" lost. They ask back (`ende?`), never end the game by themselves.
@@ -109,7 +116,7 @@ export function endAskReply(text: string, question = /\?\s*$/.test(text)): 'yes'
 /** "die zweite", "Nummer drei", "Kategorie eins" – a column by number. */
 /**
  * A column by number: "die zweite", "den dritten" (an ordinal after an article, not "das erste Mal"), an ordinal
- * alone, or "Nummer/Kategorie/Spalte" with a number after it. Not "Ich achte drauf", "Die Kategorie ist schwer".
+ * alone, before a column word ("zweite Kategorie", "erste Spalte"), or "Nummer/Kategorie/Spalte" with a number after it. Not "Ich achte drauf", "Die Kategorie ist schwer".
  */
 function columnByNumber(words: string[]): boolean {
   const ordinal = (w?: string) => !!w && w in ORDINALS && /te[nrs]?$/.test(w);
@@ -117,6 +124,7 @@ function columnByNumber(words: string[]): boolean {
   if (words.length === 1 && ordinal(words[0])) return true;
   return words.some((w, i) =>
     (ordinal(w) && ['die', 'den', 'das', 'der', 'dem'].includes(words[i - 1] ?? '') && words[i + 1] !== 'mal') ||
+    (ordinal(w) && ['kategorie', 'spalte', 'reihe', 'nummer'].includes(words[i + 1] ?? '')) || // "zweite Kategorie", "erste Spalte"
     (['nummer', 'kategorie', 'spalte'].includes(w) && number(words[i + 1])),
   );
 }
@@ -149,13 +157,18 @@ export function mentionsCard(text: string, grid: BoardCell[]): boolean {
  * `categories`: of the open board – an utterance with one of them (or with digits) is never "end".
  */
 export function voiceCommand(rest: string, opts: { question?: boolean; categories?: string[] } = {}): { name: string; args: string[] } | null {
-  const s = speechNorm(rest).replace(/^(bitte|mal|kannst du|könntest du)\s+/, '').replace(/\s+bitte$/, '');
+  const norm = speechNorm(rest);
+  // Fillers in front of every command – unchanged; the wider polite prefix below is only for ending the game.
+  const s = norm.replace(/^(bitte|mal|kannst du|könntest du)\s+/, '').replace(/\s+bitte$/, '');
   if (!s) return { name: 'hilfe', args: [] };
   let m: RegExpMatchArray | null;
-  if (!/\d/.test(s) && !namesCategory(s, opts.categories ?? [])) {
-    const end = END_RE.test(s) ? 'end' : END_STATE_RE.test(s) ? 'ask' : endPhrase(s);
-    if (end) return { name: end === 'end' && !opts.question ? 'ende' : 'ende?', args: [] };
-    if (MAYBE_END_RE.test(s)) return { name: 'ende?', args: [] };
+  // Ending the game: a question or request ("sollen wir das Spiel beenden", "kannst du mal …") only asks back.
+  const polite = norm.match(END_POLITE_RE);
+  const e = polite ? norm.slice(polite[0].length).replace(/^(?:mal|bitte)\s+/, '').replace(/\s+bitte$/, '') : s;
+  if (e && !/\d/.test(e) && !namesCategory(e, opts.categories ?? [])) {
+    const end = END_RE.test(e) ? 'end' : END_STATE_RE.test(e) || END_SHORT_RE.test(e) ? 'ask' : endPhrase(e);
+    if (end) return { name: end === 'end' && !opts.question && !polite ? 'ende' : 'ende?', args: [] };
+    if (MAYBE_END_RE.test(e)) return { name: 'ende?', args: [] };
   }
   if ((m = s.match(/^(?:ein |eine )?(?:neues?|neue|neuen) (?:quiz|spiel|lobby|runde|board)(?: (?:mit|zu|zum thema|über))?(?: (.*))?$/))) return { name: 'neu', args: m[1] ? m[1].split(' ') : [] };
   if ((m = s.match(/^(?:lass uns (.+) spielen|wir spielen (.+))$/))) return { name: 'neu', args: (m[1] ?? m[2])!.split(' ') };
