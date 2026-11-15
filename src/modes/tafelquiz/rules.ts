@@ -22,6 +22,8 @@ export interface RuleSpec {
   names: string[];
   kind: RuleKind;
   label: string;
+  /** `seconds` only: 0 / "aus" switches it off. */
+  off?: boolean;
 }
 
 /** Rules that players may change at runtime (e.g. via Discord). */
@@ -34,6 +36,9 @@ export const RULES: RuleSpec[] = [
   { key: 'answerTimeoutSec', names: ['antwortzeit', 'zeit'], kind: 'seconds', label: 'Antwortzeit' },
   { key: 'buzzWindowSec', names: ['buzzerzeit'], kind: 'seconds', label: 'Zeit zum Buzzern' },
   { key: 'buzzAnswerTimeoutSec', names: ['buzzerantwortzeit'], kind: 'seconds', label: 'Antwortzeit nach Buzzer' },
+  { key: 'pickReminderSec', names: ['erinnerung'], kind: 'seconds', off: true, label: 'Erste Erinnerung bei der Kartenwahl' },
+  { key: 'pickReminderRepeatSec', names: ['erinnerungstakt', 'nacherinnerung'], kind: 'seconds', off: true, label: 'Weitere Erinnerungen (nur im Chat)' },
+  { key: 'pickHint', names: ['kartenhinweis', 'hinweis'], kind: 'bool', label: 'Hinweis „Welche Karte?“ (Sprache)' },
 ];
 
 export function findRule(name: string): RuleSpec | undefined {
@@ -79,8 +84,12 @@ export function applyRule(rules: GameRules, spec: RuleSpec, raw: string): string
     if (b === null) return `"${raw}": bitte "an" oder "aus".`;
     (rules as any)[spec.key] = b;
   } else {
+    if (spec.off && (parseBool(raw) === false || /^0+$/.test(raw.trim()))) {
+      (rules as any)[spec.key] = 0;
+      return null;
+    }
     const n = parseInt(raw, 10);
-    if (!Number.isFinite(n) || n < 5 || n > 600) return `"${raw}": bitte Sekunden zwischen 5 und 600.`;
+    if (!Number.isFinite(n) || n < 5 || n > 600) return `"${raw}": bitte Sekunden zwischen 5 und 600${spec.off ? ' oder "aus"' : ''}.`;
     (rules as any)[spec.key] = n;
   }
   return null;
@@ -93,6 +102,7 @@ export function formatRuleValue(rules: GameRules, spec: RuleSpec): string {
     return spec.key.toLowerCase().includes('wrong') ? (pct ? `−${pct} %` : 'kein Abzug') : `+${pct} %`;
   }
   if (spec.kind === 'bool') return v ? 'an' : 'aus';
+  if (spec.off && !v) return 'aus';
   return `${v} s`;
 }
 

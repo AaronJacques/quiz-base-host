@@ -38,6 +38,8 @@ export class VoiceBridge {
   /** Fresh turns so far, and whether the current one has been announced ("…, du bist dran. Welche Karte?"). */
   private turnSeq = 0;
   private _turnAnnounced = false;
+  /** The turn whose reminder was spoken – later reminders of the same turn only go to the chat. */
+  private remindedTurn = -1;
 
   constructor(readonly host: VoiceHost, private opts: { scoresEvery: number; extraTimeSec: number; board: () => string }) {}
 
@@ -82,8 +84,11 @@ export class VoiceBridge {
           void this.say(`Los geht's mit ${this.opts.board()}! ${this.rules ? `${rulesLine(this.rules)} ` : ''}${ANSWER_HOW_LINE}`);
           break;
         case 'reminder':
+          // Spoken once per turn; later reminders (`pickReminderRepeatSec`) are chat only.
+          if (!n.player || this.remindedTurn === this.turnSeq) break;
+          this.remindedTurn = this.turnSeq;
           // Same key as the pick hint: a hint and a reminder never queue up behind each other.
-          if (n.player) void this.say(reminderLine(n.player, this.turn?.open[0]), 'hint', { interruptible: true });
+          void this.say(reminderLine(n.player, this.turn?.open[0]), 'hint', { interruptible: true });
           break;
         case 'buzzer-open':
           this._buzzerOpen = true;
@@ -161,6 +166,7 @@ export class VoiceBridge {
     this.questions = 0;
     this._buzzerOpen = false;
     this._turnAnnounced = false;
+    this.remindedTurn = -1;
   }
 
   /** "Quizmaster, wiederholen" – the question (and the pending ask), or whose turn it is. */

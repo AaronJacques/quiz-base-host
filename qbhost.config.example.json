@@ -10,7 +10,9 @@
     "publicBoard": "Allgemeinwissen Quiz v1",
     "minPlayers": 2,
     "autoStart": false,
-    "pickReminderSec": 45,
+    "pickReminderSec": 90,
+    "pickReminderRepeatSec": 300,
+    "pickHint": true,
     "answerTimeoutSec": 45,
     "buzzerOnWrong": true,
     "buzzWindowSec": 15,
@@ -81,7 +83,8 @@
     "ignoreWhileSpeaking": true,
     "wakeWords": ["quizmaster", "quiz master", "quizmeister", "quizhost", "quiz host"],
     "extraTimeSec": 10,
-    "scoresEvery": 3
+    "scoresEvery": 3,
+    "leaveOnGameEnd": true
   },
   "companion": {
     "enabled": true,

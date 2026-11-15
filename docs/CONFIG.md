@@ -46,7 +46,9 @@ Ablauf und Punkte des Tafelquiz. Die Punkteregeln sind **pro Server zur Laufzeit
 | `publicBoard` | – | Board, das automatisch als Lobby erstellt wird (Titel wie bei „Öffentliches Board verwenden“). Leer = Lobby manuell erstellen. CLI: `--board "<Titel>"`. Im Discord-Bot ohne Wirkung, dort wählt man das Quiz im Chat. |
 | `minPlayers` | `2` | Mindestzahl Spieler für den automatischen Start. Ein ausdrücklicher Start (`start`, Discord `!quiz los`) geht auch mit weniger, z.B. allein. |
 | `autoStart` | `false` | Spiel automatisch starten, sobald alle bereit sind. Sonst startet die Spielleitung mit `start`. CLI: `--auto-start`. Im Discord-Bot gilt stattdessen `discord.autoStart`. |
-| `pickReminderSec` | `45` | Sekunden, bis der Spieler am Zug eine Frage wählt. Danach kommt eine Erinnerung. |
+| `pickReminderSec` | `90` | Sekunden bis zur ersten Erinnerung „du bist dran“, wenn der Spieler am Zug keine Karte wählt. `0` = keine Erinnerung. |
+| `pickReminderRepeatSec` | `300` | Abstand weiterer Erinnerungen im selben Zug. Gesprochen wird nur die erste, die weiteren stehen nur im Chat. `0` = nur eine Erinnerung. |
+| `pickHint` | `true` | Hinweis „Welche Karte? …“, wenn eine gesprochene Kartenwahl nicht klappt: höchstens einmal pro Zug und nur, wenn die Äußerung nach einer Karte klingt (eine Punktzahl, eine Spalte wie „die zweite“ oder ein Wort, das an eine Kategorie erinnert; keine Jahreszahl), nie bei Gespräch. |
 | `answerTimeoutSec` | `45` | Antwortzeit für den Spieler am Zug. |
 | `buzzerOnWrong` | `true` | Nach einer falschen Antwort den Buzzer für alle anderen freigeben. |
 | `buzzWindowSec` | `15` | Zeit zum Buzzern. |
@@ -168,6 +170,7 @@ Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennu
 | `wakeWords` | `quizmaster`, `quiz master`, `quizmeister`, `quizhost`, `quiz host` | Rufnamen für Sprachbefehle. |
 | `extraTimeSec` | `10` | Zusätzliche Antwort- und Buzzerzeit, solange der Bot spricht. |
 | `scoresEvery` | `3` | Punktestand nach jeder n-ten Frage ansagen. `0` = nie. |
+| `leaveOnGameEnd` | `true` | Nach Spielende (reguläres Ende, `!quiz ende`, „Quizmaster, Spiel beenden“, Abbruch) verabschiedet sich der Bot („Tschüss, bis zum nächsten Quiz!“) und verlässt den Voice-Channel, sobald die letzte Ansage gesprochen ist (spätestens nach 30 s, falls die Sprachausgabe hängt). Startet vorher ein neues Spiel oder öffnet jemand das Board-Menü (`!quiz neu`), bleibt er. `false` = bleiben, dann gilt nur der Abschied nach 20 Minuten Stille. |
 | `latencyLog` | `true` | `⏱`-Zeilen mit Messwerten (Erkennung, Ansage, Reaktion, Bilanz) auf `info`, ohne Texte. Siehe [VOICE.md](VOICE.md#latenz-messen). `false` = keine einzige `⏱`-Zeile. |
 
 ## `companion`
@@ -194,6 +197,9 @@ Diese Regeln kannst du im Discord-Chat ändern (`!quiz regel …`). Sie werden p
 | `zeit`, `antwortzeit` | `answerTimeoutSec` | Antwortzeit in Sekunden (5 bis 600) |
 | `buzzerzeit` | `buzzWindowSec` | Zeit zum Buzzern in Sekunden (5 bis 600) |
 | `buzzerantwortzeit` | `buzzAnswerTimeoutSec` | Antwortzeit nach Buzzer in Sekunden (5 bis 600) |
+| `erinnerung` | `pickReminderSec` | Erste Erinnerung bei der Kartenwahl in Sekunden (5 bis 600, `aus` = keine) |
+| `erinnerungstakt`, `nacherinnerung` | `pickReminderRepeatSec` | Weitere Erinnerungen im selben Zug, nur im Chat (5 bis 600, `aus` = keine) |
+| `kartenhinweis`, `hinweis` | `pickHint` | Hinweis „Welche Karte?“ bei gesprochener Kartenwahl (`an` / `aus`) |
 
 Faktoren akzeptieren `100%`, `50%`, `0.5`, `1/2`, `halb`, `2x`, `nichts`. Beispiel: `!quiz regel minus 0` = kein Abzug.
 

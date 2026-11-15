@@ -75,8 +75,9 @@ Wer im Voice-Channel ist und auf quiz-base **denselben Namen** wie in Discord be
 | „Quizmaster, wiederholen“ | Frage (oder Zug) noch einmal |
 | „Quizmaster, los“ / „start“ | Start erzwingen (Spielleitung). Der Bot antwortet sofort („Okay, wir starten!“) oder sagt, wer noch fehlt („Es fehlt noch: Ben.“) |
 | „Quizmaster, das war richtig / falsch“, „weiter“ | Bewertung überstimmen / Buzzer-Runde überspringen (Spielleitung), wie `!quiz richtig/falsch/skip` (siehe DISCORD.md) |
-| „Quizmaster, Spiel beenden“ | Spiel beenden (Spielleitung). Nur ganze Sätze wie „Spiel beenden“, „Spiel abbrechen“, „beende das Spiel“, „Quiz beenden“, „wir hören auf“ – nie ein Wort mitten im Satz („kannst du aufhören zu reden“, „Schlussrunde“). Kurze Wörter wie „Stopp“, „Abbrechen“, „Aufhören“, „Schluss“ beenden nicht, der Bot fragt nach: „Soll ich das Spiel beenden? Sag: Quizmaster, Spiel beenden.“ |
-| „Quizmaster, tschüss“ | Bot verlässt den Voice-Channel |
+| „Quizmaster, Spiel beenden“ | Spiel beenden (Spielleitung). Nur ganze Sätze wie „Spiel beenden“, „Spiel abbrechen“, „beende das Spiel“, „Quiz beenden“, „wir hören auf“ – nie ein Wort mitten im Satz („kannst du aufhören zu reden“, „Schlussrunde“, „das Spiel beenden wir später“). Zusammengeschrieben oder verhört zählt der ganze Befehl auch („Spielbeenden“, „Spielbänden“, „Quizabrechen“): Der Bot vergleicht ihn nach Klang (Kölner Phonetik) und Vokalen. Direkt beendet nur ein gleich klingender Befehl ohne Zahl und ohne Fragezeichen. Was nur ähnlich klingt („Spiel bieten“, „Spiel binden“), Partizipien („Spiel beendet“, „Spiel abgebrochen?“) und Fragen („Spiel beenden?“) führen zur Rückfrage (siehe unten). Mit einer Zahl oder einer Kategorie des Boards („Spielbanken 100“) ist es nie ein Beenden-Befehl; „Spiel beginnen“, „Spielstand“ oder „Quiz abgeben“ lösen nichts aus. |
+| „Quizmaster, Stopp“ / „Abbrechen“ | Kurze Wörter wie „Stopp“, „Abbrechen“, „Aufhören“, „Schluss“ beenden nicht. Der Bot fragt die Spielleitung: „Soll ich das Spiel beenden? Sag Ja oder Nein.“ Innerhalb von 20 s genügt dann ein klares „Ja“ („Quizmaster, ja“, „Ja bitte“, „Ja genau“, „Jawohl“), „Nein“ oder „weiter“ spielt weiter. Fragen und mehrdeutige Wörter („Bitte?“, „Klar?“, „Ja?“) zählen nicht, die Rückfrage bleibt dann offen; ebenso wenig ein „Ja“ am Anfang eines längeren Satzes („Ja, Geschichte 300“). Die Spielleitung wird in diesen 20 s genau zugehört, aber immer lokal erkannt, nie über die Cloud. Wartet gerade eine gesprochene Antwort auf ihr „Ja“, gilt das „Ja“ der Stopp-Rückfrage; die Antwort bleibt offen, bis die Antwortzeit abläuft (kurz davor wird sie wie immer als gesagt gewertet). Wer nicht Spielleitung ist, bekommt keine Rückfrage. |
+| „Quizmaster, tschüss“ / „verlass den Channel“ | Bot verlässt den Voice-Channel (wie `!quiz voice aus`). Während eines Spiels nur die Spielleitung; das Spiel läuft dann im Text-Chat weiter. |
 | „Quizmaster, Hilfe“ | sagt die Befehle an |
 
 Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel des Spiels (`🎙️ Anna: „Sport für 200“`), damit man Hörfehler sieht. Gesprochenes gehört immer zum Spiel-Channel, auch wenn der Bot mit `!quiz voice` aus einem anderen Channel gerufen wurde. Die Spielleitung kann wie gewohnt per Chat korrigieren (`!quiz richtig`, `!quiz korrektur Anna +100`).
@@ -85,14 +86,16 @@ Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel des Spiel
 
 - Der Bot sagt beim Beitritt an, dass er zuhört. Er verarbeitet Sprache nur, solange er im Channel ist, und **speichert keine Aufnahmen**.
 - Erkannte Sätze landen nur dann im Text-Channel, wenn der Bot darauf reagiert (Karte, Antwort mit Schlüsselwort, Ja/Nein, Befehl). Von allen, die nicht dran sind, wird nur der Anfang einer Äußerung auf den Rufnamen geprüft. Lautes Nachdenken der Person, die dran ist, wird erkannt, aber weder gespeichert noch gepostet.
-- Nach 20 Minuten ohne Spiel und ohne Sprache verlässt der Bot den Channel von selbst.
+- Nach dem Spiel (reguläres Ende, `!quiz ende`, Sprachbefehl, Abbruch) sagt der Bot den Endstand an, verabschiedet sich („Tschüss, bis zum nächsten Quiz!“) und verlässt den Channel direkt danach (`voice.leaveOnGameEnd`). Startet vorher schon das nächste Spiel oder wartet sein Board-Menü auf eine Wahl (`!quiz neu`), bleibt er; Strg+C in dieser Zeit lässt den Abschied noch zu Ende sprechen.
+- Nach 20 Minuten ohne Spiel und ohne Sprache verlässt der Bot den Channel ebenfalls von selbst.
 - Standardmäßig bleibt alle Sprache auf dem Rechner. Mit Cloud-Erkennung (`voice.stt: "deepgram"`) geht Audio an Deepgram, welches genau, steht unter [Erkennung: lokal oder Cloud](#erkennung-lokal-oder-cloud).
 
 ## Tipps & Grenzen
 
 - **Kopfhörer**: Wer den Bot über Lautsprecher hört, schickt seine Stimme zurück ins Mikro. Was jemand sagt, **während der Bot spricht**, wird deshalb ignoriert (`voice.ignoreWhileSpeaking`). Also kurz ausreden lassen. Bei Musikfragen sind Kopfhörer Pflicht.
 - **Dazwischenreden (Barge-in)**: Ausnahme ist, wer gerade dran ist. Sagt der Bot einen Hinweis, eine Erinnerung oder eine Rückfrage („Welche Karte? Sag zum Beispiel …“, „Anna, du bist noch dran …“, „Anna, deine Antwort?“, „Tatooine?“), darf diese Person hineinreden: Der Bot verstummt und wertet, was sie sagt. Klingt es wie seine eigene Ansage (Echo über Lautsprecher), verwirft er es. Fragen, Lösungen und Zug-Ansagen laufen immer zu Ende, und für alle anderen bleibt der Echo-Schutz. Abschalten: `voice.bargeIn: false`.
-- **Hinweise** („Welche Karte? …“) kommen nur, wenn die Person am Zug nach der Zug-Ansage etwas sagt, das keine Karte ist, und höchstens einmal pro Zug. Zwischen Bewertung und nächstem Zug und beim Zugwechsel gibt es keine. Hinweis und Erinnerung stapeln sich nicht.
+- **Hinweise** („Welche Karte? …“) kommen nur, wenn die Person am Zug nach der Zug-Ansage einen Kartenversuch macht, der nicht klappt (eine Punktzahl wie „Hund für 250“, eine Spalte wie „die zweite“ oder ein Wort, das an eine Kategorie erinnert – keine Jahreszahl im Gespräch), und höchstens einmal pro Zug – nie bei normalem Gespräch („Ähm, keine Ahnung“). Zwischen Bewertung und nächstem Zug und beim Zugwechsel gibt es keine. Abschalten: `!quiz regel kartenhinweis aus`.
+- **Erinnerungen** („Anna, du bist noch dran …“) kommen erst nach 90 s ohne Karte, weitere höchstens alle 5 Minuten und nur noch im Chat; gesprochen wird nur die erste pro Zug. Einstellbar: `!quiz regel erinnerung 120`, `!quiz regel erinnerungstakt aus`; eine Änderung wirkt auch im laufenden Zug nach spätestens 30 s. Hinweis und Erinnerung stapeln sich nicht.
 - Eine Äußerung endet nach ~0,9 s Pause (`voice.silenceMs`). Wer lange Pausen macht, wird früher „abgeschnitten“ – dann einfach weiterreden, die Antwort zählt aber nur einmal.
 - Bildfragen: Der Bot sagt „Schaut euch dazu das Bild auf Quiz Base an“ – das Bild sieht man nur im Browser.
 - Für Hinweise gibt der Bot Whisper die Kategorien, die Punktwerte des Boards („Sport für 100, 100, 200, …“ – sonst wird „hundert“ schon mal zu „Hunde“) und die Spielernamen mit. **Nie die Lösung**, sonst würde Whisper die richtige Antwort „hören“.
@@ -131,6 +134,7 @@ Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel des Spiel
 | `bargeIn` | `true` | Wer dran ist, darf Hinweise, Erinnerungen und Rückfragen unterbrechen |
 | `wakeWords` | `quizmaster`, … | Rufnamen |
 | `scoresEvery` | `3` | Zwischenstand nach jeder n-ten Frage |
+| `leaveOnGameEnd` | `true` | nach Spielende verabschieden und den Channel verlassen, sobald die letzte Ansage gesprochen ist |
 | `extraTimeSec` | `10` | zusätzliche Antwort-/Buzzerzeit, solange der Bot spricht (setzt `game.bonusTimeSec`) |
 | `latencyLog` | `true` | `⏱`-Zeilen zur Latenz auf `info`, siehe [Latenz messen](#latenz-messen) |
 

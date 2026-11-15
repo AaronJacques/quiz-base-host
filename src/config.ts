@@ -33,8 +33,12 @@ export const ConfigSchema = z.object({
       minPlayers: z.number().int().min(1).default(2),
       /** Spiel automatisch starten, sobald alle bereit sind. Sonst Operator: `start`. */
       autoStart: z.boolean().default(false),
-      /** Sekunden, bis der Spieler am Zug eine Frage wählt (danach Erinnerung). */
-      pickReminderSec: z.number().int().default(45),
+      /** Sekunden bis zur ersten Erinnerung „du bist dran“, wenn der Spieler am Zug keine Karte wählt. 0 = keine Erinnerung. */
+      pickReminderSec: z.number().int().min(0).default(90),
+      /** Abstand weiterer Erinnerungen im selben Zug (nur im Chat, gesprochen wird nur die erste). 0 = nur eine Erinnerung. */
+      pickReminderRepeatSec: z.number().int().min(0).default(300),
+      /** Hinweis „Welche Karte?“, wenn eine gesprochene Kartenwahl nicht klappt – höchstens einmal pro Zug und nur, wenn die Äußerung nach einer Karte klingt. */
+      pickHint: z.boolean().default(true),
       /** Antwortzeit für den Spieler am Zug. Wird als Timer auf der Seite gestartet. */
       answerTimeoutSec: z.number().int().default(45),
       /** Nach falscher Antwort Buzzer für alle anderen freigeben. */
@@ -248,6 +252,11 @@ export const ConfigSchema = z.object({
        * und eine Bilanz bei Spielende (ohne Texte). Auswertung: `npx tsx tools/voice-latency.ts < log`.
        */
       latencyLog: z.boolean().default(true),
+      /**
+       * Nach Spielende (reguläres Ende, `!quiz ende`, „Quizmaster, Spiel beenden“, Abbruch) verabschiedet sich der Bot
+       * und verlässt den Voice-Channel, sobald die letzte Ansage gesprochen ist. `false` = bleiben (Abschied nach 20 Minuten Stille).
+       */
+      leaveOnGameEnd: z.boolean().default(true),
     })
     // A smaller audio window hears only its first n/50 seconds – longer utterances would be cut off unheard.
     .transform((v) => ({ ...v, maxSpeechSec: v.whisperAudioCtx > 0 ? Math.min(v.maxSpeechSec, audioCtxSeconds(v.whisperAudioCtx)) : v.maxSpeechSec }))

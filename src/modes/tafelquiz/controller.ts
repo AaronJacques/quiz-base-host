@@ -9,6 +9,11 @@ import type { TafelquizPort } from '../../site/tafelquiz/page.ts';
 import type { GameMode } from '../mode.ts';
 import { scoreFor } from './rules.ts';
 
+/** While waiting for a pick, the reminder rules are read again this often – a change (also from "aus") counts within it. */
+const REMINDER_RECHECK_MS = 30_000;
+/** "No time limit" for the pick listener of a turn (the longest timer Node allows); the turn's end removes it. */
+const NO_TIMEOUT_MS = 2 ** 31 - 1;
+
 const log = createLogger('tafelquiz');
 
 type AnswerOutcome = { kind: 'answer'; answer: string; spoken?: boolean } | { kind: 'override'; correct: boolean } | { kind: 'skip' } | { kind: 'timeout' };
@@ -40,6 +45,8 @@ export class TafelquizController implements GameMode {
   private codeAnnounced = false;
   private startRequested = false;
   private signal!: AbortSignal;
+  /** Reminders sent in the current turn (player, board, open cards): the first comes late, later ones rarely. */
+  private reminded = { turn: '', count: 0, since: 0 };
 
   constructor(private d: TafelquizDeps) {
     d.bus.on('operator:command', (c) => {
@@ -154,30 +161,52 @@ export class TafelquizController implements GameMode {
         }
       } else return; // the page caught up – next loop reads the right player
     } else this.rotation = null; // page shows someone else → quiz-base is in charge again
+    const turnName = current.name;
+    const turnKey = `${current.name}|${s.boards.active}|${open.length}`;
+    if (this.reminded.turn !== turnKey) this.reminded = { turn: turnKey, count: 0, since: Date.now() };
+    // One listener for the whole turn, set up before the turn is announced: there is no moment in which a
+    // pick goes unheard. Reminders run beside it on a timer and never interrupt it.
+    const turn = new AbortController();
+    const picked = this.d.bus.waitFor(
+      'player:pick',
+      (p) => (p.player === current.name || p.player === '@operator') && open.some((c) => c.col === p.col && c.row === p.row),
+      NO_TIMEOUT_MS,
+      turn.signal,
+    );
     const categories = [...new Set(s.grid.map((c) => c.category))];
     this.d.bus.emit('host:turn', { player: current.name, open, grid: s.grid, categories, board: s.boards });
     this.status('board', `${current.name} ist am Zug – wähle Kategorie und Punkte.`);
 
-    const turnName = current.name;
-    const pick = await this.whilePage(
-      (x) => {
-        const shown = x.players.find((p) => p.isTurn)?.name;
-        return x.phase === 'board' && (shown === turnName || (!!staleName && shown === staleName));
-      },
-      (signal) =>
-        this.d.bus.waitFor(
-          'player:pick',
-          (p) => (p.player === current.name || p.player === '@operator') && open.some((c) => c.col === p.col && c.row === p.row),
-          this.d.game.pickReminderSec * 1000,
-          signal,
-        ),
-    );
-    if (pick === 'page-changed' || this.signal.aborted) return; // host acted in the browser / game stopped
-    if (!pick) {
-      this.say(`⏰ ${current.name}, du bist dran – such dir eine Frage aus!`);
-      this.notice('reminder', 'Du bist dran – such dir eine Frage aus!', current.name);
-      return;
+    let timer: NodeJS.Timeout | undefined;
+    const remindLater = () => {
+      // Read the rule every time: a change during the turn counts from the turn start (or the last reminder).
+      const waitSec = this.reminded.count === 0 ? this.d.game.pickReminderSec : this.d.game.pickReminderRepeatSec;
+      const due = waitSec > 0 ? this.reminded.since + waitSec * 1000 : Infinity;
+      timer = setTimeout(() => {
+        if (turn.signal.aborted) return;
+        if (Date.now() >= due) {
+          this.reminded = { ...this.reminded, count: this.reminded.count + 1, since: Date.now() };
+          this.say(`⏰ ${current.name}, du bist dran – such dir eine Frage aus!`);
+          this.notice('reminder', 'Du bist dran – such dir eine Frage aus!', current.name);
+        }
+        remindLater();
+      }, Math.max(0, Math.min(REMINDER_RECHECK_MS, due - Date.now())));
+    };
+    remindLater();
+    let pick: HostEvents['player:pick'] | null | 'page-changed';
+    try {
+      pick = await this.whilePage(
+        (x) => {
+          const shown = x.players.find((p) => p.isTurn)?.name;
+          return x.phase === 'board' && (shown === turnName || (!!staleName && shown === staleName));
+        },
+        (signal) => Promise.race([picked, new Promise<null>((r) => signal.addEventListener('abort', () => r(null), { once: true }))]),
+      );
+    } finally {
+      turn.abort(); // removes the listener (turn over, page changed, game stopped)
+      clearTimeout(timer);
     }
+    if (!pick || pick === 'page-changed' || this.signal.aborted) return; // host acted in the browser / game stopped
     const cell = open.find((c) => c.col === pick.col && c.row === pick.row)!;
     this.rotation = null;
     this.lastPick = { ...cell, player: current.name };

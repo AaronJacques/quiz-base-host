@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ConfigSchema, type Config } from '../src/config.ts';
 import { EventBus } from '../src/core/events.ts';
 import { setLogLevel } from '../src/core/logger.ts';
@@ -17,11 +17,11 @@ import { createJudge } from '../src/judge/index.ts';
 import { UsageMeter } from '../src/llm/client.ts';
 import { TafelquizController } from '../src/modes/tafelquiz/controller.ts';
 import { decodeWav, durationMs, encodeWav, resample, rms, toChannels, type Pcm } from '../src/voice/audio.ts';
-import { confirmReply, extractAnswer, isBuzz, isEcho, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
+import { confirmReply, endAskReply, extractAnswer, isBuzz, isEcho, mentionsCard, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
 import { VoiceBridge } from '../src/discord/voice-bridge.ts';
 import { LoopbackTransport } from '../src/voice/loopback.ts';
 import { createVoiceKit, voiceProblems } from '../src/voice/index.ts';
-import { gameOverLine, questionLine, revealLine, turnLine, verdictLine } from '../src/voice/narration.ts';
+import { END_ASK_LINE, END_KEEP_LINE, gameOverLine, GOODBYE_LINE, questionLine, revealLine, turnLine, verdictLine } from '../src/voice/narration.ts';
 import { cleanTranscript, WhisperServerStt, type SpeechToText } from '../src/voice/stt.ts';
 import { VoiceHost, type Attention } from '../src/voice/voice-host.ts';
 import type { Speaker, Utterance, VoiceTransport } from '../src/voice/transport.ts';
@@ -160,11 +160,19 @@ describe('voice: controller', () => {
 class FakeRoom implements VoiceTransport {
   label = 'fake';
   played: string[] = [];
+  closed = false;
+  /** How long playing one sentence takes (`played` lists it once it is over). */
+  playDelay = 0;
+  /** A sentence whose playback never ends (hanging speech output). */
+  hang = '';
   private handlers: ((u: Utterance) => void)[] = [];
   private closeHandlers: (() => void)[] = [];
   constructor(private texts: Map<number, string>) {}
   async play(pcm: Pcm) {
-    this.played.push(this.texts.get(pcm.samples[0]!) ?? '?');
+    const text = this.texts.get(pcm.samples[0]!) ?? '?';
+    if (text === this.hang) return new Promise<void>(() => {});
+    if (this.playDelay) await new Promise((r) => setTimeout(r, this.playDelay));
+    this.played.push(text);
   }
   stop() {}
   onUtterance(h: (u: Utterance) => void) {
@@ -173,7 +181,9 @@ class FakeRoom implements VoiceTransport {
   onClose(h: () => void) {
     this.closeHandlers.push(h);
   }
-  async close() {}
+  async close() {
+    this.closed = true;
+  }
   /** Discord dropped the connection by itself (kick, network). */
   drop() {
     this.closeHandlers.forEach((h) => h());
@@ -842,7 +852,7 @@ describe('QuizBot voice (live test)', () => {
     const t = voiceSetup();
     await voiceGame(t);
     t.room().speak(annaS, 'Quizmaster, Stopp!');
-    await until(() => t.room().played.includes('Soll ich das Spiel beenden? Sag: Quizmaster, Spiel beenden.'));
+    await until(() => t.room().played.includes('Soll ich das Spiel beenden? Sag Ja oder Nein.'));
     expect(t.room().all()).not.toContain('nicht verstanden');
     expect(t.bot.activeGame?.phase).toBe('running');
     t.room().speak(annaS, 'Quizmaster, Spiel abbrechen');
@@ -894,11 +904,18 @@ describe('QuizBot voice (live test)', () => {
     await until(() => t.bot.activeGame?.turn?.player === 'Ben', 6000);
     await until(() => t.room().all().includes('Ben, du bist dran'));
     expect(t.room().all()).not.toContain('Welche Karte? Sag');
+    // Side talk without a card in it gets no hint at all …
     t.room().speak(benS, 'Ähm, keine Ahnung');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(t.room().all()).not.toContain('Welche Karte? Sag');
+    expect(t.chat()).not.toContain('Welche Karte?');
+    // … a card attempt that does not fit gets it, once per turn.
+    t.room().speak(benS, 'Hund für 250');
     await until(() => t.room().all().includes('Welche Karte? Sag zum Beispiel: Film für 200.'));
-    t.room().speak(benS, 'Hmm, schwierig');
+    t.room().speak(benS, 'Katze für 350');
     await new Promise((r) => setTimeout(r, 300));
     expect(t.room().played.filter((p) => p.startsWith('Welche Karte?'))).toHaveLength(1);
+    expect(t.chat().match(/Welche Karte\?/g)).toHaveLength(1);
     await t.bot.shutdown();
   }, 25000);
 });
@@ -1098,5 +1115,399 @@ describe('voice: fast and precise Whisper model', () => {
       'fast: Ja',
     ]);
     await t.bot.shutdown();
+  }, 20000);
+});
+
+// ───────────────────────────── feedback from a live game on the server ─────────────────────────────
+
+describe('voice: ending the game as the fast model writes it', () => {
+  it('ends on run-together and misheard whole phrases (live game log)', () => {
+    // Literally from the channel: two end the game, "Abbrechen" asks back.
+    for (const s of ['Quizmaster, Quizabrechen', 'Quizmaster, Spielbänden', 'Quizmaster, Spielbeenden'])
+      expect(voiceCommand(stripWakeWord(s, WAKE)!)?.name, s).toBe('ende');
+    expect(voiceCommand(stripWakeWord('Quizmaster, Abbrechen', WAKE)!)?.name).toBe('ende?');
+    for (const s of ['Spiel bänden', 'Quiz abrechen', 'Spielabbrechen', 'Quizbeenden', 'Spiel beenden'])
+      expect(voiceCommand(s)?.name, s).toBe('ende');
+    // Participles may be a question about the state ("Spiel abgebrochen?") – they ask back (review F1).
+    for (const s of ['Spiel beendet', 'Quiz beendet', 'Quiz abgebrochen', 'das Spiel beendet']) expect(voiceCommand(s)?.name, s).toBe('ende?');
+  });
+
+  it('never ends on sentences or on words that only sound similar', () => {
+    for (const s of [
+      'kannst du aufhören zu reden', 'Schlussrunde', 'das Spiel beenden wir später', 'Geschichte 300',
+      'Spiel beginnen', 'Quiz beginnen', 'Spiel bewerten', 'Spiel bestellen', 'Spielstand', 'wann ist Spielende', 'Quiz abgeben',
+      'Spiel starten', 'Spiel weiter', 'neues Spiel', 'Spiel beneiden',
+    ])
+      expect(voiceCommand(s)?.name ?? '', s).not.toMatch(/^ende\??$/);
+  });
+
+  it('a plain "Ja" / "Nein" answers the stop question, a "Ja" at the start of a sentence does not', () => {
+    for (const s of ['Ja', 'Ja.', 'ja bitte', 'Ja, genau!', 'jawohl']) expect(endAskReply(s), s).toBe('yes');
+    for (const s of ['Nein', 'nein, weiter', 'Nee']) expect(endAskReply(s), s).toBe('no');
+    for (const s of ['ja, Geschichte 300', 'ja warte mal', 'Meine Antwort ist ja', 'ja ich glaube schon', '']) expect(endAskReply(s), s).toBeNull();
+  });
+
+  it('tells card attempts from side talk', () => {
+    const cell = (category: string, points: number) => ({ col: 0, row: 0, category, points, answered: false });
+    const grid = [cell('Flaggen', 100), cell('Geschichte', 200), cell('Serien und Filme', 300)];
+    for (const s of ['Hund für 250', 'Flak für', 'Geschicht', 'Serie, äh', 'zweihundertfünfzig']) expect(mentionsCard(s, grid), s).toBe(true);
+    for (const s of ['Ähm, keine Ahnung', 'Juhu, super', 'Hmm, schwierig', 'Was meinst du?', 'ich hol mir kurz was zu trinken']) expect(mentionsCard(s, grid), s).toBe(false);
+  });
+});
+
+describe('voice: reminders', () => {
+  it('speaks only the first reminder of a turn; later ones are chat only', async () => {
+    const { host, room } = bargeInHost();
+    const bus = new EventBus();
+    const bridge = new VoiceBridge(host, { scoresEvery: 0, extraTimeSec: 0, board: () => 'Test' });
+    bridge.attach(bus);
+    const c = { col: 0, row: 0, category: 'Sport', points: 100, answered: false };
+    const turn = (player: string) => ({ player, open: [c], grid: [c], categories: ['Sport'], board: { active: 1, count: 1 } });
+    const reminders = () => room.played.filter((p) => p.includes('du bist noch dran'));
+    bus.emit('host:turn', turn('Anna'));
+    bus.emit('host:notice', { kind: 'reminder', text: '', player: 'Anna' });
+    await until(() => reminders().length === 1);
+    bus.emit('host:turn', turn('Anna')); // the controller re-emits the same turn after a reminder
+    bus.emit('host:notice', { kind: 'reminder', text: '', player: 'Anna' });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(reminders()).toHaveLength(1);
+    bus.emit('host:turn', turn('Ben'));
+    bus.emit('host:notice', { kind: 'reminder', text: '', player: 'Ben' });
+    await until(() => reminders().length === 2);
+    expect(reminders()[1]).toMatch(/^Ben/);
+  });
+
+  it('gives no pick hint when the rule is off', async () => {
+    const t = voiceSetup({ pickHint: false });
+    await voiceGame(t);
+    await until(() => t.room().all().includes('Anna, du bist dran'));
+    await new Promise((r) => setTimeout(r, 100));
+    t.room().speak(annaS, 'Hund für 250');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(t.room().all()).not.toContain('Welche Karte? Sag');
+    await t.bot.shutdown();
+  }, 20000);
+});
+
+describe('QuizBot voice: ending and leaving (live game feedback)', () => {
+  for (const said of ['Quizmaster, Quizabrechen', 'Quizmaster, Spielbänden', 'Quizmaster, Spielbeenden']) {
+    it(`"${said}" ends the game`, async () => {
+      const t = voiceSetup();
+      await voiceGame(t);
+      t.room().speak(annaS, said);
+      await until(() => t.bot.activeGame === null);
+      expect(t.room().all()).not.toContain('nicht verstanden');
+      await t.bot.shutdown();
+    }, 20000);
+  }
+
+  it('"Quizmaster, Abbrechen" asks back; a "Ja" sentence does not count, a plain "Ja" ends', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    t.room().speak(annaS, 'Quizmaster, Abbrechen');
+    await until(() => t.room().played.includes(END_ASK_LINE));
+    expect(t.chat()).toContain('Sag „Ja“');
+    t.room().speak(annaS, 'ja, warte mal');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(t.bot.activeGame?.phase).toBe('running');
+    t.room().speak(annaS, 'Ja');
+    await until(() => t.bot.activeGame === null);
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('a bare "Ja" of the leader counts even when someone else is on turn (F4: attention in the window)', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+    t.room().speak(annaS, 'Meine Antwort ist zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    t.room().speak(annaS, 'Ja');
+    await until(() => t.bot.activeGame?.turn?.player === 'Ben' && !t.bot.activeGame.questionOpen, 8000);
+    t.room().speak(annaS, 'Quizmaster, stopp');
+    await until(() => t.room().played.includes(END_ASK_LINE));
+    t.room().speak(annaS, 'Ja'); // no wake word: only heard because the window lets her through
+    await until(() => t.bot.activeGame === null);
+    await t.bot.shutdown();
+  }, 25000);
+
+  it('"Nein" keeps playing; the stop question wins over an answer waiting for "Ja", which stays open', async () => {
+    const t = voiceSetup({ answerTimeoutSec: 20 });
+    await voiceGame(t);
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+    t.room().speak(annaS, 'Meine Antwort ist zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    t.room().speak(annaS, 'Quizmaster, stopp');
+    await until(() => t.room().played.includes(END_ASK_LINE));
+    t.room().speak(annaS, 'Nein');
+    await until(() => t.room().played.includes(END_KEEP_LINE));
+    expect(t.bot.activeGame?.phase).toBe('running');
+    expect(t.bot.activeGame?.pending?.answer).toBe('zehn'); // neither confirmed nor discarded
+    expect(t.chat()).not.toMatch(/„zehn“ ist (richtig|falsch)/);
+    t.room().speak(annaS, 'Quizmaster, stopp');
+    await until(() => t.room().played.filter((p) => p === END_ASK_LINE).length === 2);
+    t.room().speak(annaS, 'Ja');
+    await until(() => t.bot.activeGame === null);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(t.chat()).not.toMatch(/ist (richtig|falsch)/);
+    expect(t.session().page.log).not.toContain('award Anna 100');
+    await t.bot.shutdown();
+  }, 25000);
+
+  it('only the leader ends the game; someone else gets no stop question', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    t.room().speak(benS, 'Quizmaster, stopp');
+    await until(() => t.chat().includes('🔒'));
+    expect(t.room().played).not.toContain(END_ASK_LINE);
+    t.room().speak(benS, 'Quizmaster, ja');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(t.bot.activeGame?.phase).toBe('running');
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('leaves the voice channel after the game, once the last announcement is spoken', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    const room = t.room();
+    room.playDelay = 60;
+    room.speak(annaS, 'Quizmaster, Spiel beenden');
+    await until(() => room.closed, 8000);
+    const over = room.played.findIndex((p) => p.startsWith('Das Spiel ist vorbei'));
+    expect(over).toBeGreaterThan(-1);
+    expect(room.played.at(-1)).toBe(GOODBYE_LINE);
+    expect(room.played.indexOf(GOODBYE_LINE)).toBeGreaterThan(over);
+    expect(t.chat()).toContain('👋 Voice-Channel verlassen.');
+    await t.bot.shutdown();
+    expect(room.played).not.toContain('Ich muss leider los. Tschüss!'); // gone already – no second goodbye
+  }, 20000);
+
+  it('leaves after a regular end as well', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+    t.room().speak(annaS, 'Meine Antwort ist zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    t.room().speak(annaS, 'Ja');
+    await until(() => t.bot.activeGame?.turn?.player === 'Ben' && !t.bot.activeGame.questionOpen, 8000);
+    t.room().speak(benS, 'Film für zweihundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Ben');
+    t.room().speak(benS, 'Meine Antwort ist neun');
+    await until(() => t.room().played.includes('neun?'));
+    t.room().speak(benS, 'Ja');
+    await until(() => t.room().closed, 10000);
+    expect(t.room().played.at(-1)).toBe(GOODBYE_LINE);
+    await t.bot.shutdown();
+  }, 30000);
+
+  it('stays when a new game starts before it is gone, or when leaveOnGameEnd is off', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    const room = t.room();
+    room.playDelay = 250;
+    await t.write(annaS, '!quiz ende');
+    await until(() => t.bot.activeGame === null);
+    await t.write(annaS, '!quiz neu Test Board');
+    await until(() => room.played.includes(GOODBYE_LINE), 8000);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(room.closed).toBe(false);
+    expect(t.chat()).not.toContain('👋 Voice-Channel verlassen.');
+    await t.bot.shutdown();
+
+    const off = voiceSetup({}, { leaveOnGameEnd: false });
+    await voiceGame(off);
+    await off.write(annaS, '!quiz ende');
+    await until(() => off.bot.activeGame === null);
+    await until(() => off.room().played.some((p) => p.startsWith('Das Spiel ist vorbei')));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(off.room().closed).toBe(false);
+    expect(off.room().played).not.toContain(GOODBYE_LINE);
+    await off.bot.shutdown();
+  }, 30000);
+
+  it('Ctrl+C during a game says one goodbye only', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    await t.bot.shutdown();
+    expect(t.room().played).toContain('Ich muss leider los. Tschüss!');
+    expect(t.room().played).not.toContain(GOODBYE_LINE);
+    expect(t.room().closed).toBe(true);
+  }, 20000);
+
+  it('leaves on command by text and voice; during a game only the leader, and the game goes on in the chat', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    await t.write(benS, '!quiz voice aus');
+    expect(t.chat()).toContain('🔒');
+    expect(t.room().closed).toBe(false);
+    t.room().speak(benS, 'Quizmaster, tschüss');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(t.room().closed).toBe(false);
+    await t.write(annaS, '!quiz voice aus');
+    expect(t.rooms[0]!.closed).toBe(true);
+    expect(t.chat()).toContain('Das Spiel läuft hier im Chat weiter.');
+    expect(t.bot.activeGame?.phase).toBe('running');
+    await t.write(annaS, '!quiz voice');
+    await until(() => t.rooms.length === 2 && t.room().all().includes('Hallo'));
+    t.room().speak(annaS, 'Quizmaster, verlass den Channel');
+    await until(() => t.rooms[1]!.closed);
+    expect(t.bot.activeGame?.phase).toBe('running');
+    await t.write(annaS, '!quiz ende');
+    await until(() => t.bot.activeGame === null);
+    await t.bot.shutdown();
+  }, 25000);
+});
+
+describe('QuizBot voice: review fixes for ending and leaving (F1, F2, F4–F6, F9, F11)', () => {
+  /** Anna (leader) answers the first card, so Ben is on turn and Anna is not. */
+  async function bensTurn(t: ReturnType<typeof voiceSetup>) {
+    await voiceGame(t);
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+    t.room().speak(annaS, 'Meine Antwort ist zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    t.room().speak(annaS, 'Ja');
+    await until(() => t.bot.activeGame?.turn?.player === 'Ben' && !t.bot.activeGame.questionOpen, 8000);
+  }
+  const attention = (t: ReturnType<typeof voiceSetup>, id: string) => (t.bot as unknown as { attention(id: string): string }).attention(id);
+
+  it('"Quizmaster, Spiel abgebrochen?" and "Quizmaster, Spielbanken 100" do not end the game (F1)', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    t.room().speak(annaS, 'Quizmaster, Spielbanken 100');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(t.bot.activeGame?.phase).toBe('running');
+    t.room().speak(annaS, 'Quizmaster, Spiel abgebrochen?');
+    await until(() => t.room().played.includes(END_ASK_LINE));
+    expect(t.bot.activeGame?.phase).toBe('running');
+    t.room().speak(annaS, 'Nein');
+    await until(() => t.room().played.includes(END_KEEP_LINE));
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('"Bitte?" or "Klar?" is no "Ja" – the window stays open, a plain "Ja" still ends (F2)', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    t.room().speak(annaS, 'Quizmaster, stopp');
+    await until(() => t.room().played.includes(END_ASK_LINE));
+    t.room().speak(annaS, 'Bitte?');
+    t.room().speak(annaS, 'Klar?');
+    t.room().speak(annaS, 'Quizmaster, ja?');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(t.bot.activeGame?.phase).toBe('running');
+    expect(t.bot.activeGame?.endAsk).not.toBeNull();
+    t.room().speak(annaS, 'Ja');
+    await until(() => t.bot.activeGame === null);
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('after 20 s the window is closed: "Ja" ends nothing and the leader is not listened to any more (F4)', async () => {
+    const t = voiceSetup();
+    await bensTurn(t);
+    t.room().speak(annaS, 'Quizmaster, stopp');
+    await until(() => t.room().played.includes(END_ASK_LINE));
+    expect(attention(t, annaS.id)).toBe('confirm');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 21_000);
+      expect(attention(t, annaS.id)).toBe('wake');
+      t.room().speak(annaS, 'Quizmaster, ja');
+      await new Promise((r) => setTimeout(r, 400));
+      expect(t.bot.activeGame?.phase).toBe('running');
+    } finally {
+      vi.useRealTimers();
+    }
+    await t.bot.shutdown();
+  }, 25000);
+
+  it('a "Ja" of someone else in the window ends nothing (F4)', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    t.room().speak(annaS, 'Quizmaster, stopp');
+    await until(() => t.room().played.includes(END_ASK_LINE));
+    t.room().speak(benS, 'Ja');
+    t.room().speak(benS, 'Quizmaster, ja');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(t.bot.activeGame?.phase).toBe('running');
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('"Quizmaster, weiter" in the window counts as "Nein" (F11)', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    t.room().speak(annaS, 'Quizmaster, stopp');
+    await until(() => t.room().played.includes(END_ASK_LINE));
+    t.room().speak(annaS, 'Quizmaster, weiter');
+    await until(() => t.room().played.includes(END_KEEP_LINE));
+    expect(t.bot.activeGame?.phase).toBe('running');
+    expect(t.bot.activeGame?.endAsk).toBeNull();
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('leaves after at most 30 s when the goodbye hangs (F4: GOODBYE_MAX_MS)', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    const room = t.room();
+    room.hang = GOODBYE_LINE;
+    const realTimeout = setTimeout; // timers started before faking still need real time
+    const tick = async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+      await new Promise((r) => realTimeout(r, 25));
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      void t.write(annaS, '!quiz ende');
+      for (let i = 0; i < 25; i++) await tick();
+      expect(t.bot.activeGame).toBeNull();
+      expect(room.closed).toBe(false); // still waiting for the goodbye
+      for (let i = 0; i < 10; i++) await tick();
+      expect(room.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('stays while the board menu for the next game is open (F5)', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    const room = t.room();
+    room.playDelay = 150;
+    await t.write(annaS, '!quiz ende');
+    await until(() => t.bot.activeGame === null);
+    await t.write(annaS, '!quiz neu');
+    await until(() => t.chat().includes('welches Quiz'));
+    await until(() => room.played.includes(GOODBYE_LINE), 8000);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(room.closed).toBe(false);
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('during a game only the leader pulls the bot into another voice channel (F6)', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    await t.write(benS, '!quiz voice', { voiceChannelId: 'vc2' });
+    expect(t.chat()).toContain('🔒');
+    expect(t.rooms).toHaveLength(1);
+    expect(t.room().closed).toBe(false);
+    await t.write(annaS, '!quiz voice', { voiceChannelId: 'vc2' });
+    await until(() => t.rooms.length === 2);
+    expect(t.rooms[0]!.closed).toBe(true);
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('Ctrl+C right after the game: the queued goodbye is still said, and only that one (F9)', async () => {
+    const t = voiceSetup();
+    await voiceGame(t);
+    const room = t.room();
+    room.playDelay = 100;
+    await t.write(annaS, '!quiz ende');
+    await until(() => t.bot.activeGame === null);
+    await t.bot.shutdown();
+    expect(room.played).toContain(GOODBYE_LINE);
+    expect(room.played).not.toContain('Ich muss leider los. Tschüss!');
+    expect(room.closed).toBe(true);
   }, 20000);
 });

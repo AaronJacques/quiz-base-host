@@ -1,4 +1,5 @@
-import { levenshtein } from '../judge/normalize.ts';
+import { colognePhonetic, levenshtein, normalize, vowelSkeleton } from '../judge/normalize.ts';
+import type { BoardCell } from '../core/types.ts';
 
 /** Lowercase, no punctuation – the way spoken text is compared. */
 export function speechNorm(text: string): string {
@@ -33,20 +34,129 @@ export function stripWakeWord(text: string, wakeWords: string[]): string | null 
  * Ending the game is the one command that cannot be undone – only whole, unambiguous phrases count
  * ("Spiel beenden", "Spiel abbrechen"), never a word inside a sentence ("kannst du aufhören zu reden", "Schlussrunde").
  */
-const END_RE = /^(?:(?:das |dieses )?(?:spiel|quiz) (?:beenden|abbrechen|stoppen|ende)|(?:beende|stoppe?|stopp) (?:das|dieses) (?:spiel|quiz)|brich (?:das|dieses) (?:spiel|quiz) ab|wir beenden (?:das|dieses) (?:spiel|quiz)|(?:spiel|quiz) ist (?:zu ende|vorbei)|beenden|ende|schluss für heute|lass uns aufhören|wir hören auf)$/;
+const END_RE = /^(?:(?:das |dieses )?(?:spiel|quiz) (?:beenden|abbrechen|stoppen|ende)|(?:beende|stoppe?|stopp) (?:das|dieses) (?:spiel|quiz)|brich (?:das|dieses) (?:spiel|quiz) ab|wir beenden (?:das|dieses) (?:spiel|quiz)|beenden|ende|schluss für heute|lass uns aufhören|wir hören auf)$/;
+/**
+ * Statements about the game, no commands ("Spiel ist vorbei", "bricht das Spiel ab", "das Spiel endet") – often
+ * a question with the "?" lost. They ask back (`ende?`), never end the game by themselves.
+ */
+const END_STATE_RE = /^(?:(?:das |dieses )?(?:spiel|quiz) (?:ist|wird) (?:zu ende|vorbei|aus|beendet|abgebrochen)|(?:das |dieses )?(?:spiel|quiz) endet|(?:bricht|beendet|stoppt) (?:das|dieses) (?:spiel|quiz)(?: ab)?)$/;
 /**
  * Short words that may mean "end the game" – or "stop talking", "cancel that". They never end the game
  * by themselves; the bot asks back (`ende?`).
  */
 const MAYBE_END_RE = /^(?:stop|stopp|halt|abbrechen|abbruch|aufhören|hör auf|schluss)(?: jetzt| sofort)?$/;
 
+/**
+ * The whole phrases that end the game, as the fast Whisper model may write them: run together
+ * ("Spielbeenden"), misheard ("Spielbänden", "Quizabrechen"). Compared by sound (Kölner Phonetik) *and*
+ * vowels, as one word – so a longer sentence never matches. Only the same sound ends the game right away;
+ * one code off ("Spiel bieten", "Quiz finden") and the participles ("Spiel abgebrochen?" – the question
+ * people ask when the bot seems stuck) only lead to the stop question. "stoppen" is left out on purpose:
+ * it sounds too much like "starten".
+ */
+const END_OBJECTS = ['spiel', 'quiz'];
+/**
+ * The vowel sounds one by one – unlike `vowelSkeleton`, a repeated sound across consonants stays:
+ * "Spielbinden" → "i i e" ≠ "Spielbeenden" → "i e e" (the skeleton folds both to "ie").
+ */
+function vowelRuns(s: string): string {
+  const fold: Record<string, string> = { ae: 'e', ee: 'e', ie: 'i', ai: 'ai', ei: 'ai', ey: 'ai', eu: 'oi', aeu: 'oi', oe: 'o', oo: 'o', ue: 'u', y: 'i' };
+  return (normalize(s).replace(/[^a-z]/g, '').match(/[aeiouy]+/g) ?? []).map((r) => fold[r] ?? r).join(' ');
+}
+const sounds = (words: string[]) => words.map((w) => ({ code: colognePhonetic(w), vowels: vowelSkeleton(w), runs: vowelRuns(w) }));
+const END_DIRECT = sounds(END_OBJECTS.flatMap((o) => [`${o}beenden`, `${o}abbrechen`, `beendedas${o}`, `brichdas${o}ab`]));
+const END_PARTICIPLE = sounds(END_OBJECTS.flatMap((o) => [`${o}beendet`, `${o}abgebrochen`]));
+
+/**
+ * A whole "end the game" phrase that `END_RE` misses because Whisper ran it together or misheard it:
+ * 'end' = sounds exactly like one, 'ask' = close (ask back first), null = no. Never with digits.
+ */
+export function endPhrase(text: string): 'end' | 'ask' | null {
+  const s = speechNorm(text).replace(/^(?:das|dieses) /, '');
+  if (!s || /\d/.test(s) || s.split(' ').length > 4) return null;
+  const code = colognePhonetic(collapse(s));
+  const vowels = vowelSkeleton(s);
+  const near = (list: typeof END_DIRECT, d: number) => list.some((e) => e.vowels === vowels && (e.code === code || (d > 0 && e.code.length >= 6 && levenshtein(e.code, code) <= d)));
+  const runs = vowelRuns(s);
+  // The indicative sounds like the imperative ("bricht"/"brich", "beendet"/"beende"): a statement, no command.
+  if (END_DIRECT.some((e) => e.code === code && e.vowels === vowels && e.runs === runs)) return /^\S+t /.test(s) ? 'ask' : 'end';
+  return near(END_DIRECT, 1) || near(END_PARTICIPLE, 1) ? 'ask' : null;
+}
+
+/** Words of the end commands themselves – a category named "Spiele" or "Quiz" does not block "Spiel beenden". */
+const END_WORDS = new Set(['spiel', 'quiz', 'ende', 'beenden', 'abbrechen', 'stopp', 'stop', 'schluss']);
+
+/** The utterance names a category of the board ("Spielbanken", "Geschichte") – then it is a card, never "end". */
+function namesCategory(s: string, categories: string[]): boolean {
+  const cats = new Set(categories.flatMap((c) => normalize(c).split(' ')).filter((w) => w.length >= 4 && !END_WORDS.has(w)));
+  return normalize(s).split(' ').some((w) => cats.has(w));
+}
+
+/**
+ * The reply to "Soll ich das Spiel beenden?" – only a clear reply that is nothing else: "Ja", "Ja bitte",
+ * "Ja genau", "Jawohl", "Nein", "Weiter". Never a question ("Bitte?", "Klar?", "Ja?") or a word that may mean
+ * something else, and never a "Ja" at the start of a longer sentence ("ja, Geschichte 300", "ja warte mal").
+ * `question`: the utterance as heard ended with "?" (lost by normalising after the wake word).
+ */
+export function endAskReply(text: string, question = /\?\s*$/.test(text)): 'yes' | 'no' | null {
+  if (question) return null;
+  const s = speechNorm(text);
+  if (/^(?:ja|ja ja|jawohl|ja genau|ja bitte|ja klar|ja beenden|ja beende es|ja beende das spiel|ja aufhören)$/.test(s)) return 'yes';
+  if (/^(?:nein|nee|nö|nein danke|nein weiter|weiter|weiterspielen|nicht beenden|doch nicht|nein doch nicht)$/.test(s)) return 'no';
+  return null;
+}
+
+/** "die zweite", "Nummer drei", "Kategorie eins" – a column by number. */
+/**
+ * A column by number: "die zweite", "den dritten" (an ordinal after an article, not "das erste Mal"), an ordinal
+ * alone, or "Nummer/Kategorie/Spalte" with a number after it. Not "Ich achte drauf", "Die Kategorie ist schwer".
+ */
+function columnByNumber(words: string[]): boolean {
+  const ordinal = (w?: string) => !!w && w in ORDINALS && /te[nrs]?$/.test(w);
+  const number = (w?: string) => !!w && (w in ORDINALS || /^\d{1,2}$/.test(w));
+  if (words.length === 1 && ordinal(words[0])) return true;
+  return words.some((w, i) =>
+    (ordinal(w) && ['die', 'den', 'das', 'der', 'dem'].includes(words[i - 1] ?? '') && words[i + 1] !== 'mal') ||
+    (['nummer', 'kategorie', 'spalte'].includes(w) && number(words[i + 1])),
+  );
+}
+
+/**
+ * Sounds like a card choice that did not quite work: a short utterance with a point-like number
+ * ("Hund für 250" – a value of the board or a multiple of 50, not a year), a column by number ("die zweite")
+ * or a word close to a category ("Geschicht", "Flak" for "Flaggen"). Everything else is side talk – no
+ * "Welche Karte?". (A board point value or a clear category is parsed as a pick already.)
+ */
+export function mentionsCard(text: string, grid: BoardCell[]): boolean {
+  const words = speechNorm(spokenToDigits(text)).split(' ').filter(Boolean);
+  if (!words.length || words.length > 8) return false;
+  const points = new Set(grid.map((c) => c.points));
+  const pointLike = (n: number) => points.has(n) || (n >= 50 && n <= 2000 && n % 50 === 0);
+  if (words.some((w) => /^\d{2,4}$/.test(w) && pointLike(Number(w)))) return true;
+  if (columnByNumber(words)) return true;
+  const catWords = [...new Set(grid.flatMap((c) => normalize(c.category).split(' ')))].filter((w) => w.length >= 4);
+  // Same beginning, or the word sounds like the start of the category ("Flak" → "Flaggen").
+  const near = (w: string, c: string) => {
+    const code = colognePhonetic(w);
+    return c.startsWith(w.slice(0, 5)) || w.startsWith(c.slice(0, 5)) || (code.length >= 3 && colognePhonetic(c).startsWith(code));
+  };
+  return words.map(normalize).some((w) => w.length >= 4 && catWords.some((c) => near(w, c)));
+}
+
 /** Maps a spoken instruction (after the wake word) to a bot command + args. */
-export function voiceCommand(rest: string): { name: string; args: string[] } | null {
+/**
+ * `question`: the utterance ended with "?" – then ending the game takes the stop question first.
+ * `categories`: of the open board – an utterance with one of them (or with digits) is never "end".
+ */
+export function voiceCommand(rest: string, opts: { question?: boolean; categories?: string[] } = {}): { name: string; args: string[] } | null {
   const s = speechNorm(rest).replace(/^(bitte|mal|kannst du|könntest du)\s+/, '').replace(/\s+bitte$/, '');
   if (!s) return { name: 'hilfe', args: [] };
   let m: RegExpMatchArray | null;
-  if (END_RE.test(s)) return { name: 'ende', args: [] };
-  if (MAYBE_END_RE.test(s)) return { name: 'ende?', args: [] };
+  if (!/\d/.test(s) && !namesCategory(s, opts.categories ?? [])) {
+    const end = END_RE.test(s) ? 'end' : END_STATE_RE.test(s) ? 'ask' : endPhrase(s);
+    if (end) return { name: end === 'end' && !opts.question ? 'ende' : 'ende?', args: [] };
+    if (MAYBE_END_RE.test(s)) return { name: 'ende?', args: [] };
+  }
   if ((m = s.match(/^(?:ein |eine )?(?:neues?|neue|neuen) (?:quiz|spiel|lobby|runde|board)(?: (?:mit|zu|zum thema|über))?(?: (.*))?$/))) return { name: 'neu', args: m[1] ? m[1].split(' ') : [] };
   if ((m = s.match(/^(?:lass uns (.+) spielen|wir spielen (.+))$/))) return { name: 'neu', args: (m[1] ?? m[2])!.split(' ') };
   if ((m = s.match(/^(?:ich bin|mein name ist|ich heiße) (.+)$/))) return { name: 'ich', args: m[1]!.split(' ') };

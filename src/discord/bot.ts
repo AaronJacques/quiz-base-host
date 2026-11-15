@@ -12,8 +12,8 @@ import { mention, type ChatGateway, type ChatMessage } from './gateway.ts';
 import { formatBoard, parsePick, parsePickWithContext } from './pick-parser.ts';
 import type { GuildStore } from './store.ts';
 import { VoiceBridge } from './voice-bridge.ts';
-import { confirmReply, extractAnswer, isBuzz, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
-import { ANSWER_KEYWORD_LINE, END_ASK_LINE, gameOverLine, pickHintLine, START_LINE, startMissingLine, VOICE_HELP } from '../voice/narration.ts';
+import { confirmReply, endAskReply, extractAnswer, isBuzz, mentionsCard, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
+import { ANSWER_KEYWORD_LINE, END_ASK_LINE, END_KEEP_LINE, gameOverLine, GOODBYE_LINE, pickHintLine, START_LINE, startMissingLine, VOICE_HELP } from '../voice/narration.ts';
 import type { LocalStt, SpeechToText } from '../voice/stt.ts';
 import type { Speaker } from '../voice/transport.ts';
 import type { TextToSpeech } from '../voice/tts.ts';
@@ -69,6 +69,11 @@ interface VoiceSession {
   textChannelId: string;
   voiceChannelId: string;
   idleTimer?: NodeJS.Timeout;
+  /**
+   * Leaving after the game: the goodbye is queued, `done` once it is spoken (or after `GOODBYE_MAX_MS`);
+   * `stop` ends the wait (and its time limit) early; `cancelled`: a new game came – stay.
+   */
+  leaving?: { done: Promise<void>; stop: () => void; cancelled: boolean };
   seq: number;
   /** "Sprache gestört" was posted while no game ran (in a game: `hinted`). */
   troubled?: boolean;
@@ -78,6 +83,10 @@ interface VoiceSession {
 const VOICE_TROUBLE_LINE = '⚠️ Sprache gestört – bitte tippen';
 
 const VOICE_IDLE_MS = 20 * 60_000;
+/** How long a plain "Ja" answers "Soll ich das Spiel beenden?". */
+const END_ASK_MS = 20_000;
+/** Leaving after the game waits for the last announcements – at most this long, if speech hangs. */
+const GOODBYE_MAX_MS = 30_000;
 /** A spoken answer still waiting for "Ja" this close to the end of the answer time is submitted as said. */
 const PENDING_SUBMIT_MS = 1500;
 /** Answers that are really "wait a second". */
@@ -132,6 +141,8 @@ interface ActiveGame {
   /** Authors who wrote in the game channel – used for automatic name linking. */
   seen: Map<string, { username: string; displayName: string }>;
   hinted: Set<string>;
+  /** The leader was asked "Soll ich das Spiel beenden?" – until then a plain spoken "Ja"/"Nein" answers it. */
+  endAsk: { userId: string; until: number } | null;
   /** The last ambiguous pick ("Sport" → "Wie viele Punkte?"), so the reply ("300") completes it. */
   pickContext: string | null;
   /** LLM reasons are held back until the reveal – they often contain the solution. */
@@ -171,6 +182,7 @@ export class QuizBot {
   /** Since when each person may be heard by the cloud without a break (`refreshCloud`); absent = not now. */
   private cloudSince = new Map<string, number>();
   private voiceJoining: Promise<void> | null = null;
+  private shuttingDown = false;
   private boards: BoardCreateFlow | null;
 
   constructor(private d: BotDeps) {
@@ -294,6 +306,7 @@ export class QuizBot {
     if (game) return this.reply(msg, `Es läuft schon ein Spiel in <#${game.channelId}>. Die Spielleitung kann es mit \`${this.prefix} ende\` beenden.`);
     if (this.game) return this.reply(msg, BUSY_ELSEWHERE);
     if (this.boards?.creating) return this.reply(msg, '⏳ Ich lege gerade ein Board auf quiz-base an. In einer Minute bin ich frei.');
+    this.stayInVoice(msg.guildId!);
     const text = args.join(' ').trim();
     if (text) return this.chooseBoard(msg, text);
     // No board named → ask instead of picking one.
@@ -363,7 +376,7 @@ export class QuizBot {
       lobbyPlayers: [], canStart: false, startRequested: false, players: [], turn: null, lastTurnSig: '', questionOpen: false,
       awaiting: null, answerDeadline: 0, pending: null, judging: false, operatorNeeded: false, lastQuestion: null, lastAsk: null, lastVerdict: null, buzzerOpen: false, answered: new Set(), closeBuzzer: false,
       seen: new Map([[msg.author.id, { username: msg.author.username, displayName: msg.author.displayName }]]),
-      hinted: new Set(), pickContext: null, reasons: [], lobbyStatusSig: '', offs: [],
+      hinted: new Set(), endAsk: null, pickContext: null, reasons: [], lobbyStatusSig: '', offs: [],
     };
     this.game = g;
     this.attach(g);
@@ -377,7 +390,7 @@ export class QuizBot {
     } catch (e) {
       log.error(`Lobby: ${(e as Error).message}`);
       await this.reply(msg, `⚠️ Lobby konnte nicht erstellt werden: ${(e as Error).message}`, 'Die Lobby konnte ich leider nicht erstellen. Details stehen im Chat.');
-      return this.finish(g);
+      return this.finish(g, { stayInVoice: true });
     }
     g.phase = 'lobby';
     await this.say(msg.channelId, [
@@ -623,6 +636,7 @@ export class QuizBot {
     if (said !== null) {
       const answer = cleanSpokenAnswer(said);
       if (!answer) return; // "Meine Antwort ist … ähm" – keep listening
+      game.endAsk = null; // a new answer: the game goes on
       used?.();
       this.transcript(name, text);
       // Time is (nearly) up – no time left for "Ja": the answer counts as said.
@@ -670,6 +684,7 @@ export class QuizBot {
     game.pickContext = context;
     switch (res.kind) {
       case 'ok':
+        game.endAsk = null; // the game goes on – a later "Ja" belongs to the card, not to "Spiel beenden?"
         game.session.bus.emit('player:pick', { player, col: res.cell.col, row: res.cell.row });
         await this.d.gateway.react(msg, '👍');
         return;
@@ -681,9 +696,11 @@ export class QuizBot {
       case 'invalid':
         return this.reply(msg, `🤔 ${res.hint}`);
       case 'none': {
-        if (!verbose) return;
-        // Spoken: only once per turn, and only after the bot asked for a card – not between a verdict
-        // and the next turn, not while the turn is being announced.
+        if (!verbose || !game.session.rules.pickHint) return;
+        // Spoken: only once per turn, only after the bot asked for a card – not between a verdict
+        // and the next turn, not while the turn is being announced – and only for what sounds like a card,
+        // never for side talk.
+        if (msg.viaVoice && !mentionsCard(text, game.turn!.grid)) return;
         const once = `pick-hint:${game.turn!.player}:${game.turn!.open.length}`;
         if (game.hinted.has(once) || !this.voice?.bridge.turnAnnounced) return;
         game.hinted.add(once);
@@ -980,7 +997,8 @@ export class QuizBot {
     return list.map((t, i) => `\`${i + 1}\` ${t}`);
   }
 
-  private async finish(g: ActiveGame): Promise<void> {
+  /** `stayInVoice`: the lobby could not even be created – the players may simply try again. */
+  private async finish(g: ActiveGame, opts: { stayInVoice?: boolean } = {}): Promise<void> {
     if (this.game !== g) return;
     this.game = null;
     this.refreshCloud();
@@ -994,6 +1012,7 @@ export class QuizBot {
     if (this.voice?.guildId === g.guildId) {
       this.voice.bridge.detach();
       this.voice.host.latencySummary(); // ⏱ bilanz of this game – also when it broke off
+      if (!opts.stayInVoice && !this.shuttingDown && this.d.config.voice.leaveOnGameEnd) this.leaveAfterGame(this.voice);
     }
     this.touchVoice();
     await g.session.close().catch(() => {});
@@ -1037,6 +1056,7 @@ export class QuizBot {
   }
 
   async shutdown(): Promise<void> {
+    this.shuttingDown = true; // one goodbye only ("Ich muss leider los"), not the one after the game as well
     const g = this.game; // the game may already be finished (and this.game null) once endGame() returns
     if (g) {
       await this.say(g.channelId, '👋 Der Quiz-Host fährt herunter, das Spiel wird beendet.');
@@ -1073,10 +1093,17 @@ export class QuizBot {
     if (this.game && this.game.guildId !== msg.guildId) return this.reply(msg, BUSY_ELSEWHERE);
     if (/^(aus|off|stop|raus|leave|verlassen)$/i.test(args[0] ?? '')) {
       if (!this.voice || this.voice.guildId !== msg.guildId) return this.reply(msg, 'Ich bin in keinem Voice-Channel.');
-      return this.leaveVoice(msg.channelId, 'Okay, ich gehe. Bis zum nächsten Quiz!');
+      // During a game only the leader sends the bot out; the game goes on in the chat.
+      const g = this.voiceGame();
+      if (g && !this.isLeader(msg, g)) return this.notLeader(msg, 'Während eines Spiels schickt mich nur die Spielleitung aus dem Voice-Channel.');
+      return this.leaveVoice(msg.channelId, 'Okay, ich gehe. Bis zum nächsten Quiz!', g ? ' Das Spiel läuft hier im Chat weiter.' : '');
     }
     if (!this.voiceReady) return this.reply(msg, '🔇 Die Sprachsteuerung ist auf diesem Rechner nicht eingerichtet: `npx qbhost voice-setup` (siehe docs/VOICE.md).');
     if (!msg.voiceChannelId) return this.reply(msg, '🎧 Geh zuerst in einen Voice-Channel, dann komme ich dazu.');
+    // Moving the bot away from the game's voice channel is the leader's call, like sending it out.
+    const g = this.voiceGame();
+    if (g && this.voice && this.voice.voiceChannelId !== msg.voiceChannelId && !this.isLeader(msg, g))
+      return this.notLeader(msg, 'Während eines Spiels holt mich nur die Spielleitung in einen anderen Voice-Channel.');
     try {
       await this.joinVoice(msg.guildId!, msg.voiceChannelId, msg.channelId);
     } catch (e) {
@@ -1115,6 +1142,7 @@ export class QuizBot {
           if (v?.host !== host) return;
           const g = this.voiceGame();
           clearTimeout(v.idleTimer);
+          v.leaving?.stop();
           v.bridge.detach();
           this.voice = null;
           if (g) this.queue(g.channelId, `🔇 Die Voice-Verbindung ist weg. \`${this.prefix} voice\` holt mich zurück.`);
@@ -1154,15 +1182,48 @@ export class QuizBot {
     }
   }
 
-  private async leaveVoice(textChannelId: string | null, goodbye?: string): Promise<void> {
+  private async leaveVoice(textChannelId: string | null, goodbye?: string, note = ''): Promise<void> {
     const v = this.voice;
     if (!v) return;
     this.voice = null;
     clearTimeout(v.idleTimer);
+    const leaving = v.leaving;
+    v.leaving = undefined;
     v.bridge.detach();
-    if (goodbye) await v.host.say(goodbye).catch(() => {});
+    // The goodbye after the game is queued already: let it finish (time-limited) instead of saying a second one.
+    if (goodbye) await (leaving ? leaving.done : v.host.say(goodbye)).catch(() => {});
+    leaving?.stop();
     await v.host.close().catch(() => {});
-    if (textChannelId) await this.say(textChannelId, '👋 Voice-Channel verlassen.');
+    if (textChannelId) await this.say(textChannelId, `👋 Voice-Channel verlassen.${note}`);
+  }
+
+  /**
+   * After the game: a short goodbye behind the last announcements (final scores), then out of the channel.
+   * Runs in the background – closing the game does not wait for it. Stays if a new game starts on this
+   * server meanwhile; leaves anyway after `GOODBYE_MAX_MS` if speech hangs.
+   */
+  private leaveAfterGame(v: VoiceSession): void {
+    if (v.leaving) return;
+    let stop = () => {};
+    const stopped = new Promise<void>((r) => (stop = r));
+    const timer = setTimeout(stop, GOODBYE_MAX_MS);
+    const done = Promise.race([v.host.say(GOODBYE_LINE), stopped]).finally(() => clearTimeout(timer));
+    const leaving = { done, stop, cancelled: false };
+    v.leaving = leaving;
+    void done
+      .then(() => {
+        if (this.voice !== v || v.leaving !== leaving) return; // left, moved or replaced meanwhile
+        v.leaving = undefined;
+        if (leaving.cancelled || this.game?.guildId === v.guildId) return; // a new game (or its menu) here – stay
+        return this.leaveVoice(v.textChannelId);
+      })
+      .catch((e) => log.warn(`Voice verlassen: ${(e as Error).message}`));
+  }
+
+  /** `!quiz neu` on this server while the bot is about to leave after a game: it stays (menu, lobby, a failed lobby). */
+  private stayInVoice(guildId: string): void {
+    const v = this.voice;
+    if (v?.guildId === guildId && v.leaving) v.leaving.cancelled = true;
   }
 
   /** Leaves an idle voice channel after a while without a game or speech. */
@@ -1197,6 +1258,13 @@ export class QuizBot {
    * else only "Quizmaster, …" at the start of an utterance gets through.
    */
   private attention(userId: string): Attention {
+    const a = this.turnAttention(userId);
+    // Asked "Soll ich das Spiel beenden?": a plain "Ja" must get through (fast model, local like any confirmation).
+    const ask = this.voiceGame()?.endAsk;
+    return a === 'wake' && ask?.userId === userId && Date.now() <= ask.until ? 'confirm' : a;
+  }
+
+  private turnAttention(userId: string): Attention {
     const g = this.voiceGame();
     if (!g) return this.voice && this.menuWaitsFor(userId, this.voiceText(this.voice)) ? 'full' : 'wake';
     if (g.phase !== 'running') return 'wake';
@@ -1297,14 +1365,37 @@ export class QuizBot {
       this.queue(msg.channelId, `-# 🎙️ ${speaker.displayName}: „${text}“`);
     };
 
-    // 1) "Quizmaster, …" commands.
     const rest = stripWakeWord(text, this.d.config.voice.wakeWords);
+    // Normalising after the wake word drops the "?" – a question never ends the game by itself.
+    const question = /\?\s*$/.test(text.trim());
+
+    // 0) The reply to "Soll ich das Spiel beenden?": a plain "Ja"/"Nein" (also "Quizmaster, ja") from who was asked.
+    // It is the newer question, so it wins over a spoken answer waiting for "Ja" – that one stays open.
+    if (g?.endAsk) {
+      if (Date.now() > g.endAsk.until) g.endAsk = null;
+      else if (g.endAsk.userId === speaker.id) {
+        const reply = endAskReply(rest ?? text, question);
+        if (reply) {
+          transcript();
+          g.endAsk = null;
+          if (reply === 'yes') return this.cmdEnd(msg, g);
+          return this.reply(msg, '▶️ Okay, es geht weiter.', END_KEEP_LINE);
+        }
+      }
+    }
+
+    // 1) "Quizmaster, …" commands.
     if (rest !== null) {
       transcript();
-      const cmd = voiceCommand(rest);
+      const cmd = voiceCommand(rest, { question, categories: g?.turn?.categories });
       if (!cmd) return void this.speak('Das habe ich nicht verstanden. Sag: Quizmaster, Hilfe.');
       // "Quizmaster, stopp" may mean "stop talking" – ending the game takes the whole phrase.
-      if (cmd.name === 'ende?') return g ? this.reply(msg, `🛑 Spiel beenden? Sag „Quizmaster, Spiel beenden“ oder schreib \`${this.prefix} ende\`.`, END_ASK_LINE) : this.reply(msg, 'Gerade läuft kein Spiel.');
+      if (cmd.name === 'ende?') {
+        if (!g) return this.reply(msg, 'Gerade läuft kein Spiel.');
+        if (!this.isLeader(msg, g)) return this.notLeader(msg);
+        g.endAsk = { userId: speaker.id, until: Date.now() + END_ASK_MS };
+        return this.reply(msg, `🛑 Spiel beenden? Sag „Ja“ (oder „Quizmaster, Spiel beenden“), „Nein“ spielt weiter – oder schreib \`${this.prefix} ende\`.`, END_ASK_LINE);
+      }
       if (cmd.name === 'wiederholen') return v.bridge.repeat();
       if (cmd.name === 'brett' && g?.turn) return v.bridge.freeCards();
       if (cmd.name === 'stand' && g) return v.bridge.scores();

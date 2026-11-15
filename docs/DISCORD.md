@@ -99,10 +99,13 @@ Wenn der Bot dich fragt („✍️ @Anna, deine Antwort?“), ist deine **nächs
 !quiz regel buzzerminus 0         → falsche Buzzer-Antwort ohne Abzug
 !quiz regel buzzer aus            → kein Buzzer nach falscher Antwort
 !quiz regel zeit 30               → 30 s Antwortzeit (buzzerzeit, buzzerantwortzeit analog)
+!quiz regel erinnerung 120        → erste Erinnerung „du bist dran“ nach 120 s (Standard 90, „aus“ = keine)
+!quiz regel erinnerungstakt aus   → nur eine Erinnerung pro Zug (Standard: weitere alle 300 s, nur im Chat)
+!quiz regel kartenhinweis aus     → kein „Welche Karte?“ bei gesprochener Kartenwahl
 !quiz regeln reset                → Standard (quiz-base-Klassik: +100 % / −50 %)
 ```
 
-Werte: `50%`, `0.5`, `1/2`, `halb`, `2x`, `nichts`. Regeln gelten pro Server und bleiben gespeichert. Während eines Spiels darf nur die Spielleitung sie ändern; sie gelten ab der nächsten Frage. `regeln reset` setzt nur diese Punkte- und Zeitregeln zurück – Autostart und die Sprach-Zusatzzeit bleiben, wie der Bot sie für das Spiel gesetzt hat.
+Werte: `50%`, `0.5`, `1/2`, `halb`, `2x`, `nichts`. Regeln gelten pro Server und bleiben gespeichert. Während eines Spiels darf nur die Spielleitung sie ändern; sie gelten ab der nächsten Frage, die Erinnerungszeiten (`erinnerung`, `erinnerungstakt`) auch im laufenden Zug nach spätestens 30 s. `regeln reset` setzt nur diese Punkte- und Zeitregeln zurück – Autostart und die Sprach-Zusatzzeit bleiben, wie der Bot sie für das Spiel gesetzt hat.
 
 ### Spielleitung
 
@@ -166,7 +169,7 @@ Wie gut die Fragen werden: Claude hält sich an feste Regeln (eine eindeutige, k
 
 ## Sprache
 
-Der Bot kann auch im Voice-Channel moderieren und zuhören: **[VOICE.md](VOICE.md)**.
+Der Bot kann auch im Voice-Channel moderieren und zuhören: **[VOICE.md](VOICE.md)**. `!quiz voice` holt ihn in deinen Voice-Channel, `!quiz voice aus` (oder „Quizmaster, tschüss“) schickt ihn hinaus – während eines Spiels nur die Spielleitung, das Spiel läuft dann im Chat weiter. In einen anderen Voice-Channel holt ihn während eines Spiels ebenfalls nur die Spielleitung. Nach Spielende verabschiedet er sich und geht von selbst (`voice.leaveOnGameEnd`).
 
 ## Grenzen
 

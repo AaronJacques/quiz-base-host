@@ -39,6 +39,24 @@ describe('rule parsing', () => {
     expect(applyRule(g, findRule('zeit')!, '2')).toMatch(/Sekunden/);
     expect(applyRule(g, findRule('plus')!, 'viel')).toMatch(/Faktor/);
   });
+
+  it('pick reminders and the pick hint: defaults, seconds, "aus"', () => {
+    const g = base();
+    expect([g.pickReminderSec, g.pickReminderRepeatSec, g.pickHint]).toEqual([90, 300, true]);
+    expect(formatRuleValue(g, findRule('erinnerung')!)).toBe('90 s');
+    expect(applyRule(g, findRule('erinnerung')!, 'aus')).toBeNull();
+    expect(g.pickReminderSec).toBe(0);
+    expect(formatRuleValue(g, findRule('erinnerung')!)).toBe('aus');
+    expect(applyRule(g, findRule('erinnerungstakt')!, '0')).toBeNull();
+    expect(g.pickReminderRepeatSec).toBe(0);
+    expect(applyRule(g, findRule('erinnerungstakt')!, '120')).toBeNull();
+    expect(g.pickReminderRepeatSec).toBe(120);
+    expect(applyRule(g, findRule('kartenhinweis')!, 'aus')).toBeNull();
+    expect(g.pickHint).toBe(false);
+    expect(applyRule(g, findRule('erinnerung')!, '2')).toMatch(/oder "aus"/);
+    // Answer times cannot be switched off.
+    expect(applyRule(g, findRule('zeit')!, 'aus')).toMatch(/Sekunden/);
+  });
 });
 
 describe('config', () => {

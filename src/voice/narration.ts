@@ -14,8 +14,14 @@ export const BUZZER_OPEN_LINE = 'Jetzt die anderen! Wer es weiß, ruft: Hier!';
 /** Said once at the start – spoken answers need the keyword and are confirmed. */
 export const ANSWER_HOW_LINE = 'Antwortet immer mit: Meine Antwort ist, und dann eure Antwort. Ich wiederhole sie kurz, ihr bestätigt mit Ja.';
 
-/** After a short "Quizmaster, stopp" / "abbrechen" – ending the game needs the whole phrase. */
-export const END_ASK_LINE = 'Soll ich das Spiel beenden? Sag: Quizmaster, Spiel beenden.';
+/** After a short "Quizmaster, stopp" / "abbrechen" – a plain "Ja" (or the whole phrase) ends the game. */
+export const END_ASK_LINE = 'Soll ich das Spiel beenden? Sag Ja oder Nein.';
+
+/** "Nein" to `END_ASK_LINE`. */
+export const END_KEEP_LINE = 'Okay, wir spielen weiter.';
+
+/** Said after the final scores, right before the bot leaves the voice channel by itself. */
+export const GOODBYE_LINE = 'Tschüss, bis zum nächsten Quiz!';
 
 /** Right after "Quizmaster, los" – starting on quiz-base takes a few seconds. */
 export const START_LINE = 'Okay, wir starten!';
@@ -178,6 +184,8 @@ export const FIXED_LINES: readonly string[] = [
   'Hallo! Ich bin euer Quizmaster und höre ab jetzt zu.',
   'Hallo! Ich bin euer Quizmaster und höre ab jetzt zu. Sagt: Quizmaster, neues Quiz, und den Namen des Quiz.',
   END_ASK_LINE,
+  END_KEEP_LINE,
+  GOODBYE_LINE,
   'Das habe ich nicht verstanden. Sag: Quizmaster, Hilfe.',
   'Gerade gibt es nichts zu wiederholen.',
   'Gerade ist kein Brett offen.',

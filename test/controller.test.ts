@@ -443,3 +443,189 @@ describe('TafelquizController – letter answer on the last multiple-choice ques
     expect(r.over).toEqual([{ name: 'Aaron', score: -600 }]);
   }, 10000);
 });
+
+describe('TafelquizController: pick reminders', () => {
+  /** Runs a game on fake time; `step` is called every 5 s (seconds since start), `react` once with the bus. */
+  async function reminders(
+    game: Record<string, unknown>,
+    untilSec: number,
+    opts: { players?: string[]; react?: (bus: EventBus) => void; step?: (sec: number, rules: Record<string, unknown>) => void } = {},
+  ) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbhost-'));
+      const config = ConfigSchema.parse({
+        game: { autoStart: true, minPlayers: 1, revealPauseSec: 0, answerTimeoutSec: 1, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, ...game },
+        judge: { cacheFile: path.join(tmp, 'cache.json') },
+        llm: { provider: 'none' },
+      });
+      const bus = new EventBus();
+      const page = new FakeTafelquizPage(opts.players ?? ['Anna', 'Ben'], [
+        [{ category: 'Sport', points: 100, text: 'Wie viele Pins beim Bowling?', note: '10' }],
+        [{ category: 'Film', points: 200, text: 'Wie viele Episoden hat die Skywalker-Saga?', note: '9' }],
+      ]);
+      const controller = new TafelquizController({ page, bus, judge: createJudge(config, bus, null, new UsageMeter()), game: config.game, pollMs: 20 });
+      const start = Date.now();
+      const at: number[] = [];
+      bus.on('host:notice', (n) => n.kind === 'reminder' && at.push(Math.round((Date.now() - start) / 1000)));
+      opts.react?.(bus);
+      const ac = new AbortController();
+      const run = controller.run(ac.signal);
+      for (let t = 0; t < untilSec; t += 5) {
+        opts.step?.(t, config.game as unknown as Record<string, unknown>);
+        await vi.advanceTimersByTimeAsync(5000);
+      }
+      ac.abort();
+      await vi.advanceTimersByTimeAsync(1000);
+      await run;
+      return at;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it('reminds first after 90 s, then every 5 minutes', async () => {
+    const at = await reminders({}, 700);
+    expect(at).toHaveLength(3);
+    expect(at[0]).toBeGreaterThanOrEqual(90);
+    expect(at[0]).toBeLessThan(95);
+    expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(300);
+    expect(at[1]! - at[0]!).toBeLessThan(305);
+    expect(at[2]! - at[1]!).toBeGreaterThanOrEqual(300);
+  }, 30000);
+
+  it('"aus": no reminder at all, or only the first one', async () => {
+    expect(await reminders({ pickReminderSec: 0 }, 700)).toEqual([]);
+    const once = await reminders({ pickReminderRepeatSec: 0 }, 700);
+    expect(once).toHaveLength(1);
+  }, 30000);
+
+  it('a new turn of the same player starts over at 90 s, not at the 5-minute pace', async () => {
+    let picked = 0;
+    const at = await reminders({}, 300, {
+      players: ['Anna'],
+      react: (bus) => {
+        // After the first reminder Anna picks; she answers right and is on turn again.
+        bus.on('host:notice', (n) => n.kind === 'reminder' && !picked++ && setTimeout(() => bus.emit('player:pick', { player: 'Anna', col: 0, row: 0 }), 1000));
+        bus.on('host:await-answer', ({ player }) => setTimeout(() => bus.emit('player:answer', { player, answer: 'zehn' }), 100));
+      },
+    });
+    expect(at).toHaveLength(2);
+    expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(90);
+    expect(at[1]! - at[0]!).toBeLessThan(110); // the second turn's first reminder, not 300 s
+  }, 30000);
+
+  it('a rule change during the turn counts within 30 s – also from "aus" and to "aus" (F8)', async () => {
+    // "aus" at the start, 60 s from second 100 on: the reminder comes by 130 s (turn start + 60 s is past).
+    const on = await reminders({ pickReminderSec: 0 }, 200, { step: (t, r) => t === 100 && (r.pickReminderSec = 60) });
+    expect(on[0]).toBeGreaterThanOrEqual(100);
+    expect(on[0]).toBeLessThanOrEqual(135);
+    // 90 s at the start, "aus" from second 50 on: no reminder at all.
+    expect(await reminders({}, 400, { step: (t, r) => t === 50 && (r.pickReminderSec = 0) })).toEqual([]);
+  }, 30000);
+});
+
+
+describe('TafelquizController: no pick is lost during a turn (review F12)', () => {
+  const picks = (bus: EventBus) => (bus as unknown as { emitter: { listenerCount(e: string): number } }).emitter.listenerCount('player:pick');
+
+  /**
+   * Plays one turn on fake time with a slow page (`state()` 300 ms, pollMs 500 like the default) and picks at
+   * second `at` (twice, if `twice`). Returns how often a question was opened and the pick listeners left.
+   */
+  async function pickAt(at: number, opts: { twice?: boolean; game?: Record<string, unknown> } = {}) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbgap-'));
+      const config = ConfigSchema.parse({
+        game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, answerTimeoutSec: 5, ...opts.game },
+        judge: { cacheFile: path.join(tmp, 'c.json') },
+        llm: { provider: 'none' },
+      });
+      const bus = new EventBus();
+      const page = new FakeTafelquizPage(['Anna', 'Ben'], [
+        [{ category: 'Sport', points: 100, text: 'Pins?', note: '10' }],
+        [{ category: 'Film', points: 200, text: 'Planet?', note: 'Tatooine' }],
+      ]);
+      const state = page.state.bind(page);
+      (page as unknown as { state: () => ReturnType<typeof state> }).state = async () => {
+        await new Promise((r) => setTimeout(r, 300)); // like Playwright: reading the page takes a while
+        return state();
+      };
+      const controller = new TafelquizController({ page, bus, judge: createJudge(config, bus, null, new UsageMeter()), game: config.game, pollMs: 500 });
+      let turn: { player: string; open: { col: number; row: number }[] } | null = null;
+      let turnAt = 0;
+      let questions = 0;
+      bus.on('host:turn', (t) => {
+        if (!turn) (turn = t), (turnAt = Date.now());
+      });
+      bus.on('host:question', () => questions++);
+      const ac = new AbortController();
+      const run = controller.run(ac.signal);
+      while (!turn) await vi.advanceTimersByTimeAsync(50);
+      const listenersInTurn = picks(bus);
+      await vi.advanceTimersByTimeAsync(at * 1000 - (Date.now() - turnAt));
+      const t = turn as { player: string; open: { col: number; row: number }[] };
+      bus.emit('player:pick', { player: t.player, col: t.open[0]!.col, row: t.open[0]!.row });
+      if (opts.twice) bus.emit('player:pick', { player: t.player, col: t.open[0]!.col, row: t.open[0]!.row });
+      await vi.advanceTimersByTimeAsync(3000);
+      const opened = page.log.filter((l) => l.startsWith('open')).length;
+      const afterTurn = picks(bus); // the question is open: nobody listens for picks
+      ac.abort();
+      await vi.advanceTimersByTimeAsync(3000);
+      await run.catch(() => {});
+      return { questions, opened, listenersInTurn, afterTurn, afterStop: picks(bus) };
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  // Around the old 30 s re-check, the first reminder (90 s), the repeat (90 + 300 s) and the re-checks in between.
+  for (const at of [0.01, 10, 29.95, 30, 30.05, 30.2, 30.6, 60.3, 89.95, 90, 90.05, 90.6, 120.2, 389.95, 390, 390.05, 390.6]) {
+    it(`a pick at ${at} s is taken exactly once`, async () => {
+      const r = await pickAt(at);
+      expect(r.questions).toBe(1);
+      expect(r.opened).toBe(1);
+      expect(r.listenersInTurn).toBe(1);
+      expect(r.afterTurn).toBe(0);
+      expect(r.afterStop).toBe(0);
+    }, 30000);
+  }
+
+  it('the same pick twice opens one card; with reminders off the turn still takes it', async () => {
+    const twice = await pickAt(45, { twice: true });
+    expect(twice.questions).toBe(1);
+    expect(twice.opened).toBe(1);
+    const off = await pickAt(400, { game: { pickReminderSec: 0 } });
+    expect(off.questions).toBe(1);
+  }, 30000);
+
+  it('leaves no pick listener and no reminder behind when the game stops or ends during the turn', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      for (const how of ['stop', 'end'] as const) {
+        const { bus, page, controller } = setup({ autoStart: true });
+        const reminders: number[] = [];
+        bus.on('host:notice', (n) => n.kind === 'reminder' && reminders.push(Date.now()));
+        let turn = false;
+        bus.on('host:turn', () => (turn = true));
+        const ac = new AbortController();
+        const run = controller.run(ac.signal);
+        while (!turn) await vi.advanceTimersByTimeAsync(50);
+        expect(picks(bus)).toBe(1);
+        await vi.advanceTimersByTimeAsync(30_000);
+        if (how === 'stop') ac.abort();
+        else void page.endGame(); // quiz-base ended it (the page leaves the board)
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(picks(bus)).toBe(0);
+        ac.abort();
+        await vi.advanceTimersByTimeAsync(1000);
+        await run;
+        await vi.advanceTimersByTimeAsync(600_000);
+        expect(reminders, how).toEqual([]);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30000);
+});

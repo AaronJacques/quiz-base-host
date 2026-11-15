@@ -103,7 +103,8 @@ function rig(players: string[]) {
     judge: { cacheFile: path.join(dir, 'cache.json'), strategy: 'fuzzy' },
     llm: { provider: 'none' },
     discord: { dataDir: dir, autoStart: false },
-    voice: { dir, ignoreWhileSpeaking: false, stt: 'deepgram', whisperFastModel: 'models/ggml-base-q5_1.bin' },
+    // leaveOnGameEnd off: these tests check who the cloud hears after the game too, in the same room.
+    voice: { dir, ignoreWhileSpeaking: false, stt: 'deepgram', whisperFastModel: 'models/ggml-base-q5_1.bin', leaveOnGameEnd: false },
   });
   const texts = new Map<number, string>();
   const room = new Room(texts);
@@ -396,6 +397,32 @@ describe('Review T2+T3 F1/F2/F8: phase × speaker role → local or cloud (whole
       expect(r.b.cloudAllowed(BEN.id, Date.now() - 100)).toBe(true);
     } finally {
       vi.useRealTimers();
+      await r.bot.shutdown();
+    }
+  }, 30000);
+});
+
+describe('Voice feedback (review of 3098cb2): the stop question gives no cloud permission', () => {
+  it('the leader in the "Ja" window is listened to closely, but locally – her "Ja" is heard on this machine', async () => {
+    const r = rig(['Ben', 'Anna']); // Ben is on turn first; Anna (who types, so the leader) is not
+    const g = () => r.bot.activeGame as unknown as { turn: { player: string } | null; questionOpen: boolean; endAsk: unknown } | null;
+    try {
+      await r.type('!quiz voice');
+      await until(() => r.room.played.some((t) => t.includes('Quizmaster')));
+      await r.type('!quiz neu Test Board');
+      await until(() => !!r.bot.activeGame);
+      await r.type('!quiz los');
+      await until(() => !!g()?.turn && !g()!.questionOpen);
+      expect(g()!.turn!.player).toBe('Ben');
+      r.room.speak(ANNA, 'Quizmaster, stopp'); // local wake check
+      await until(() => !!g()?.endAsk);
+      await settle();
+      expect(r.b.attention(ANNA.id)).toBe('confirm'); // listened to closely because of the window …
+      expect(r.b.cloudAllowed(ANNA.id, Date.now() - 100)).toBe(false); // … but never by the cloud
+      expect(await r.heardBy(ANNA, 'Ja')).toBe('lokal');
+      await until(() => !r.bot.activeGame); // and the local "Ja" ended the game
+      expect(r.cloud).not.toContain('Ja');
+    } finally {
       await r.bot.shutdown();
     }
   }, 30000);
