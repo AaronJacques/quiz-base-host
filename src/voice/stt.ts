@@ -8,12 +8,56 @@ import { killOnExit } from './children.ts';
 
 const log = createLogger('stt');
 
+export interface SttOptions {
+  /** Aborted when the caller gives up (cloud timeout): stop the request, its result is not used any more. */
+  signal?: AbortSignal;
+  /**
+   * Measurement only (`⏱ … rueckfall=ja`): another engine heard this utterance instead of the one asked.
+   * `tried` = the first engine ran and failed (false: it was skipped, e.g. paused after errors). Never throws.
+   */
+  onFallback?: (engine: string, tried: boolean) => void;
+}
+
 export interface SpeechToText {
   /** `prompt` = vocabulary hints (categories, names). Never put the solution in there. */
-  transcribe(pcm: Pcm, prompt?: string): Promise<string>;
+  transcribe(pcm: Pcm, prompt?: string, opts?: SttOptions): Promise<string>;
+  /** Gets the engine ready (load the model, open a connection) so the first utterance is not delayed. */
+  warmup?(): Promise<void>;
   close(): Promise<void>;
   /** Engine and model for `⏱` lines, e.g. `whisper:large-v3-turbo-q5_0`. */
   readonly engine?: string;
+  /** The audio leaves this machine (a cloud provider, or a route that may use one). Local engines leave it out. */
+  readonly cloud?: boolean;
+}
+
+/**
+ * An engine that never sends audio away. Where only local recognition is allowed (`VoiceHostDeps.localStt`,
+ * `SttRoutes.localStt`), the type rules out a cloud engine: `cloud: true` does not compile there.
+ */
+export type LocalStt = SpeechToText & { readonly cloud?: false };
+
+/** Does this engine (maybe) send audio to a cloud provider? */
+export function isCloud(stt: SpeechToText): boolean {
+  return stt.cloud === true;
+}
+
+/**
+ * The vocabulary prompt (`QuizBot.voicePrompt()`, comma-separated) as single terms for engines that take a
+ * list (Deepgram `keyterm`): trimmed, without empty or duplicate entries (case ignored), at most `max`.
+ * Only splits – what is in the prompt (never the solution) is decided by the bot alone.
+ */
+export function promptTerms(prompt: string, max = 50): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of prompt.split(',')) {
+    const term = raw.replace(/\s+/g, ' ').trim();
+    const k = term.toLowerCase();
+    if (!term || seen.has(k)) continue;
+    seen.add(k);
+    out.push(term);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 /**
@@ -160,22 +204,26 @@ export class WhisperServerStt implements SpeechToText {
     }
   }
 
-  async transcribe(pcm: Pcm, prompt = ''): Promise<string> {
+  warmup(): Promise<void> {
+    return this.start();
+  }
+
+  async transcribe(pcm: Pcm, prompt = '', opts: SttOptions = {}): Promise<string> {
     try {
-      return await this.infer(pcm, prompt);
+      return await this.infer(pcm, prompt, opts.signal);
     } catch (e) {
-      if (!isConnectionError(e)) throw e;
+      if (!isConnectionError(e) || opts.signal?.aborted) throw e;
       // The server is gone (crashed, killed, not ours any more): start it again and retry once.
       log.warn(`whisper-server nicht erreichbar (${(e as Error).message}) – starte neu`);
       const stale = this.proc;
       this.proc = null; // its exit must not reset the new start
       this.ready = null;
       stale?.kill();
-      return this.infer(pcm, prompt);
+      return this.infer(pcm, prompt, opts.signal);
     }
   }
 
-  private async infer(pcm: Pcm, prompt: string): Promise<string> {
+  private async infer(pcm: Pcm, prompt: string, signal?: AbortSignal): Promise<string> {
     await this.start();
     const wav = encodeWav(resample(toMono(pcm), 16000));
     const form = new FormData();
@@ -185,7 +233,7 @@ export class WhisperServerStt implements SpeechToText {
     form.set('temperature', '0');
     if (prompt) form.set('prompt', prompt);
     const t0 = Date.now();
-    const res = await fetch(`${this.url}/inference`, { method: 'POST', body: form, signal: AbortSignal.timeout(30_000) });
+    const res = await fetch(`${this.url}/inference`, { method: 'POST', body: form, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) });
     if (!res.ok) throw new Error(`whisper-server ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const raw = String(((await res.json()) as { text?: string }).text ?? '');
     const text = cleanTranscript(raw);

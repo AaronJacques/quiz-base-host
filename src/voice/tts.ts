@@ -37,6 +37,25 @@ export interface TextToSpeech {
   hold?(): () => void;
 }
 
+/**
+ * How long one synthesis may take before it is given up: 10 s + 60 ms per character. Why: Piper
+ * (thorsten-high) needs up to ~8 s for 246 characters on a 1-vCPU server (~33 ms per character); with
+ * Whisper running next to it that can double. 246 characters get 24.8 s, three times the measured worst
+ * case – a slow engine is never cut off, but an engine that lost an answer (hung worker, lost JSON line)
+ * no longer blocks every later line: the queue moves on and the next synthesis gets a fresh engine.
+ */
+export function synthDeadlineMs(chars: number): number {
+  return 10_000 + 60 * chars;
+}
+
+/** A synthesis ran past `synthDeadlineMs` and was given up (the warning is logged already, without the text). */
+export class SynthTimeout extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SynthTimeout';
+  }
+}
+
 export function createTts(cfg: Config['voice']): TextToSpeech {
   return new CachedTts(createEngine(cfg));
 }
@@ -323,16 +342,40 @@ export function decodeCacheFile(buf: Buffer, key: string): Pcm | null {
   return pcmFromBuffer(body, rate as number, channels as number);
 }
 
-/** Piper with the voice kept loaded in a small Python worker (≈0.2–0.5 s per sentence). */
+interface PiperJob {
+  text: string;
+  /** Answered, failed or given up – it is skipped or its late line ignored. */
+  settled: boolean;
+  /** Its deadline, from when the worker takes it on; cleared once it is settled. */
+  timer?: ReturnType<typeof setTimeout>;
+  resolve: (p: Pcm) => void;
+  reject: (e: Error) => void;
+}
+
+/**
+ * Piper with the voice kept loaded in a small Python worker (≈0.2–0.5 s per sentence). Piper works one
+ * text at a time, so the worker gets one job at a time from our own queue: a job's deadline
+ * (`synthDeadlineMs`) runs only while the worker is busy with it (including a worker start), never while
+ * it waits behind a long question. Past the deadline the job is rejected and the worker – hung, or lost
+ * the answer – is killed; the next job starts a fresh one. Nothing queued is lost by that.
+ */
 export class PiperTts implements TextToSpeech {
   private proc: ChildProcess | null = null;
   private ready: Promise<void> | null = null;
-  private pending = new Map<number, { resolve: (p: Pcm) => void; reject: (e: Error) => void }>();
+  /** Jobs not yet handed to the worker, in order. */
+  private queue: PiperJob[] = [];
+  /** The one job the worker (or its start) is busy with now; only its deadline runs. */
+  private current: { id: number; job: PiperJob } | null = null;
   private nextId = 1;
   readonly engine: string;
+  private readonly deadline: (chars: number) => number;
 
-  constructor(private cfg: Config['voice']) {
+  constructor(
+    private cfg: Config['voice'],
+    opts: { deadlineMs?: (chars: number) => number } = {},
+  ) {
     this.engine = `piper:${path.basename(cfg.piperVoice, '.onnx')}`;
+    this.deadline = opts.deadlineMs ?? synthDeadlineMs;
   }
 
   private get python(): string {
@@ -352,14 +395,18 @@ export class PiperTts implements TextToSpeech {
       killOnExit(proc);
       let stderr = '';
       proc.stderr!.on('data', (d) => (stderr = (stderr + d).slice(-2000)));
+      proc.stdin!.on('error', () => {}); // EPIPE after a kill: the exit handler reports it
       proc.once('error', (e) => reject(e));
       proc.once('exit', (code) => {
         const err = new Error(`Piper beendet (${code}): ${stderr.split('\n').filter((l) => !/telemetry/.test(l)).join(' ').slice(-300)}`);
         reject(err);
-        for (const p of this.pending.values()) p.reject(err);
-        this.pending.clear();
+        if (this.proc !== proc) return; // killed on purpose (deadline, close): already handled
         this.proc = null;
         this.ready = null;
+        const cur = this.current;
+        this.current = null;
+        cur?.job.reject(err);
+        this.pump(); // the rest goes to a fresh worker
       });
       createInterface({ input: proc.stdout! }).on('line', (line) => {
         let msg: { ready?: boolean; id?: number; wav?: string; error?: string };
@@ -372,35 +419,104 @@ export class PiperTts implements TextToSpeech {
           log.info('Piper bereit');
           return resolve();
         }
-        const p = this.pending.get(msg.id!);
-        if (!p) return;
-        this.pending.delete(msg.id!);
-        if (msg.error || !msg.wav) p.reject(new Error(`Piper: ${msg.error ?? 'keine Audiodaten'}`));
-        else p.resolve(decodeWav(Buffer.from(msg.wav, 'base64')));
+        const cur = this.current;
+        if (this.proc !== proc || !cur || cur.id !== msg.id) return; // a late line of a given-up job
+        this.current = null;
+        if (msg.error || !msg.wav) cur.job.reject(new Error(`Piper: ${msg.error ?? 'keine Audiodaten'}`));
+        else cur.job.resolve(decodeWav(Buffer.from(msg.wav, 'base64')));
+        this.pump();
       });
     });
-    this.ready.catch(() => (this.ready = null));
-    return this.ready;
+    // Only forget the start that failed – a restart may have begun a new one meanwhile.
+    const ready = this.ready;
+    ready.catch(() => {
+      if (this.ready === ready) this.ready = null;
+    });
+    return ready;
   }
 
-  async synth(text: string): Promise<Pcm> {
-    await this.start();
-    const id = this.nextId++;
+  synth(text: string): Promise<Pcm> {
     return new Promise<Pcm>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.proc!.stdin!.write(JSON.stringify({ id, text }) + '\n');
+      const job: PiperJob = {
+        text,
+        settled: false,
+        resolve: (p) => {
+          if (job.settled) return;
+          job.settled = true;
+          clearTimeout(job.timer);
+          resolve(p);
+        },
+        reject: (e) => {
+          if (job.settled) return;
+          job.settled = true;
+          clearTimeout(job.timer);
+          reject(e);
+        },
+      };
+      // The deadline starts when the job reaches the worker (`pump`), see the class comment.
+      this.queue.push(job);
+      this.pump();
     });
   }
 
-  async close(): Promise<void> {
-    this.proc?.stdin?.end();
-    this.proc?.kill();
+  /** Hands the next job to the worker if it is free; starts the worker if needed. */
+  private pump(): void {
+    if (this.current) return;
+    let job: PiperJob | undefined;
+    while ((job = this.queue.shift()) && job.settled);
+    if (!job) return;
+    const cur = { id: this.nextId++, job };
+    this.current = cur;
+    const ms = this.deadline(job.text.length);
+    job.timer = setTimeout(() => {
+      if (this.current !== cur) return;
+      this.current = null;
+      log.warn(`Sprachausgabe: Piper lieferte nach ${Math.round(ms / 1000)} s keinen Ton – Ansage übersprungen, starte Piper neu`);
+      job.reject(new SynthTimeout(`Piper: keine Antwort nach ${Math.round(ms / 1000)} s`));
+      this.kill();
+      this.pump();
+    }, ms);
+    job.timer.unref?.();
+    this.start().then(
+      () => {
+        if (this.current !== cur) return;
+        this.proc?.stdin?.write(JSON.stringify({ id: cur.id, text: job.text }) + '\n');
+      },
+      (e) => {
+        if (this.current !== cur) return;
+        this.current = null;
+        job.reject(e as Error);
+        this.pump();
+      },
+    );
+  }
+
+  /** Kills the worker (also while it starts); the next job starts a new one. */
+  private kill(): void {
+    const proc = this.proc;
     this.proc = null;
     this.ready = null;
+    proc?.kill('SIGKILL');
+  }
+
+  /** Stops the worker; every sentence not spoken yet is rejected. No Piper process is left running. */
+  async close(): Promise<void> {
+    const err = new Error('Piper beendet');
+    const cur = this.current;
+    const queued = this.queue;
+    this.current = null;
+    this.queue = [];
+    const proc = this.proc;
+    this.proc = null;
+    this.ready = null;
+    proc?.stdin?.end();
+    proc?.kill();
+    cur?.job.reject(err);
+    for (const j of queued) j.reject(err);
   }
 }
 
-/** macOS `say` – no setup, noticeably more robotic. */
+/** macOS `say` – no setup, noticeably more robotic. A `say` running past `synthDeadlineMs` is killed. */
 export class SayTts implements TextToSpeech {
   private dir = mkdtempSync(path.join(os.tmpdir(), 'qbhost-say-'));
   private n = 0;
@@ -410,7 +526,15 @@ export class SayTts implements TextToSpeech {
   }
   async synth(text: string): Promise<Pcm> {
     const file = path.join(this.dir, `${++this.n}.wav`);
-    await run('say', ['-v', this.voice, '-o', file, '--file-format=WAVE', '--data-format=LEI16@22050', text]);
+    const ms = synthDeadlineMs(text.length);
+    try {
+      await run('say', ['-v', this.voice, '-o', file, '--file-format=WAVE', '--data-format=LEI16@22050', text], { timeout: ms, killSignal: 'SIGKILL' });
+    } catch (e) {
+      rmSync(file, { force: true });
+      if (!(e as { killed?: boolean }).killed) throw e;
+      log.warn(`Sprachausgabe: say lieferte nach ${Math.round(ms / 1000)} s keinen Ton – Ansage übersprungen`);
+      throw new SynthTimeout(`say: keine Antwort nach ${Math.round(ms / 1000)} s`);
+    }
     const pcm = decodeWav(readFileSync(file));
     rmSync(file, { force: true });
     return pcm;

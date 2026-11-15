@@ -3,9 +3,10 @@ import { createLogger } from '../core/logger.ts';
 import { durationMs, head, rms, type Pcm } from './audio.ts';
 import { extractAnswer, isEcho, stripWakeWord } from './commands.ts';
 import { LatencyMeter, type SpeechTimes, type SttPass } from './latency.ts';
-import type { SpeechToText } from './stt.ts';
+import { FallbackStt, SttTrouble } from './providers.ts';
+import { isCloud, type LocalStt, type SpeechToText, type SttOptions } from './stt.ts';
 import type { Speaker, Utterance, VoiceTransport } from './transport.ts';
-import type { TextToSpeech } from './tts.ts';
+import { SynthTimeout, type TextToSpeech } from './tts.ts';
 
 const log = createLogger('voice');
 
@@ -15,6 +16,27 @@ export interface VoiceHostDeps {
   stt: SpeechToText;
   /** Optional fast second model for everything without a spoken answer ('full', 'wake', first pass of 'confirm'). */
   fastStt?: SpeechToText;
+  /** 'confirm' (first pass), if it differs from `fastStt` (`voice.sttCloudFor`); default `fastStt`. */
+  confirmStt?: SpeechToText;
+  /**
+   * Cloud routing only: the local main / fast engines (undefined = `stt` / `fastStt` are local anyway,
+   * null = there is none). Whatever must not go to the cloud is heard with these.
+   */
+  localStt?: LocalStt | null;
+  localFastStt?: LocalStt | null;
+  /**
+   * May this utterance, begun at `startedAt` (epoch ms), go to a cloud route (`voice.stt`)? Only for
+   * someone the bot clearly knows and has let speak since before `startedAt` without a break (on turn, may
+   * buzz, asked the menu). Fail-safe: only `true` counts – missing, throwing, `undefined` or anything else
+   * means local. A wake check never goes out (unless `wake` is in `sttCloudFor`); the command after a
+   * locally heard wake word may.
+   */
+  cloudAllowed?: (speaker: Speaker, startedAt: number) => boolean;
+  /**
+   * The wake-word check of everyone not on turn; default `fastStt`. Local unless `wake` is in
+   * `voice.sttCloudFor`: side talk without the wake word never leaves the server.
+   */
+  wakeStt?: SpeechToText;
   tts: TextToSpeech;
   cfg: Config['voice'];
   /** Vocabulary hints for the recogniser (categories, player names). Must never contain solutions. */
@@ -42,6 +64,11 @@ export interface VoiceHostDeps {
    */
   mayInterrupt?: (speaker: Speaker) => boolean;
   onClose?: () => void;
+  /**
+   * Recognition is broken and nothing local takes over (`SttTrouble`: cloud down, no fallback): the bot
+   * asks people to type. Called on every such failure – the bot shows it once per game. Must not throw.
+   */
+  onTrouble?: (msg: string) => void;
   /** Where `⏱` lines go (default: `info` on the voice logger). Only used with `cfg.latencyLog`. */
   latencyLog?: (line: string) => void;
 }
@@ -50,6 +77,14 @@ export type Attention = 'answer' | 'confirm' | 'full' | 'wake';
 
 /** How much of an utterance is checked for "Quizmaster" when someone is not on turn. */
 const WAKE_HEAD_MS = 2000;
+
+/** A failing wake check (or no local engine) warns at most this often; each one drops an utterance. */
+const DROP_WARN_EVERY_MS = 60_000;
+
+/** The engine itself if it is local; null for a cloud engine or none. */
+function localOnly(stt: SpeechToText | null | undefined): SpeechToText | null {
+  return stt && !isCloud(stt) ? stt : null;
+}
 
 /** All parts of one `say`: `key` and `interruptible` hold for the whole group. */
 interface Group {
@@ -201,6 +236,8 @@ export class VoiceHost {
   private synthTail: Promise<unknown> = Promise.resolve();
   /** Held on the TTS while the queue is not empty (pre-warming waits, see `TextToSpeech.hold`). */
   private speakHold: (() => void) | null = null;
+  /** When each kind of drop warning was last logged (`DROP_WARN_EVERY_MS`). */
+  private warnedAt = new Map<string, number>();
 
   constructor(private d: VoiceHostDeps) {
     this.latency = new LatencyMeter({ enabled: d.cfg.latencyLog !== false, log: d.latencyLog ?? ((l) => log.info(l)) });
@@ -208,7 +245,10 @@ export class VoiceHost {
       const release = this.hold();
       this.endSpeechHold(u.speaker.id);
       void this.hear(u)
-        .catch((e) => log.warn(`Erkennung: ${(e as Error).message}`))
+        .catch((e) => {
+          log.warn(`Erkennung: ${(e as Error).message}`);
+          if (e instanceof SttTrouble) this.trouble(e.message);
+        })
         .finally(release);
     });
     // Discord tells us when someone starts to speak: the person on turn stops a hint right away.
@@ -224,6 +264,14 @@ export class VoiceHost {
       this.latencySummary();
       d.onClose?.();
     });
+  }
+
+  private trouble(msg: string): void {
+    try {
+      this.d.onTrouble?.(msg);
+    } catch {
+      /* a broken notice must not break the voice path */
+    }
   }
 
   /** Tells the TTS the voice path is busy; never throws. */
@@ -338,7 +386,9 @@ export class VoiceHost {
     };
     raw.then(synthDone, synthDone); // side branch: the queue below does not wait for it
     const audio = raw.catch((e) => {
-      log.warn(`TTS „${text.slice(0, 40)}“: ${(e as Error).message}`);
+      // A synthesis past its deadline was reported by the engine already – without the text.
+      if (e instanceof SynthTimeout) log.debug(`TTS: ${e.message}`);
+      else log.warn(`TTS „${text.slice(0, 40)}“: ${(e as Error).message}`);
       return null;
     });
     return { text, group, interruptible: group.interruptible, audio, times, abandon };
@@ -465,21 +515,100 @@ export class VoiceHost {
     item.times.reaction = undefined;
   }
 
-  /** The fast model if there is one; if it fails (not started, crashed twice), the main model takes over. */
-  private async fast(pcm: Pcm, prompt: string, passes: SttPass[]): Promise<string> {
-    if (!this.d.fastStt) return this.main(pcm, prompt, passes);
+  /**
+   * The engine that hears this attention (see `VoiceHostDeps`). `cloud` false → only a local engine
+   * (null = there is none): for everyone not clearly allowed to speak (`cloudAllowed`).
+   */
+  private route(a: Attention, cloud = true): SpeechToText | null {
+    const d = this.d;
+    if (!cloud) {
+      // Never a cloud engine here, however the deps are wired: without a local one there is none (null).
+      const main = this.localMain();
+      const fast = localOnly(d.localFastStt === undefined ? d.fastStt : d.localFastStt);
+      return a === 'answer' ? (main ?? fast ?? null) : (fast ?? main ?? null);
+    }
+    if (a === 'answer') return d.stt;
+    if (a === 'confirm') return d.confirmStt ?? d.fastStt ?? d.stt;
+    // The wake check of people not on turn: a cloud engine only if passed as `wakeStt` on purpose (`wake`
+    // in `sttCloudFor`); the defaults are local only – none → the utterance is dropped.
+    if (a === 'wake') return d.wakeStt ?? localOnly(d.fastStt) ?? this.localMain();
+    return d.fastStt ?? d.stt;
+  }
+
+  /** The local main model: `stt` itself unless the routing names another one; never a cloud engine (null). */
+  private localMain(): SpeechToText | null {
+    return localOnly(this.d.localStt === undefined ? this.d.stt : this.d.localStt);
+  }
+
+  /**
+   * May this utterance go to a cloud route? Asked once per utterance, with its beginning: the earlier of the
+   * transport's start and end minus the audio length (works without a start signal, e.g. loopback). No
+   * beginning, no callback, an error or anything but `true` → no.
+   */
+  private cloudOk(u: Utterance): boolean {
+    const start = Math.min(u.startedAt, u.endedAt - durationMs(u.pcm));
+    if (!Number.isFinite(start) || !this.d.cloudAllowed) return false;
     try {
-      passes.push({ engine: engineOf(this.d.fastStt) });
-      return await this.d.fastStt.transcribe(pcm, prompt);
-    } catch (e) {
-      log.warn(`Schnelles Whisper-Modell: ${(e as Error).message} – nehme das Hauptmodell`);
-      return this.main(pcm, prompt, passes);
+      return this.d.cloudAllowed(u.speaker, start) === true;
+    } catch {
+      return false;
     }
   }
 
-  private main(pcm: Pcm, prompt: string, passes: SttPass[]): Promise<string> {
-    passes.push({ engine: engineOf(this.d.stt) });
-    return this.d.stt.transcribe(pcm, prompt);
+  /** A warning without content, at most once a minute per kind (each one stands for dropped utterances). */
+  private warnRarely(key: string, msg: string): void {
+    const now = Date.now();
+    if (now - (this.warnedAt.get(key) ?? -Infinity) < DROP_WARN_EVERY_MS) return;
+    this.warnedAt.set(key, now);
+    log.warn(msg);
+  }
+
+  /**
+   * Hears with `stt`. If a local engine fails (not started, crashed twice), the local main model takes
+   * over – never a cloud route, so a failed local check cannot send audio out. A cloud route keeps its
+   * own fallback rule (`cloudFallback`; with `none` its failure stays a failure).
+   */
+  private async listen(stt: SpeechToText, pcm: Pcm, prompt: string, passes: SttPass[]): Promise<string> {
+    try {
+      passes.push({ engine: engineOf(stt) });
+      return await stt.transcribe(pcm, prompt, this.sttOpts(passes));
+    } catch (e) {
+      const local = this.localMain();
+      if (!local || local === stt || sameEngine(stt, local) || stt instanceof FallbackStt) throw e;
+      log.warn(`Erkennung mit ${engineOf(stt)}: ${(e as Error).message} – nehme das lokale Hauptmodell`);
+      const failed = passes.at(-1);
+      if (failed) failed.fallback = true; // ⏱ rueckfall=ja
+      passes.push({ engine: engineOf(local) });
+      return local.transcribe(pcm, prompt, this.sttOpts(passes));
+    }
+  }
+
+  /**
+   * The wake check could not be done locally (engine failed, not ready): the utterance is dropped – it
+   * never goes to the cloud instead. A warning without content, at most once a minute.
+   */
+  private wakeFailed(e: unknown, passes: SttPass[]): void {
+    this.latency.wakeDropped(passes);
+    log.debug(`Rufnamen-Prüfung: ${(e as Error)?.message ?? e}`);
+    if (e instanceof SttTrouble) this.trouble(e.message);
+    this.warnRarely('wake', 'Rufnamen-Prüfung gescheitert (lokale Erkennung nicht bereit) – Äußerung verworfen');
+  }
+
+  /** Lets a cloud route tell the measurement that its local fallback heard the utterance. Synchronous. */
+  private sttOpts(passes: SttPass[]): SttOptions {
+    return {
+      onFallback: (engine, tried) => {
+        const last = passes.at(-1);
+        if (tried || !last) {
+          if (last) last.fallback = true;
+          passes.push({ engine });
+        } else {
+          // The cloud was skipped (paused): the local engine heard it in its place.
+          last.engine = engine;
+          last.fallback = true;
+        }
+      },
+    };
   }
 
   private mayInterrupt(s: Speaker): boolean {
@@ -529,20 +658,40 @@ export class VoiceHost {
     const passes: SttPass[] = [];
     if (attention === 'wake') {
       const start = head(u.pcm, WAKE_HEAD_MS);
-      const heard = await this.fast(start, this.d.cfg.wakeWords.join(', '), passes);
+      const wake = this.route('wake');
+      if (!wake) {
+        this.latency.wakeDropped(passes);
+        log.debug(`🔇 ${who}: keine lokale Rufnamen-Prüfung – verworfen`);
+        return this.warnRarely('no-local', 'Keine lokale Spracherkennung für eine Äußerung, die nicht in die Cloud darf – verworfen');
+      }
+      let heard: string;
+      try {
+        heard = await this.listen(wake, start, this.d.cfg.wakeWords.join(', '), passes);
+      } catch (e) {
+        return this.wakeFailed(e, passes);
+      }
       if (stripWakeWord(heard, this.d.cfg.wakeWords) === null) {
-        this.latency.wakeDropped(); // side talk: counted, no line
+        this.latency.wakeDropped(passes); // side talk: counted, no line
         return log.debug(`🔇 ${who} ist nicht dran – kein Rufname, verworfen`);
       }
-      text = start === u.pcm ? heard : await this.fast(u.pcm, this.d.prompt(), passes);
-    } else if (attention === 'answer') {
-      text = await this.main(u.pcm, this.d.prompt(), passes);
+      // Addressed to the bot (the wake word was heard): the whole utterance is heard like any command ('full').
+      text = start === u.pcm ? heard : await this.listen(this.route('full')!, u.pcm, this.d.prompt(), passes);
     } else {
-      text = await this.fast(u.pcm, this.d.prompt(), passes);
-      // "Genau, meine Antwort ist zehn" while "Paris?" waits for "Ja": a new answer – hear it precisely.
-      if (attention === 'confirm' && this.d.fastStt && extractAnswer(text) !== null) {
+      // Cloud only for whom the bot clearly let speak the whole utterance; everyone else locally (or not at all).
+      const cloud = this.cloudOk(u);
+      const first = this.route(attention, cloud);
+      if (!first) {
+        this.latency.wakeDropped(passes);
+        log.debug(`🔇 ${who}: keine lokale Erkennung für diese Person – verworfen`);
+        return this.warnRarely('no-local', 'Keine lokale Spracherkennung für eine Äußerung, die nicht in die Cloud darf – verworfen');
+      }
+      text = await this.listen(first, u.pcm, this.d.prompt(), passes);
+      // "Genau, meine Antwort ist zehn" while "Paris?" waits for "Ja": a new answer – hear it precisely
+      // (only if the main model is another engine than the one that just heard it).
+      const main = this.route('answer', cloud);
+      if (attention === 'confirm' && main && first !== main && !sameEngine(first, main) && extractAnswer(text) !== null) {
         log.debug(`🎙 ${who}: neue Antwort in der Rückfrage – noch einmal mit dem Hauptmodell`);
-        text = await this.main(u.pcm, this.d.prompt(), passes);
+        text = await this.listen(main, u.pcm, this.d.prompt(), passes);
       }
     }
     const sttDoneAt = this.latency.stamp();
@@ -578,4 +727,9 @@ export class VoiceHost {
 
 function engineOf(stt: SpeechToText): string {
   return stt.engine ?? 'unbekannt';
+}
+
+/** Two routes that end at the same engine (two cloud routes with different local fallbacks). Unnamed engines never match. */
+function sameEngine(a: SpeechToText, b: SpeechToText): boolean {
+  return a === b || (!!a.engine && a.engine === b.engine);
 }

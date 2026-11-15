@@ -243,16 +243,22 @@ describe('voice latency: ⏱ lines', () => {
     expect(ans[1]).toContain('tts=300ms cache=nein warte=500ms');
   });
 
-  it('gives a dropped wake check no line, only the counter in the summary', async () => {
-    const r = rig({ texts: ['und dann hat er gesagt'], attention: 'wake', onSpeech: () => {} });
+  it('gives a dropped wake check no line, only the counter in the next real summary (T1 review F10)', async () => {
+    const r = rig({ texts: ['und dann hat er gesagt', 'Quizmaster', 'Quizmaster, wie ist der Stand'], attention: 'wake', onSpeech: (_s, _t, used) => used() });
     r.transport.speak(3000);
     await vi.advanceTimersByTimeAsync(2000);
     expect(r.lines).toEqual([]);
+    // Only side talk since the last summary (chatting after the game): leaving adds no summary with n=0.
+    r.host.latencySummary();
+    expect(r.lines).toEqual([]);
+    r.transport.speak(3000); // "Quizmaster, wie ist der Stand"
+    await vi.advanceTimersByTimeAsync(2000);
     await r.host.close(); // leaving the channel
-    expect(r.lines).toHaveLength(1);
-    expect(r.lines[0]).toMatch(BILANZ);
-    expect(r.lines[0]).toContain('n=0');
-    expect(r.lines[0]).toContain('verworfen=1');
+    const bilanz = r.lines.filter((l) => l.startsWith('⏱ bilanz'));
+    expect(bilanz).toHaveLength(1);
+    expect(bilanz[0]).toMatch(BILANZ);
+    expect(bilanz[0]).toContain('n=1');
+    expect(bilanz[0]).toContain('verworfen=1');
   });
 
   it('logs the wake word utterance with both passes once the wake word is heard', async () => {

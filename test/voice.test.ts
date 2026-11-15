@@ -1027,7 +1027,7 @@ describe('voice: fast and precise Whisper model', () => {
     // Without the options nothing changes: one server, full window.
     const plain = createVoiceKit(ConfigSchema.parse({ voice: { dir, whisperBin: bin, whisperModel: 'models/main.bin', whisperPort: port } }));
     expect(plain.fastStt).toBeUndefined();
-    expect(plain.stt.args).not.toContain('-ac');
+    expect((plain.stt as WhisperServerStt).args).not.toContain('-ac');
   }, 20000);
 
   it('voice-setup and doctor check both models', async () => {

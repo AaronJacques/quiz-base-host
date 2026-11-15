@@ -6,7 +6,8 @@ import { parseArgs } from 'node:util';
 import { runHost } from './app.ts';
 import { BOARD_CLI_OPTIONS, runBoardCreate, runBoardDelete, runLogin } from './board-cli.ts';
 import { runDiscordBot } from './discord/index.ts';
-import { setupVoice, voiceProblems } from './voice/index.ts';
+import { setupVoice, voiceProblems, voiceWarnings } from './voice/index.ts';
+import { deepgramReachable } from './voice/stt-deepgram.ts';
 import { createDriver } from './browser/index.ts';
 import { loadConfig, type Config } from './config.ts';
 import { EventBus } from './core/events.ts';
@@ -79,13 +80,20 @@ if (values.help && positionals[0] !== 'board-create') {
 }
 if (values.verbose) setLogLevel('debug');
 
-const config: Config = loadConfig(values.config ?? 'qbhost.config.json', {
-  browser: { driver: values.driver as any, orcaPageId: values.page, headless: values.headless },
-  game: { publicBoard: values.board, autoStart: values['auto-start'] },
-  llm: { provider: values.llm as any, model: values.model },
-  judge: { strategy: values.judge as any },
-  companion: { enabled: values['no-companion'] ? false : undefined, port: values.port ? Number(values.port) : undefined },
-});
+let config: Config;
+try {
+  config = loadConfig(values.config ?? 'qbhost.config.json', {
+    browser: { driver: values.driver as any, orcaPageId: values.page, headless: values.headless },
+    game: { publicBoard: values.board, autoStart: values['auto-start'] },
+    llm: { provider: values.llm as any, model: values.model },
+    judge: { strategy: values.judge as any },
+    companion: { enabled: values['no-companion'] ? false : undefined, port: values.port ? Number(values.port) : undefined },
+  });
+} catch (e) {
+  // A broken config file is the operator's to fix: one clear line (also for `doctor`), no stack trace.
+  console.error(`❌ ${(e as Error).message}`);
+  process.exit(1);
+}
 
 const [command = 'host', ...rest] = positionals;
 
@@ -186,11 +194,23 @@ switch (command) {
         throw e;
       }
     });
-    await check('Sprachsteuerung (STT/TTS lokal)', async () => {
+    const cloudStt = config.voice.stt === 'deepgram';
+    await check(`Sprachsteuerung (STT ${cloudStt ? 'Cloud + lokal' : 'lokal'}, TTS lokal)`, async () => {
       const problems = await voiceProblems(config);
       if (problems.length) throw new Error(`${problems.join('; ')} → npx qbhost voice-setup`);
-      return `whisper.cpp + ${config.voice.tts === 'piper' ? 'Piper' : 'say'} bereit`;
+      return `${cloudStt ? 'Deepgram' : 'whisper.cpp'} + ${config.voice.tts === 'piper' ? 'Piper' : 'say'} bereit`;
     });
+    for (const w of await voiceWarnings(config).catch(() => [])) console.log(`⚠️  ${w} → npx qbhost voice-setup (bei Cloud-Ausfall sonst nur der Hinweis im Chat)`);
+    if (cloudStt) {
+      const dg = config.voice.deepgram;
+      // Only whether it is set – never the value.
+      await check('Deepgram-Schlüssel', async () => {
+        if (!process.env[dg.keyEnv]?.trim()) throw new Error(`fehlt (${dg.keyEnv}) → in .env eintragen`);
+        return `gesetzt (${dg.keyEnv})`;
+      });
+      // DNS + TLS only, no request: costs nothing and needs no key.
+      await check('Deepgram-Endpunkt', async () => `${new URL(dg.baseUrl).host} erreichbar, TLS in ${await deepgramReachable(dg.baseUrl)} ms (ohne Anfrage, ohne Kosten)`);
+    }
     await check(`LLM (${config.llm.provider}/${config.llm.model})`, async () => {
       const meter = new UsageMeter();
       const kit = createJudge({ ...config, judge: { ...config.judge, cacheFile: '.qbhost/doctor-cache.json' } }, new EventBus(), createLlm(config), meter);

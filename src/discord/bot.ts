@@ -14,7 +14,7 @@ import type { GuildStore } from './store.ts';
 import { VoiceBridge } from './voice-bridge.ts';
 import { confirmReply, extractAnswer, isBuzz, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
 import { ANSWER_KEYWORD_LINE, END_ASK_LINE, gameOverLine, pickHintLine, START_LINE, startMissingLine, VOICE_HELP } from '../voice/narration.ts';
-import type { SpeechToText } from '../voice/stt.ts';
+import type { LocalStt, SpeechToText } from '../voice/stt.ts';
 import type { Speaker } from '../voice/transport.ts';
 import type { TextToSpeech } from '../voice/tts.ts';
 import { forSpeech, VoiceHost, type Attention } from '../voice/voice-host.ts';
@@ -51,6 +51,12 @@ export interface VoiceKit {
   stt: SpeechToText;
   /** Optional fast model for everything else (`voice.whisperFastModel`). */
   fastStt?: SpeechToText;
+  /** Cloud routing (`voice.sttCloudFor`): the 'confirm' and 'wake' engines, if they differ from `fastStt`. */
+  confirmStt?: SpeechToText;
+  wakeStt?: SpeechToText;
+  /** Cloud routing: the local engines for everyone who may not be heard by the cloud (`VoiceHostDeps`). */
+  localStt?: LocalStt | null;
+  localFastStt?: LocalStt | null;
   tts: TextToSpeech;
   /** Loads the models up front so the first sentence is not delayed. */
   warmup(): Promise<void>;
@@ -64,7 +70,12 @@ interface VoiceSession {
   voiceChannelId: string;
   idleTimer?: NodeJS.Timeout;
   seq: number;
+  /** "Sprache gestört" was posted while no game ran (in a game: `hinted`). */
+  troubled?: boolean;
 }
+
+/** Posted once per game when recognition is down and nothing local takes over. */
+const VOICE_TROUBLE_LINE = '⚠️ Sprache gestört – bitte tippen';
 
 const VOICE_IDLE_MS = 20 * 60_000;
 /** A spoken answer still waiting for "Ja" this close to the end of the answer time is submitted as said. */
@@ -114,6 +125,8 @@ interface ActiveGame {
   lastAsk: HostEvents['host:await-answer'] | null;
   lastVerdict: { player: string; answer: string; correct: boolean; delta: number; points: number; viaBuzzer: boolean } | null;
   buzzerOpen: boolean;
+  /** Who answered the open question already (the picker, wrong buzzers) – they may not buzz again. */
+  answered: Set<string>;
   /** The leader made the last answer correct before the buzzer opened → end the buzzer round right away. */
   closeBuzzer: boolean;
   /** Authors who wrote in the game channel – used for automatic name linking. */
@@ -141,12 +154,22 @@ const BUSY_ELSEWHERE = '🎲 Ich hoste gerade ein Spiel auf einem anderen Server
 export class QuizBot {
   private game: ActiveGame | null = null;
   private boardCache = new Map<string, { at: number; list: string[] }>();
-  private menu: BoardMenu | null = null;
+  private _menu: BoardMenu | null = null;
+  /** The open board menu; who asked it may be heard by the cloud from the moment it is set (`refreshCloud`). */
+  private get menu(): BoardMenu | null {
+    return this._menu;
+  }
+  private set menu(m: BoardMenu | null) {
+    this._menu = m;
+    this.refreshCloud();
+  }
   private outbox = new Map<string, { lines: string[]; timer?: NodeJS.Timeout }>();
   private commands: Record<string, Handler>;
   private voice: VoiceSession | null = null;
   /** `used` of a spoken message (⏱ measurement), for the answer path that posts its own transcript. */
   private voiceUsed = new WeakMap<ChatMessage, () => void>();
+  /** Since when each person may be heard by the cloud without a break (`refreshCloud`); absent = not now. */
+  private cloudSince = new Map<string, number>();
   private voiceJoining: Promise<void> | null = null;
   private boards: BoardCreateFlow | null;
 
@@ -199,6 +222,7 @@ export class QuizBot {
   // ───────────────────────────── routing ─────────────────────────────
 
   async onMessage(msg: ChatMessage): Promise<void> {
+    this.refreshCloud(); // synchronous: what the last message changed (menu, links) counts from now on
     if (msg.author.isBot || !msg.guildId) return;
     // With configured channels the bot lives only there – prefix and @mentions elsewhere are ignored.
     const allowed = this.d.config.discord.channelIds;
@@ -217,8 +241,7 @@ export class QuizBot {
     }
     if (game && msg.channelId === game.channelId) return this.onGameInput(msg, game, msg.content);
     if (this.boards && (await this.boards.onMessage(msg))) return;
-    const menu = this.menu;
-    if (!game && menu?.askedBy === msg.author.id && menu.channelId === msg.channelId && Date.now() < menu.expires) {
+    if (!game && this.menuWaitsFor(msg.author.id, msg.channelId)) {
       const raw = msg.content.trim();
       const n = msg.viaVoice ? spokenNumber(raw) : null;
       const text = n !== null ? String(n) : raw;
@@ -229,6 +252,16 @@ export class QuizBot {
       }
       await this.chooseBoard(msg, text);
     }
+  }
+
+  /**
+   * Does the open board menu take this person's next message in this channel as their choice? Only the
+   * person who asked, in its channel, before it expires (`MENU_TTL_MS`). The one condition for taking the
+   * reply (`onMessage`), listening closely (`attention`) and the cloud (`mayUseCloudNow`).
+   */
+  private menuWaitsFor(userId: string, channelId: string): boolean {
+    const m = this.menu;
+    return !!m && m.askedBy === userId && m.channelId === channelId && Date.now() < m.expires;
   }
 
   private parseCommand(msg: ChatMessage): { name: string; args: string[] } | null {
@@ -328,7 +361,7 @@ export class QuizBot {
     const g: ActiveGame = {
       guildId: msg.guildId!, channelId: msg.channelId, leaderId: msg.author.id, board, session, lobby: null, phase: 'creating',
       lobbyPlayers: [], canStart: false, startRequested: false, players: [], turn: null, lastTurnSig: '', questionOpen: false,
-      awaiting: null, answerDeadline: 0, pending: null, judging: false, operatorNeeded: false, lastQuestion: null, lastAsk: null, lastVerdict: null, buzzerOpen: false, closeBuzzer: false,
+      awaiting: null, answerDeadline: 0, pending: null, judging: false, operatorNeeded: false, lastQuestion: null, lastAsk: null, lastVerdict: null, buzzerOpen: false, answered: new Set(), closeBuzzer: false,
       seen: new Map([[msg.author.id, { username: msg.author.username, displayName: msg.author.displayName }]]),
       hinted: new Set(), pickContext: null, reasons: [], lobbyStatusSig: '', offs: [],
     };
@@ -663,7 +696,16 @@ export class QuizBot {
   // ───────────────────────────── host events → chat ─────────────────────────────
 
   private attach(g: ActiveGame): void {
-    const on = <K extends keyof HostEvents>(e: K, h: (p: HostEvents[K]) => void) => g.offs.push(g.session.bus.on(e, h));
+    const on = <K extends keyof HostEvents>(e: K, h: (p: HostEvents[K]) => void) =>
+      g.offs.push(
+        g.session.bus.on(e, (p) => {
+          try {
+            h(p);
+          } finally {
+            this.refreshCloud(); // who may be heard by the cloud can change with every game event
+          }
+        }),
+      );
     const ch = g.channelId;
     if (this.voice?.guildId === g.guildId) this.voice.bridge.attach(g.session.bus, g.session.rules);
 
@@ -730,6 +772,7 @@ export class QuizBot {
     });
     on('host:question', (q) => {
       g.questionOpen = true;
+      g.answered = new Set();
       g.lastQuestion = q;
       g.lastVerdict = null; // a new card: overruling the previous one is over
       g.closeBuzzer = false;
@@ -753,6 +796,7 @@ export class QuizBot {
       this.queue(ch, `✍️ ${this.who(g, a.player)}, deine Antwort? ${how} (${a.timeoutSec} s).`);
     });
     on('host:verdict', (v) => {
+      g.answered.add(v.player);
       g.awaiting = null;
       g.judging = false;
       g.operatorNeeded = false;
@@ -939,6 +983,7 @@ export class QuizBot {
   private async finish(g: ActiveGame): Promise<void> {
     if (this.game !== g) return;
     this.game = null;
+    this.refreshCloud();
     if (g.phase === 'running' && g.players.length) {
       this.queue(g.channelId, ['🏁 **Spiel beendet.** Endstand:', ...rankingLines(g.players, (n) => this.who(g, n))].join('\n'));
       void this.speakFor(g.guildId, gameOverLine(g.players));
@@ -1052,8 +1097,14 @@ export class QuizBot {
         transport,
         stt: kit.stt,
         fastStt: kit.fastStt,
+        confirmStt: kit.confirmStt,
+        wakeStt: kit.wakeStt,
+        localStt: kit.localStt,
+        localFastStt: kit.localFastStt,
+        cloudAllowed: (speaker, startedAt) => this.cloudAllowed(speaker.id, startedAt),
         tts: kit.tts,
         cfg: vc,
+        onTrouble: () => this.voiceTrouble(host),
         prompt: () => this.voicePrompt(),
         onSpeech: (speaker, text, used) => this.onSpeech(speaker, text, used),
         attention: (speaker) => this.attention(speaker.id),
@@ -1085,6 +1136,22 @@ export class QuizBot {
       );
     })().finally(() => (this.voiceJoining = null));
     return this.voiceJoining;
+  }
+
+  /** Recognition is down without a local fallback: ask people to type – once per game (once per stay without a game). */
+  private voiceTrouble(host: VoiceHost): void {
+    const v = this.voice;
+    if (v?.host !== host) return;
+    const g = this.voiceGame();
+    if (g) {
+      if (g.hinted.has('voice-trouble')) return;
+      g.hinted.add('voice-trouble');
+      this.queue(g.channelId, VOICE_TROUBLE_LINE);
+    } else {
+      if (v.troubled) return;
+      v.troubled = true;
+      this.queue(v.textChannelId, VOICE_TROUBLE_LINE);
+    }
   }
 
   private async leaveVoice(textChannelId: string | null, goodbye?: string): Promise<void> {
@@ -1131,7 +1198,7 @@ export class QuizBot {
    */
   private attention(userId: string): Attention {
     const g = this.voiceGame();
-    if (!g) return this.menu?.askedBy === userId ? 'full' : 'wake';
+    if (!g) return this.voice && this.menuWaitsFor(userId, this.voiceText(this.voice)) ? 'full' : 'wake';
     if (g.phase !== 'running') return 'wake';
     const name = this.nameFor(g, userId);
     const now = this.expectedPlayer(g);
@@ -1144,6 +1211,51 @@ export class QuizBot {
     // The answerer needs the precise model – except for "Ja"/"Nein" after "Paris?" (the host checks for a new answer).
     if (g.awaiting?.player === name) return g.pending?.player === name ? 'confirm' : 'answer';
     return 'full'; // picking a card
+  }
+
+  /**
+   * May an utterance of this person that began at `startedAt` go to a cloud recogniser (`voice.stt:
+   * deepgram`)? Only if they were allowed to speak (`mayUseCloudNow`) the whole time: already when it began
+   * and still now, without a break (`cloudSince`). Who starts talking before their turn is heard locally.
+   */
+  private cloudAllowed(userId: string, startedAt: number): boolean {
+    this.refreshCloud();
+    const since = this.cloudSince.get(userId);
+    return since !== undefined && Number.isFinite(startedAt) && since <= startedAt;
+  }
+
+  /**
+   * Who may be heard by the cloud right now: someone clearly identified who may speak now – the linked
+   * player on turn (pick, answer, "Ja"), while the buzzer is open the linked players who may still buzz,
+   * and without a game whoever opened the menu. Never unlinked people (spectators, a player whose quiz-base
+   * name is not linked), never in the lobby or after the game. They are heard locally; a locally heard wake
+   * word lets their command through (VoiceHost).
+   */
+  private mayUseCloudNow(userId: string): boolean {
+    const g = this.voiceGame();
+    // Exactly while the menu takes their spoken reply: not after it expired, was chosen from or replaced.
+    if (!g) return !!this.voice && this.menuWaitsFor(userId, this.voiceText(this.voice));
+    if (g.phase !== 'running') return false;
+    const name = this.nameFor(g, userId);
+    if (!name) return false;
+    if (g.buzzerOpen) return !g.answered.has(name);
+    return this.expectedPlayer(g) === name;
+  }
+
+  /**
+   * Updates `cloudSince` after every change of game state – after each bus event, when the game ends, and
+   * (synchronously, adding no tick) at the start of each chat message and utterance, which sees what the one
+   * before changed; also on every `cloudAllowed`. A person who is not allowed any more loses their
+   * timestamp, one who just became allowed gets "now" (noticed late at worst, which only makes it later).
+   * So losing and regaining the permission during an utterance resets it.
+   */
+  private refreshCloud(): void {
+    const v = this.voice;
+    if (!v) return void this.cloudSince.clear();
+    const now = Date.now();
+    const ids = new Set([...Object.keys(this.d.store.get(v.guildId).links), ...(this.menu?.askedBy ? [this.menu.askedBy] : [])]);
+    for (const id of [...this.cloudSince.keys()]) if (!ids.has(id) || !this.mayUseCloudNow(id)) this.cloudSince.delete(id);
+    for (const id of ids) if (!this.cloudSince.has(id) && this.mayUseCloudNow(id)) this.cloudSince.set(id, now);
   }
 
   /** Whose input the game waits for: the answerer, or who picks the next card. */
@@ -1160,6 +1272,7 @@ export class QuizBot {
   }
 
   private async onSpeech(speaker: Speaker, text: string, used: () => void = () => {}): Promise<void> {
+    this.refreshCloud();
     const v = this.voice;
     if (!v) return;
     this.touchVoice();

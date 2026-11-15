@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import { safeBaseUrl } from './voice/http.ts';
 
 /**
  * Single source of truth for all tunables. Defaults are chosen so a game runs
@@ -141,7 +142,7 @@ export const ConfigSchema = z.object({
     })
     .prefault({}),
 
-  /** Sprachsteuerung im Discord-Voice-Channel. Alles lokal: whisper.cpp (STT) + Piper (TTS). Einrichtung: `qbhost voice-setup`. */
+  /** Sprachsteuerung im Discord-Voice-Channel. Standard alles lokal: whisper.cpp (STT) + Piper (TTS); STT optional per Cloud (`stt`). Einrichtung: `qbhost voice-setup`. */
   voice: z
     .object({
       enabled: z.boolean().default(true),
@@ -166,6 +167,43 @@ export const ConfigSchema = z.object({
        */
       whisperAudioCtx: z.number().int().min(0).max(1500).default(0),
       language: z.string().default('de'),
+      /**
+       * Spracherkennung: `whisper` = lokal (whisper.cpp, wie oben), `deepgram` = Cloud (Deepgram, EU-Endpunkt,
+       * Schlüssel aus `.env`). Mit Cloud hört sie nur die Phasen in `sttCloudFor`, der Rest bleibt lokal.
+       * Siehe docs/VOICE.md „Erkennung: lokal oder Cloud“.
+       */
+      stt: z.enum(['whisper', 'deepgram']).default('whisper'),
+      /**
+       * Bei `stt: deepgram`: welche Phasen (`attention`) die Cloud hört. `answer` = wer eine Frage beantwortet,
+       * `confirm` = Rückfrage „Paris?“, `full` = Kartenwahl, „Hier!“, Menüs, `wake` = Prüfung auf den Rufnamen
+       * bei allen anderen. `wake` fehlt absichtlich: Nebengespräche verlassen den Server nie.
+       */
+      sttCloudFor: z
+        .array(z.enum(['answer', 'confirm', 'full', 'wake']))
+        .default(['answer', 'confirm', 'full']),
+      /** Fällt die Cloud aus (Zeitüberschreitung, Netz, 429, 5xx, Schlüssel): `local` = dieselbe Äußerung lokal erkennen, `none` = kein Rückfall. */
+      cloudFallback: z.enum(['local', 'none']).default('local'),
+      /** Die lokalen Rückfall-Modelle beim Beitritt mitstarten (sonst Kaltstart von mehreren Sekunden beim ersten Ausfall). */
+      warmFallback: z.boolean().default(true),
+      /** Höchstens so lange wartet der Bot auf die Cloud-Erkennung einer Äußerung, dann bricht er ab und erkennt lokal. */
+      sttTimeoutMs: z.number().int().min(100).default(2500),
+      /** Nach 3 Cloud-Fehlern in Folge so viele Sekunden nur lokal, dann ein neuer Versuch. */
+      cloudCooldownSec: z.number().int().min(0).default(300),
+      /** Deepgram (bei `stt: deepgram`). Der Schlüssel kommt aus der Umgebung (`keyEnv`, z.B. in `.env`), nie aus der Config-Datei. */
+      deepgram: z
+        .object({
+          /** Nur `https://` (der Schlüssel geht mit); `http://` nur zu 127.0.0.1/localhost (Tests). */
+          baseUrl: z
+            .string()
+            .refine(safeBaseUrl, 'muss mit https:// beginnen (http:// nur zu 127.0.0.1 oder localhost), z.B. https://api.eu.deepgram.com')
+            .default('https://api.eu.deepgram.com'),
+          keyEnv: z.string().default('DEEPGRAM_API_KEY'),
+          sttModel: z.string().default('nova-3'),
+          language: z.string().default('de'),
+          /** Kategorien, Punktwerte und Namen als Schlüsselbegriffe mitschicken (nie die Lösung). */
+          keyterms: z.boolean().default(true),
+        })
+        .prefault({}),
       /** `piper` (natürlich, lokal) oder `say` (macOS, ohne Einrichtung). */
       tts: z.enum(['piper', 'say']).default('piper'),
       /** Relativ zu `dir`. */
@@ -246,5 +284,10 @@ function merge<T>(base: T, over: DeepPartial<T> | undefined): T {
 export function loadConfig(file = 'qbhost.config.json', overrides?: DeepPartial<Config>): Config {
   const abs = path.resolve(file);
   const fromFile = existsSync(abs) ? JSON.parse(readFileSync(abs, 'utf8')) : {};
-  return ConfigSchema.parse(merge(fromFile, overrides as any));
+  const parsed = ConfigSchema.safeParse(merge(fromFile, overrides as any));
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `${i.path.join('.') || '(Wurzel)'}: ${i.message}`).join('; ');
+    throw new Error(`Konfiguration ungültig (${existsSync(abs) ? abs : 'Standardwerte'}): ${issues}`);
+  }
+  return parsed.data;
 }

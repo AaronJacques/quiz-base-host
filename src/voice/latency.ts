@@ -19,7 +19,10 @@ export interface LatencyOptions {
 /** One STT pass of an utterance (its time is part of the utterance's `stt`, measured from `hear`). */
 export interface SttPass {
   engine: string;
-  /** Another engine took over after this one failed (T2: cloud → local). */
+  /**
+   * Another engine took over after this one failed (fast → main model, cloud → local), or – on a local
+   * pass – it stood in for a paused cloud. Any of them → `rueckfall=ja`.
+   */
   fallback?: boolean;
 }
 
@@ -92,9 +95,10 @@ export class LatencyMeter {
     return this.now();
   }
 
-  /** A wake check found no wake word: no line (side talk stays out of `info`), only a counter. */
-  wakeDropped(): void {
+  /** A wake check found no wake word: no line (side talk stays out of `info`), only counters. */
+  wakeDropped(passes: SttPass[] = []): void {
     this.dropped++;
+    if (passes.some((p) => p.fallback)) this.fallbacks++;
   }
 
   /**
@@ -109,6 +113,7 @@ export class LatencyMeter {
     const sttMs = sttDoneAt - u.heardAt;
     const fallback = u.passes.some((p) => p.fallback);
     this.stt.push(sttMs);
+    if (fallback) this.fallbacks++; // every fallback counts in the summary, also for side talk (no line)
     if (!u.toBot) {
       this.dropped++;
       return null;
@@ -125,7 +130,6 @@ export class LatencyMeter {
     if (!h || h.used || h.done) return;
     h.used = true;
     this.recognitions++;
-    if (h.fallback) this.fallbacks++;
     this.emit(h.line);
     this.pending = h;
   }
@@ -169,16 +173,20 @@ export class LatencyMeter {
   }
 
   /**
-   * Logs the summary since the last one (game over, leaving the channel) and starts afresh. Nobody spoke
-   * (no recognition, nothing dropped) → no line: a second call right after the first, or a goodbye, adds none.
+   * Logs the summary since the last one (game over, leaving the channel) and starts afresh. Nothing was
+   * transcribed in full (no recognition; only wake checks without the wake word, side talk after the game)
+   * → no line: a second call right after the first, or a goodbye, adds none. Such drops are not lost:
+   * `verworfen` keeps them for the next real summary.
    */
   summary(): void {
-    if (this.recognitions || this.dropped) {
-      const p = (v: number[], q: number) => (v.length ? ms(percentile(v, q)) : '-');
-      this.emit(
-        `⏱ bilanz n=${this.recognitions} stt_p50=${p(this.stt, 50)} stt_p90=${p(this.stt, 90)} tts_p50=${p(this.tts, 50)} tts_p90=${p(this.tts, 90)} reaktion_p50=${p(this.reactions, 50)} reaktion_p90=${p(this.reactions, 90)} verworfen=${this.dropped} rueckfaelle=${this.fallbacks}`,
-      );
+    if (!this.recognitions && !this.stt.length) {
+      this.pending = null;
+      return;
     }
+    const p = (v: number[], q: number) => (v.length ? ms(percentile(v, q)) : '-');
+    this.emit(
+      `⏱ bilanz n=${this.recognitions} stt_p50=${p(this.stt, 50)} stt_p90=${p(this.stt, 90)} tts_p50=${p(this.tts, 50)} tts_p90=${p(this.tts, 90)} reaktion_p50=${p(this.reactions, 50)} reaktion_p90=${p(this.reactions, 90)} verworfen=${this.dropped} rueckfaelle=${this.fallbacks}`,
+    );
     this.recognitions = 0;
     this.stt = [];
     this.tts = [];

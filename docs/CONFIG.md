@@ -142,8 +142,19 @@ Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennu
 | `whisperPort` | `8178` | Port des lokalen Whisper-Servers (das schnelle Modell nimmt den nächsten). |
 | `whisperAudioCtx` | `0` | Audiofenster des Whisper-Encoders (`-ac <n>`), `0` = volles Fenster (1500 = 30 s). `512` ≈ 10 s ist auf kleinen Servern etwa dreimal schneller. `maxSpeechSec` wird auf das Fenster begrenzt (n/50 Sekunden). |
 | `language` | `de` | Sprache der Spracherkennung. |
+| `stt` | `whisper` | Spracherkennung: `whisper` (lokal, whisper.cpp) oder `deepgram` (Cloud, EU-Endpunkt). Siehe [VOICE.md](VOICE.md#erkennung-lokal-oder-cloud). |
+| `sttCloudFor` | `["answer","confirm","full"]` | Bei `stt: deepgram`: welche Phasen die Cloud hört (`answer`, `confirm`, `full`, `wake`). Der Rest hört lokal. `wake` (Rufnamen-Prüfung bei allen, die nicht dran sind) fehlt absichtlich: Nebengespräche verlassen den Server nie. Die Cloud hört nur verknüpfte Personen, die laut Spiel gerade sprechen dürfen; siehe die Tabelle in VOICE.md. |
+| `cloudFallback` | `local` | Fällt die Cloud aus: `local` = dieselbe Äußerung lokal erkennen, `none` = kein Rückfall (dann „⚠️ Sprache gestört – bitte tippen“ einmal pro Spiel). |
+| `warmFallback` | `true` | Lokale Rückfall-Modelle beim Beitritt mitstarten; sonst Kaltstart von mehreren Sekunden beim ersten Ausfall. Startet eins nicht (Modell fehlt), gibt es eine Warnung, der Beitritt klappt trotzdem. Hält die Modelle dauerhaft im RAM. |
+| `sttTimeoutMs` | `2500` | Frist je Cloud-Anfrage in ms; danach wird sie abgebrochen und lokal erkannt. |
+| `cloudCooldownSec` | `300` | Nach 3 Cloud-Fehlern in Folge (Zeitüberschreitung, Netz, 429, 5xx) so viele Sekunden nur lokal, dann ein neuer Versuch. |
+| `deepgram.baseUrl` | `https://api.eu.deepgram.com` | Deepgram-Endpunkt (EU). Nur `https://`; `http://` nur zu `127.0.0.1`/`localhost` (Tests). Eine andere Adresse ist ein Konfigurationsfehler beim Laden. |
+| `deepgram.keyEnv` | `DEEPGRAM_API_KEY` | Name der Umgebungsvariable mit dem Schlüssel (z.B. in `.env`). Der Schlüssel selbst gehört nie in die Config-Datei. |
+| `deepgram.sttModel` | `nova-3` | Deepgram-Modell. |
+| `deepgram.language` | `de` | Sprache für Deepgram. |
+| `deepgram.keyterms` | `true` | Kategorien, Punktwerte und Namen als Schlüsselbegriffe mitschicken (nie die Lösung). |
 | `tts` | `piper` | `piper` (natürlich, lokal, muss eingerichtet werden) oder `say` (nur macOS, ohne Einrichtung). |
-| `piperVoice` | `models/de_DE-thorsten-high.onnx` | Piper-Stimme, relativ zu `dir`. |
+| `piperVoice` | `models/de_DE-thorsten-high.onnx` | Piper-Stimme, relativ zu `dir`. Jede offizielle Stimme im Schema `models/<sprache>_<REGION>-<name>-<qualität>.onnx` (z.B. `models/de_DE-thorsten-medium.onnx`) lädt `qbhost voice-setup` samt `.onnx.json` aus `rhasspy/piper-voices`; eigene Stimmen bitte selbst ablegen. |
 | `piperLengthScale` | `0.95` | Sprechtempo. Über 1 = langsamer, unter 1 = schneller. |
 | `ttsSplitSentences` | `false` | Lange Ansagen satzweise sprechen: Der erste Satz klingt, während die nächsten noch erzeugt werden. Siehe [VOICE.md](VOICE.md#schneller-erster-ton). |
 | `ttsDiskCache` | `false` | Feste Standardsätze ohne Spielinhalt (`FIXED_LINES`) als Audio unter `<dir>/tts-cache/` ablegen und in Sprechpausen vorab erzeugen. Überlebt Neustarts. |

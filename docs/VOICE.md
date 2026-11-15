@@ -86,6 +86,7 @@ Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel des Spiel
 - Der Bot sagt beim Beitritt an, dass er zuhört. Er verarbeitet Sprache nur, solange er im Channel ist, und **speichert keine Aufnahmen**.
 - Erkannte Sätze landen nur dann im Text-Channel, wenn der Bot darauf reagiert (Karte, Antwort mit Schlüsselwort, Ja/Nein, Befehl). Von allen, die nicht dran sind, wird nur der Anfang einer Äußerung auf den Rufnamen geprüft. Lautes Nachdenken der Person, die dran ist, wird erkannt, aber weder gespeichert noch gepostet.
 - Nach 20 Minuten ohne Spiel und ohne Sprache verlässt der Bot den Channel von selbst.
+- Standardmäßig bleibt alle Sprache auf dem Rechner. Mit Cloud-Erkennung (`voice.stt: "deepgram"`) geht Audio an Deepgram, welches genau, steht unter [Erkennung: lokal oder Cloud](#erkennung-lokal-oder-cloud).
 
 ## Tipps & Grenzen
 
@@ -117,6 +118,13 @@ Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel des Spiel
 | `whisperModel` | `models/ggml-large-v3-turbo-q5_0.bin` | genaues Hauptmodell (Antworten) |
 | `whisperFastModel` | leer (aus) | zweites, schnelles Modell für alles außer Antworten, eigener whisper-server auf `whisperPort + 1` |
 | `whisperAudioCtx` | `0` (volles Fenster) | Audiofenster `-ac` für whisper-server; 512 ≈ 10 s, begrenzt `maxSpeechSec` entsprechend |
+| `stt` | `whisper` | `whisper` (lokal) oder `deepgram` (Cloud), siehe [Erkennung: lokal oder Cloud](#erkennung-lokal-oder-cloud) |
+| `sttCloudFor` | `answer`, `confirm`, `full` | welche Phasen die Cloud hört; `wake` bleibt lokal |
+| `cloudFallback` | `local` | bei Cloud-Ausfall dieselbe Äußerung lokal erkennen; `none` = kein Rückfall |
+| `warmFallback` | `true` | lokale Rückfall-Modelle beim Beitritt mitstarten |
+| `sttTimeoutMs` | `2500` | Frist je Cloud-Versuch, danach lokal |
+| `cloudCooldownSec` | `300` | nach 3 Cloud-Fehlern in Folge so lange nur lokal |
+| `deepgram` | EU-Endpunkt, `DEEPGRAM_API_KEY`, `nova-3` | Anbieter-Einstellungen; der Schlüssel kommt aus `.env` |
 | `silenceMs` | `900` | Pause, die eine Äußerung beendet |
 | `minSpeechMs` / `minRms` | `350` / `250` | kürzere/leisere Geräusche werden verworfen |
 | `ignoreWhileSpeaking` | `true` | Echo-Schutz |
@@ -140,6 +148,97 @@ Während der Rückfrage („Tatooine?“) hört zuerst das schnelle Modell, dami
 
 `npx qbhost voice-setup` lädt beide Modelle, `npm run doctor` prüft beide.
 
+## Erkennung: lokal oder Cloud
+
+Standard ist alles lokal (`voice.stt: "whisper"`), wie oben beschrieben. Auf einem kleinen Server mit 1 vCPU braucht das genaue Modell aber mehrere Sekunden pro Äußerung (gemessen: `base` ~1,3 s, `small` ~4,5 s, unter Last etwa doppelt so lang). Mit `voice.stt: "deepgram"` hört stattdessen Deepgram (EU-Endpunkt `api.eu.deepgram.com`) in den Phasen, die in `sttCloudFor` stehen. Die Sprachausgabe bleibt immer lokal (Piper).
+
+**Einrichten:**
+1. Bei Deepgram ein Konto anlegen und einen API-Key erzeugen (Rolle „Member“ reicht).
+2. In `.env`: `DEEPGRAM_API_KEY=…` (anderer Name über `voice.deepgram.keyEnv`, Vorlage `.env.example`). Der Schlüssel steht nie in der Config-Datei und nie im Log, auch nicht in Fehlermeldungen. Fehlt er, startet die Sprachsteuerung nicht, und der Bot meldet „Deepgram-Schlüssel fehlt“.
+3. In `qbhost.config.json` die Cloud einschalten, die lokalen Modelle bleiben für die Rufnamen-Prüfung und den Rückfall:
+   ```json
+   "voice": { "stt": "deepgram", "whisperModel": "models/ggml-small-q5_1.bin", "whisperFastModel": "models/ggml-base-q5_1.bin", "whisperAudioCtx": 512 }
+   ```
+4. `npx qbhost voice-setup` (lädt die lokalen Modelle; ruft Deepgram nicht auf), dann `npm run doctor`. Der zeigt `Deepgram-Schlüssel: gesetzt (DEEPGRAM_API_KEY)` bzw. `fehlt` und prüft, ob der Endpunkt erreichbar ist. Dafür baut er nur eine TLS-Verbindung auf und schickt keine Anfrage: Das kostet nichts, prüft aber auch nicht, ob der Schlüssel gilt. Einen ungültigen Schlüssel merkt der Bot an der ersten Äußerung (Warnung „Deepgram-Schlüssel ungültig“, dann nur lokal).
+
+**Was der Bot an Deepgram schickt:** `POST https://api.eu.deepgram.com/v1/listen?model=nova-3&language=de&punctuate=true&keyterm=…&mip_opt_out=true` mit `Authorization: Token <Schlüssel>` und der Äußerung als WAV (16 kHz, mono, 16 bit). Der EU-Endpunkt verarbeitet nur in der EU; fällt er aus, weicht Deepgram nicht auf andere Regionen aus (dann greift unser Rückfall). `mip_opt_out=true` ist fest eingebaut und nicht abschaltbar: Ohne ihn darf Deepgram die Aufnahmen zum Trainieren seiner Modelle behalten (Model Improvement Program). Laut Deepgram kann das Abmelden den Preis beeinflussen, siehe deren Preisseite. Jeder Begriff des Prompts wird ein eigener `keyterm` (höchstens 50; Deepgram erlaubt insgesamt 500 Tokens und empfiehlt 20–50 Begriffe). Die Verbindung bleibt zwischen Äußerungen offen, es gibt also nicht bei jeder Äußerung einen neuen TLS-Handshake.
+
+**Wer hört was?** Je Phase (`attention`) entscheidet `sttCloudFor`:
+- `answer` (wer eine Frage beantwortet), `confirm` (Rückfrage „Paris?“), `full` (Kartenwahl, „Hier!“, Menüs): Standard Cloud.
+- `wake` (die Prüfung auf „Quizmaster“ bei allen, die nicht dran sind): Standard **lokal**.
+- Was nicht in der Liste steht, hört lokal nach der bekannten Regel: Antworten das Hauptmodell, alles andere das schnelle Modell (falls gesetzt).
+- In der Rückfrage gibt es die zweite Erkennung mit dem Hauptmodell nur, wenn Rückfrage und Antwort von verschiedenen Engines gehört werden. Hört die Cloud beide, geht dieselbe Aufnahme nicht zweimal hin.
+
+**Welches Audio verlässt den Server?** Grundsatz: Audio geht nur dann an Deepgram, wenn der Bot die sprechende Person **eindeutig** als die erkennt, die laut Spiel gerade sprechen darf, und die Phase in `sttCloudFor` steht – oder wenn die **lokale** Prüfung den Rufnamen gehört hat. In jedem Zweifel und bei jedem Fehler bleibt das Audio lokal oder wird verworfen.
+- Mit `stt: "whisper"`: keines.
+- **Die Berechtigung muss die ganze Äußerung lang gelten:** Die Cloud hört eine Äußerung nur, wenn die Person schon bei ihrem Beginn und noch bei ihrem Ende ohne Unterbrechung sprechen durfte (Beginn = Ende minus Audiodauer, bzw. die frühere Startmeldung von Discord). Wer vor dem eigenen Zug, vor seiner Antwortzeit oder vor dem Öffnen des Buzzers losspricht, wird lokal erkannt – langsamer, aber nicht verloren.
+- **Cloud-Erkennung setzt die Verknüpfung voraus** (quiz-base-Name ↔ Discord, siehe [DISCORD.md](DISCORD.md)). Unverknüpfte Personen – Zuschauer, aber auch eine Spielerin, deren quiz-base-Name nicht verknüpft ist – hört der Bot nur lokal. Ist die Person am Zug unverknüpft, hört er alle Unverknüpften lokal ganz (es könnte ja sie sein), aber nichts davon geht in die Cloud.
+- Gibt es für eine Äußerung, die nicht in die Cloud darf, keine lokale Erkennung (Server ohne whisper), verwirft der Bot sie ebenfalls (Zähler `verworfen`, höchstens eine Warnung pro Minute) – nie ersatzweise Cloud.
+- Scheitert die lokale Prüfung auf den Rufnamen (whisper abgestürzt, Modell nicht bereit), verwirft der Bot die Äußerung (Zähler `verworfen`, höchstens eine Warnung pro Minute). Sie geht nie ersatzweise in die Cloud. Ebenso fällt eine lokale Phase, deren Modell scheitert, nur auf das lokale Hauptmodell zurück.
+
+Mit `stt: "deepgram"` und der Standardliste (`answer`, `confirm`, `full`) gilt, ob das Audio in die Cloud geht:
+
+| Phase | dran (verknüpft) | nicht dran (verknüpft) | unverknüpft (Zuschauer) |
+|---|---|---|---|
+| ohne Spiel | lokal (Rufname) | lokal (Rufname) | lokal (Rufname) |
+| Menü („Quizmaster, neues Quiz …“) | **Cloud** für die Person, die gefragt hat – nur solange das Menü ihre Wahl annimmt (höchstens 5 min, bis zur Wahl, zum Abbruch oder zu einem neuen Menü) | lokal (Rufname) | lokal (Rufname) |
+| Lobby, vor Spielbeginn | lokal (Rufname) | lokal (Rufname) | lokal (Rufname) |
+| Kartenwahl | **Cloud** | lokal (Rufname) | lokal (Rufname) |
+| Frage (Antwortzeit) | **Cloud**, auch lautes Nachdenken | lokal (Rufname) | lokal (Rufname) |
+| Rückfrage („Paris?“) | **Cloud** | lokal (Rufname) | lokal (Rufname) |
+| Buzzer offen | wer schon geantwortet hat: lokal, ganz gehört | wer noch buzzern darf: **Cloud** | lokal (Rufname) |
+| Spielende | lokal (Rufname) | lokal (Rufname) | lokal (Rufname) |
+| Kartenwahl, Person am Zug unverknüpft | – | lokal (Rufname) | lokal, ganz gehört (könnte die Person am Zug sein) |
+
+„lokal (Rufname)“: nur der Anfang wird lokal auf „Quizmaster“ geprüft. Hört die lokale Prüfung den Rufnamen, geht die ganze Äußerung als Befehl in die Cloud (kurze Befehle bis 2 s erkennt die lokale Prüfung schon ganz, die gehen gar nicht hin). Bei offenem Buzzer hört der Bot alle verknüpften Spieler ganz (wie ohne Cloud), in die Cloud geht aber nur, wer laut Spiel noch buzzern darf: Wer diese Frage schon beantwortet hat, darf nicht noch einmal, und sein Nebengespräch bleibt lokal. Die Tabelle prüft `test/voice-cloud-privacy.test.ts` in einem ganzen Spiel.
+
+- Steht `wake` ausdrücklich in `sttCloudFor`, geht auch die Prüfung auf den Rufnamen in die Cloud, also der Anfang jeder Äußerung aller Anwesenden. Das ist eine bewusste Entscheidung für Server, auf denen gar kein whisper laufen soll.
+- Zur Aufnahme schickt der Bot Schlüsselbegriffe mit (`deepgram.keyterms`): Kategorien, Punktwerte, Spielernamen, Boardtitel und feste Wörter wie „Meine Antwort ist“. Sie stammen aus derselben Quelle wie der Whisper-Prompt (`voicePrompt`) und enthalten **nie die Lösung**.
+
+**Rückfall und Fristen.** Jede Cloud-Anfrage hat `sttTimeoutMs` (2,5 s). Danach wird sie abgebrochen, und dieselbe Aufnahme geht sofort an die lokale Engine dieser Phase. Kommt die Cloud-Antwort doch noch, wird sie verworfen; jede Äußerung zählt genau einmal. Beide Engines laufen nie gleichzeitig, auf 1 vCPU würde die lokale die Ersparnis auffressen.
+
+| Fehler | Verhalten |
+|---|---|
+| Zeitüberschreitung (auch 408), Netzfehler, 429, 5xx, andere 4xx (z.B. 404) | diese Äußerung lokal; nach 3 Fehlern in Folge `cloudCooldownSec` (300 s) nur lokal, dann ein neuer Versuch |
+| 401/403 (Schlüssel ungültig) | lokal, eine Warnung „Deepgram-Schlüssel ungültig“, Cloud bis zum Neustart aus |
+| 402 (Guthaben aufgebraucht) | lokal, eine Warnung „Deepgram-Guthaben aufgebraucht“, Cloud bis zum Neustart aus – danach geht kein Audio mehr hin |
+| 400/413/422 (diese Aufnahme kaputt, zu groß, Upload abgebrochen) | nur diese Anfrage lokal, zählt nicht als Störung |
+
+Weiterleitungen folgt der Bot nicht, und `deepgram.baseUrl` muss mit `https://` beginnen (nur zu `127.0.0.1`/`localhost` geht `http://`, für Tests). Eine andere Adresse ist beim Laden der Konfiguration ein Fehler; Schlüssel und Audio gehen nie unverschlüsselt über das Netz.
+
+**Schlechtester Fall der Latenz.** Hängt die Cloud, kommt der Text einer Antwort erst nach `sttTimeoutMs` (2,5 s) plus der lokalen Erkennung mit dem Hauptmodell: mit der Server-Vorlage (`small`, ~4,5 s auf 1 vCPU, unter Last ~9 s) also nach **7–11,5 s**. Ist der Rückfall nicht vorgewärmt (`warmFallback: false`), kommt der Kaltstart des whisper-servers dazu, geschätzt **9–14 s**. Für Kartenwahl und Rückfrage (Rückfall `base`, ~1,3–2,6 s) sind es ~4–5 s. Der Breaker begrenzt das auf die ersten 3 Äußerungen eines Ausfalls; eine Cloud, die nur jedes zweite Mal hängt, öffnet ihn aber nie (er zählt Fehler in Folge). Eine Antwort kurz vor Ablauf der Antwortzeit kann so verfallen. `sttTimeoutMs` nach den ersten echten Messungen prüfen; 1,5 s senkt den schlechtesten Fall um 1 s.
+
+**RAM.** `warmFallback: true` hält die lokalen Rückfall-Modelle dauerhaft geladen, auch solange die Cloud läuft – also genauso viel Speicher wie ganz lokal. Jeder whisper-server braucht mindestens die Größe seines Modells (`base-q5_1` 60 MB, `small-q5_1` ~190 MB, `large-v3-turbo-q5_0` 574 MB) plus Arbeitsspeicher für die Erkennung; den echten Wert auf dem Server mit `docker stats` ablesen. Mit `warmFallback: false` spart ein kleiner Server den Speicher des Hauptmodells, bezahlt ihn aber beim ersten Ausfall mit dem Kaltstart. Die Rufnamen-Prüfung (Standard lokal) läuft immer.
+
+Mit `cloudFallback: "none"` oder wenn die lokale Erkennung nicht eingerichtet ist bzw. ebenfalls scheitert, gibt es keinen Rückfall (auch kein Ausweichen auf ein anderes lokales Modell). Dann steht wie bisher `Erkennung: …` im Log, und der Bot schreibt einmal pro Spiel „⚠️ Sprache gestört – bitte tippen“ in den Spiel-Channel. Getippte Antworten und Befehle funktionieren immer.
+
+**Messen: lokal gegen Cloud.** `tools/stt-probe.ts` schickt echte Aufnahmen über dieselbe Route wie der Bot (`answer`) und misst:
+
+```sh
+npx tsx tools/stt-probe.ts --engine local --prompt 'Quizmaster, Meine Antwort ist, Geschichte, Paris' clips/*.wav
+npx tsx tools/stt-probe.ts --engine cloud --prompt 'Quizmaster, Meine Antwort ist, Geschichte, Paris' clips/*.wav
+```
+
+- Jede WAV-Datei läuft `--runs` mal (Standard 5) plus einen Aufwärmlauf, der nicht zählt (Modell laden, Verbindung aufbauen).
+- Ausgabe je Datei: Engine, Median, Maximum, ob ein Rückfall nötig war, und der erkannte Text. Am Ende p50/p90 über alle Läufe.
+- Ohne `--engine` gilt die Konfiguration samt Rückfall. `--engine local` erzwingt whisper.cpp, `--engine cloud` erzwingt Deepgram ohne Rückfall, damit Fehler sichtbar werden. `--config <datei>` nimmt eine andere Konfiguration.
+- Fehlt der Schlüssel, bricht das Werkzeug mit „Deepgram-Schlüssel fehlt“ ab. Es gibt nur die Texte der übergebenen Clips aus, keine Schlüssel.
+- Jeder Cloud-Lauf ist eine echte, abgerechnete Anfrage (wenige Sekunden Audio je Lauf).
+
+Beispiel (Mac M-Serie, whisper `large-v3-turbo-q5_0`, Clips aus der Benchmark-Sammlung):
+
+```
+Route answer: whisper:large-v3-turbo-q5_0, 5 Läufe + 1 Aufwärmlauf je Datei
+
+Datei           Audio    Engine                       Median   Max      Rückfall  Text
+ja-anna.wav     461 ms   whisper:large-v3-turbo-q5_0  1062 ms  1078 ms  nein      „Ja.“
+paris-anna.wav  1834 ms  whisper:large-v3-turbo-q5_0  1085 ms  1108 ms  nein      „Meine Antwort ist Paris.“
+
+Gesamt: n=10 p50=1073 ms p90=1095 ms
+```
+
+**Was muss lokal da sein?** `voice-setup` und `doctor` richten sich nach der Einstellung. whisper.cpp und die Modelle der Phasen, die lokal hören (Standard: die Rufnamen-Prüfung), sind Pflicht. Die Rückfall-Modelle lädt `voice-setup` mit; fehlen sie, zeigt `doctor` „⚠️ Rückfall nicht verfügbar: …“, die Sprachsteuerung startet trotzdem (der Beitritt scheitert auch mit `warmFallback` nicht, es gibt nur eine Warnung), und ein Cloud-Ausfall führt dann zum Hinweis im Chat. Mit `cloudFallback: "none"` und `wake` in `sttCloudFor` braucht der Server gar kein whisper. `warmFallback` (Standard `true`) startet die Rückfall-Modelle schon beim Beitritt; sonst kostet der erste Ausfall einen Kaltstart von mehreren Sekunden.
+
 ## Schneller erster Ton
 
 Piper liefert Audio erst, wenn der ganze Text fertig ist, und arbeitet einen Text nach dem anderen ab. Eine lange Quizfrage (~250 Zeichen) braucht deshalb auf dem Mac gut 3 s und auf einem Server mit 1 vCPU rund 8 s bis zum ersten Ton. Zwei Schalter helfen, ganz ohne Cloud. Beide sind standardmäßig aus, die Server-Vorlage (`deploy/qbhost.config.server.example.json`) schaltet sie ein.
@@ -149,6 +248,7 @@ Piper liefert Audio erst, wenn der ganze Text fertig ist, und arbeitet einen Tex
 - Alle Teile einer Ansage gehören zusammen. Was für die Ansage gilt, gilt für alle Teile: Unterbricht die Person, die dran ist, einen Hinweis (`bargeIn`), oder ersetzt eine neuere Ansage mit demselben Zweck die alte (etwa „wer ist dran“), fällt der ganze Rest weg. Teile, die die Sprachausgabe noch nicht begonnen hat, werden gar nicht mehr erzeugt, damit die nächste Ansage nicht dahinter wartet. Nur die gerade laufende Synthese läuft zu Ende, gespielt wird sie nicht, und die Schlange wartet nicht auf sie. Zwischen zwei Teilen kommt keine andere Ansage.
 - Eine Ansage gilt vom Beginn ihres ersten Teils bis zum Ende ihres letzten als „der Bot spricht“, auch in einer Pause, in der der nächste Teil noch erzeugt wird. Auf einem langsamen Server kann das bei Multiple Choice gut eine Sekunde sein. Barge-in verwirft auch in dieser Pause den Rest. Wer nicht dran ist, kann dort ebenso wenig unterbrechen, und eine Antwort in der Pause einer Frage wird wie beim Sprechen ignoriert, auch wenn sie erst nach dem letzten Teil fertig ist. Kommt der nächste Teil nicht innerhalb von 15 s (`PART_GAP_LIMIT_MS`, etwa weil die Sprachausgabe hängt), verwirft der Bot den Rest der Ansage, schreibt eine Warnung ins Log und hört wieder zu. So bleibt er bei einer hängenden Engine stumm, aber nicht taub. Die 15 s sind großzügig gewählt: Piper braucht auf 1 vCPU selten mehr als 4 s für einen Satz.
 - Der Echo-Schutz vergleicht mit dem Teil, der gerade spielt, und in der Pause mit dem Teil davor.
+- Jede einzelne Synthese hat eine Frist von 10 s + 60 ms je Zeichen (246 Zeichen: 24,8 s, etwa das Dreifache dessen, was Piper auf 1 vCPU braucht). Verliert Piper eine Antwort oder hängt der Worker, gibt der Bot diesen Satz danach auf, beendet den Piper-Prozess und startet ihn beim nächsten Satz neu. Ins Log kommt eine Warnung ohne den Ansagetext. So bleibt der Bot auch dann nicht dauerhaft stumm, wenn die Ansage vorher per Barge-in, Ersatz oder Spielende verworfen wurde. Das gilt mit und ohne Satzteilung; bei `say` wird der Prozess nach der Frist beendet.
 
 **`ttsDiskCache`: feste Sätze auf Platte.** Sätze, die immer gleich lauten („Jetzt die anderen! Wer es weiß, ruft: Hier!“, „Okay. Deine Antwort?“, Regel- und Hilfesätze), legt der Bot als Audio unter `<dir>/tts-cache/` ab, also `.qbhost/voice/tts-cache/`, auf dem Server im `data/`-Volume. Sie überleben Neustarts und klingen sofort (`⏱ ansage … cache=ja`, gemessen 0 ms statt ~0,5 s auf dem Mac).
 - Auf die Platte kommt nur, was in `FIXED_LINES` (`src/voice/narration.ts`) steht, und zwar nur genau dieser Text oder genau einer seiner Teile. Diese Sätze enthalten keine Namen, Punkte, Kategorien, Fragen, Antworten oder Lösungen. Ein Satz mit Spielinhalt landet nie auf der Platte, auch dann nicht, wenn er mit einem festen Satz beginnt.
@@ -174,7 +274,7 @@ Mit `voice.latencyLog` (Standard `true`) schreibt der Bot `⏱`-Zeilen auf die L
 - `attention`: wie genau der Bot zuhörte (`answer`, `confirm`, `full`, `wake`).
 - `audio`: Länge der Aufnahme.
 - `stt`: Zeit vom Eingang der fertigen Äußerung bis zum erkannten Text, alle Durchgänge zusammen.
-- `rueckfall`: ob eine andere Engine übernehmen musste. Heute immer `nein`, die Provider-Schicht (Cloud → lokal) füllt das Feld. Auch der Ausfall des schnellen Modells, bei dem das Hauptmodell übernimmt, zählt noch nicht als Rückfall (dann steht nur `engine=schnell+haupt`).
+- `rueckfall`: `ja`, wenn eine andere Engine übernehmen musste: Die Cloud fiel aus und die lokale Erkennung hörte dieselbe Äußerung (`engine=deepgram:nova-3+whisper:…`), die Cloud war nach Fehlern pausiert (`engine=whisper:…`), oder das schnelle Modell fiel aus und das Hauptmodell übernahm (`engine=schnell+haupt`). Jeder Rückfall zählt in `rueckfaelle` der Bilanz, auch bei Äußerungen ohne eigene Zeile.
 
 **`ansage`** – eine Zeile je Satz, sobald er hörbar startet. Ein Satz, der nie abgespielt wird (Wiedergabe scheitert, Discord startet nicht), bekommt keine Zeile.
 - `engine`: Sprachausgabe und Stimme.
@@ -191,7 +291,7 @@ Mit `voice.latencyLog` (Standard `true`) schreibt der Bot `⏱`-Zeilen auf die L
 - `tts`: reine Synthesedauer der Antwort, wie in `ansage`.
 - `start`: alles zwischen Einreihen und Ton außer der Synthese: Warten auf eine laufende Synthese, auf den vorigen Satz und bis der Transport wirklich abspielt.
 
-**`bilanz`** – am Ende jedes Spiels (auch bei `!quiz ende` und wenn das Spiel abbricht) und beim Verlassen des Voice-Channels, danach beginnt die Zählung neu. `n` ist die Zahl der `erkennung`-Zeilen. `stt_p50/p90` zählen alle vollständig erkannten Äußerungen, auch die verworfenen (ohne die kurze Prüfung auf den Rufnamen), denn die Erkennung kostet dieselbe Zeit. Dazu kommen p50/p90 von `tts` (ohne Cache-Treffer) und `reaktion.gesamt`, `verworfen` und `rueckfaelle`. Hat seit der letzten Bilanz niemand gesprochen, gibt es keine; Spielende und Verlassen direkt nacheinander ergeben also nur eine.
+**`bilanz`** – am Ende jedes Spiels (auch bei `!quiz ende` und wenn das Spiel abbricht) und beim Verlassen des Voice-Channels, danach beginnt die Zählung neu. `n` ist die Zahl der `erkennung`-Zeilen. `stt_p50/p90` zählen alle vollständig erkannten Äußerungen, auch die verworfenen (ohne die kurze Prüfung auf den Rufnamen), denn die Erkennung kostet dieselbe Zeit. Dazu kommen p50/p90 von `tts` (ohne Cache-Treffer) und `reaktion.gesamt`, `verworfen` und `rueckfaelle`. Wurde seit der letzten Bilanz nichts vollständig erkannt, gibt es keine; Spielende und Verlassen direkt nacheinander ergeben also nur eine. Auch Plaudern nach dem Spiel ohne „Quizmaster“ erzeugt beim Verlassen keine Bilanz mit `n=0`; diese Verwerfungen erscheinen in `verworfen` der nächsten Bilanz.
 
 **Auswerten:** `tools/voice-latency.ts` liest ein Log von stdin und gibt p50/p90 je Schritt und Engine aus. Es nimmt nur Zeilen im Format des Loggers (`12:00:00 [voice] ⏱ …`, auch hinter dem Präfix von `docker compose logs`) und verträgt ANSI-Farben und CRLF.
 
