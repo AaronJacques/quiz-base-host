@@ -160,3 +160,34 @@ function joinList(items: string[]): string {
   if (items.length <= 1) return items.join('');
   return `${items.slice(0, -1).join(', ')} und ${items.at(-1)}`;
 }
+
+/**
+ * Fixed spoken lines – no placeholders: no names, points, categories, questions, answers or solutions.
+ * Only these (and their sentence parts, exactly) may be kept on disk (`voice.ttsDiskCache`, rule 5);
+ * the short ones are pre-warmed while the bot is quiet. Most frequent first. Lines spoken as literals in
+ * `src/discord` are repeated here verbatim – `test/voice-tts-local.test.ts` checks they still exist there.
+ */
+export const FIXED_LINES: readonly string[] = [
+  BUZZER_OPEN_LINE,
+  'Okay. Deine Antwort?',
+  ANSWER_KEYWORD_LINE,
+  'Niemand? Schade.',
+  'Da bin ich mir nicht sicher. Die Spielleitung entscheidet.',
+  START_LINE,
+  ANSWER_HOW_LINE,
+  'Hallo! Ich bin euer Quizmaster und höre ab jetzt zu.',
+  'Hallo! Ich bin euer Quizmaster und höre ab jetzt zu. Sagt: Quizmaster, neues Quiz, und den Namen des Quiz.',
+  END_ASK_LINE,
+  'Das habe ich nicht verstanden. Sag: Quizmaster, Hilfe.',
+  'Gerade gibt es nichts zu wiederholen.',
+  'Gerade ist kein Brett offen.',
+  'Noch keine Punkte.',
+  'Es ist noch niemand in der Lobby.',
+  'Quiz Base lässt das Spiel noch nicht starten.',
+  'Auf diesem Board ist nichts mehr frei.',
+  'Das Spiel ist vorbei.',
+  'Okay, ich gehe. Bis zum nächsten Quiz!',
+  'Ich muss leider los. Tschüss!',
+  'Hier ist es still geworden. Ich verabschiede mich!',
+  VOICE_HELP,
+];

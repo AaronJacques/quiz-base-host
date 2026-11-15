@@ -6,8 +6,10 @@ import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import type { Config } from '../config.ts';
 import { createLogger } from '../core/logger.ts';
+import { FIXED_LINES } from './narration.ts';
 import { WhisperServerStt } from './stt.ts';
-import { createTts } from './tts.ts';
+import { CachedTts, createEngine, DiskCachedTts, ttsIdentity } from './tts.ts';
+import { forSpeech, splitSentences } from './voice-host.ts';
 
 const log = createLogger('voice');
 const run = promisify(execFile);
@@ -29,7 +31,7 @@ export interface VoiceKitImpl {
   stt: WhisperServerStt;
   /** The fast second model (`voice.whisperFastModel`) for everything else; undefined = the main model hears all. */
   fastStt?: WhisperServerStt;
-  tts: ReturnType<typeof createTts>;
+  tts: CachedTts;
   warmup(): Promise<void>;
   close(): Promise<void>;
 }
@@ -44,18 +46,58 @@ export function createVoiceKit(config: Config): VoiceKitImpl {
   const v = config.voice;
   const stt = new WhisperServerStt(v);
   const fastStt = v.whisperFastModel ? new WhisperServerStt(v, { model: v.whisperFastModel, port: fastWhisperPort(v) }) : undefined;
-  const tts = createTts(v);
+  const engine = createEngine(v);
+  const disk = v.ttsDiskCache ? new DiskCachedTts(engine, { dir: ttsCacheDir(v), identity: ttsIdentity(v), allow: isFixedSpeech }) : null;
+  const tts = new CachedTts(disk ?? engine);
+  let warming = false;
   return {
     stt,
     fastStt,
     tts,
     warmup: async () => {
       await Promise.all([stt.start(), fastStt?.start(), tts.synth('Hallo.')]);
+      // Missing short fixed lines are made in the background, only while the voice path is quiet.
+      if (disk && !warming) {
+        warming = true;
+        void disk.warm(warmLines(v), { quietMs: WARM_QUIET_MS });
+      }
     },
     close: async () => {
       await Promise.all([stt.close(), fastStt?.close(), tts.close()]);
     },
   };
+}
+
+/** Pre-warming starts only after this long without speaking, hearing or synthesising. */
+export const WARM_QUIET_MS = 3000;
+
+/** Longer fixed lines are not pre-warmed (one of them could hold up a real line); they are stored when first spoken. */
+export const WARM_MAX_CHARS = 80;
+
+export function ttsCacheDir(v: Config['voice']): string {
+  return path.resolve(v.dir, 'tts-cache');
+}
+
+/** Every exact text that may go to disk: each fixed line as spoken, and each of its sentence parts. */
+const FIXED_SPEECH = new Set(
+  FIXED_LINES.flatMap((line) => {
+    const clean = forSpeech(line);
+    return [clean, ...splitSentences(clean)];
+  }),
+);
+
+/** May this exact text be kept on disk? Only fixed lines and their parts – never anything with game content. */
+export function isFixedSpeech(text: string): boolean {
+  return FIXED_SPEECH.has(text);
+}
+
+/** What pre-warming makes: the texts `say` will hand to the engine, short ones only, most frequent first. */
+export function warmLines(v: Config['voice']): string[] {
+  const texts = FIXED_LINES.flatMap((line) => {
+    const clean = forSpeech(line);
+    return v.ttsSplitSentences ? splitSentences(clean) : [clean];
+  });
+  return [...new Set(texts)].filter((t) => t.length <= WARM_MAX_CHARS);
 }
 
 /** The configured Whisper models: the main one and, if set, the fast one. */

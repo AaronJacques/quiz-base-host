@@ -112,6 +112,8 @@ Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel des Spiel
 | `autoJoin` | `true` | bei `!quiz neu` automatisch in den Voice-Channel der Spielleitung |
 | `tts` | `piper` | `piper` oder `say` (macOS) |
 | `piperLengthScale` | `0.95` | Sprechtempo (>1 langsamer) |
+| `ttsSplitSentences` | `false` | lange Ansagen satzweise sprechen, siehe [Schneller erster Ton](#schneller-erster-ton) |
+| `ttsDiskCache` | `false` | feste Standardsätze auf Platte cachen und vorab erzeugen, siehe [Schneller erster Ton](#schneller-erster-ton) |
 | `whisperModel` | `models/ggml-large-v3-turbo-q5_0.bin` | genaues Hauptmodell (Antworten) |
 | `whisperFastModel` | leer (aus) | zweites, schnelles Modell für alles außer Antworten, eigener whisper-server auf `whisperPort + 1` |
 | `whisperAudioCtx` | `0` (volles Fenster) | Audiofenster `-ac` für whisper-server; 512 ≈ 10 s, begrenzt `maxSpeechSec` entsprechend |
@@ -137,6 +139,24 @@ Während der Rückfrage („Tatooine?“) hört zuerst das schnelle Modell, dami
 ```
 
 `npx qbhost voice-setup` lädt beide Modelle, `npm run doctor` prüft beide.
+
+## Schneller erster Ton
+
+Piper liefert Audio erst, wenn der ganze Text fertig ist, und arbeitet einen Text nach dem anderen ab. Eine lange Quizfrage (~250 Zeichen) braucht deshalb auf dem Mac gut 3 s und auf einem Server mit 1 vCPU rund 8 s bis zum ersten Ton. Zwei Schalter helfen, ganz ohne Cloud. Beide sind standardmäßig aus, die Server-Vorlage (`deploy/qbhost.config.server.example.json`) schaltet sie ein.
+
+**`ttsSplitSentences`: satzweise sprechen.** Der Bot teilt jede Ansage an Satzenden in Teile. Der erste Teil klingt, sobald er fertig ist, und die übrigen entstehen, während er spielt. Piper ist schneller als Echtzeit, deshalb ist der nächste Teil meist fertig, bevor der vorige ausklingt. Gemessen auf dem Mac (Piper, 5 Läufe) für die lange Frage: erster Ton 3,2 s → 0,87 s (p50), keine Lücke zwischen den Teilen.
+- Getrennt wird nur nach `.`, `!` oder `?` mit Leerzeichen und Großbuchstabe, Ziffer oder Anführungszeichen danach. Nie nach einer Zahl („1. September“, „Geschichte für 200.“), einem einzelnen Buchstaben („z. B.“) oder einer Abkürzung („ca.“, „Nr.“, „Chr.“), nie nach „…“ und nie innerhalb der Antwortmöglichkeiten („A: … B: …“). Kommas trennen nie, das würde die Betonung zerreißen. Teile unter 25 Zeichen hängt der Bot an den nächsten (den letzten an den vorigen), damit kurze Sätze wie „Richtig! Plus 200.“ ein Stück bleiben.
+- Alle Teile einer Ansage gehören zusammen. Was für die Ansage gilt, gilt für alle Teile: Unterbricht die Person, die dran ist, einen Hinweis (`bargeIn`), oder ersetzt eine neuere Ansage mit demselben Zweck die alte (etwa „wer ist dran“), fällt der ganze Rest weg. Teile, die die Sprachausgabe noch nicht begonnen hat, werden gar nicht mehr erzeugt, damit die nächste Ansage nicht dahinter wartet. Nur die gerade laufende Synthese läuft zu Ende, gespielt wird sie nicht, und die Schlange wartet nicht auf sie. Zwischen zwei Teilen kommt keine andere Ansage.
+- Eine Ansage gilt vom Beginn ihres ersten Teils bis zum Ende ihres letzten als „der Bot spricht“, auch in einer Pause, in der der nächste Teil noch erzeugt wird. Auf einem langsamen Server kann das bei Multiple Choice gut eine Sekunde sein. Barge-in verwirft auch in dieser Pause den Rest. Wer nicht dran ist, kann dort ebenso wenig unterbrechen, und eine Antwort in der Pause einer Frage wird wie beim Sprechen ignoriert, auch wenn sie erst nach dem letzten Teil fertig ist. Kommt der nächste Teil nicht innerhalb von 15 s (`PART_GAP_LIMIT_MS`, etwa weil die Sprachausgabe hängt), verwirft der Bot den Rest der Ansage, schreibt eine Warnung ins Log und hört wieder zu. So bleibt er bei einer hängenden Engine stumm, aber nicht taub. Die 15 s sind großzügig gewählt: Piper braucht auf 1 vCPU selten mehr als 4 s für einen Satz.
+- Der Echo-Schutz vergleicht mit dem Teil, der gerade spielt, und in der Pause mit dem Teil davor.
+
+**`ttsDiskCache`: feste Sätze auf Platte.** Sätze, die immer gleich lauten („Jetzt die anderen! Wer es weiß, ruft: Hier!“, „Okay. Deine Antwort?“, Regel- und Hilfesätze), legt der Bot als Audio unter `<dir>/tts-cache/` ab, also `.qbhost/voice/tts-cache/`, auf dem Server im `data/`-Volume. Sie überleben Neustarts und klingen sofort (`⏱ ansage … cache=ja`, gemessen 0 ms statt ~0,5 s auf dem Mac).
+- Auf die Platte kommt nur, was in `FIXED_LINES` (`src/voice/narration.ts`) steht, und zwar nur genau dieser Text oder genau einer seiner Teile. Diese Sätze enthalten keine Namen, Punkte, Kategorien, Fragen, Antworten oder Lösungen. Ein Satz mit Spielinhalt landet nie auf der Platte, auch dann nicht, wenn er mit einem festen Satz beginnt.
+- Dateiname: SHA-256 aus Engine, Stimme, Sprechtempo und Text. Eine andere Stimme oder ein anderes Tempo trifft also nie alte Dateien. Geschrieben wird erst in eine `.part`-Datei, dann umbenannt. Kaputte oder fremde Dateien ignoriert der Bot und schreibt sie neu. Beim Start prüft er von jeder Datei Kopf und Länge; nur geprüfte Dateien zählen als `cache=ja`. Der Ordner darf jederzeit gelöscht werden.
+- **Vorwärmen:** Nach dem Beitritt erzeugt der Bot fehlende feste Sätze bis 80 Zeichen im Hintergrund. Das geschieht nur, wenn seit 3 s nichts gesprochen, erkannt oder erzeugt wurde, und immer nur ein Satz auf einmal. Nach jedem Satz wartet er wieder volle 3 s Ruhe ab, damit ein Server mit 1 vCPU nie lange am Stück mit Piper belegt ist. In Discord zählt schon der Sprechbeginn einer Person als Aktivität, bis ihre Äußerung verarbeitet ist. Im Loopback-Raum (Harness) gibt es kein Signal für den Sprechbeginn, dort zählt erst die fertige Äußerung. Eine echte Ansage wartet im schlechtesten Fall hinter dem einen kurzen Satz, der gerade erzeugt wird. Das gilt auch, wenn jemand während dieser Synthese zu sprechen beginnt, denn sie lässt sich nicht abbrechen. Längere feste Sätze (Hilfe, Regeln) landen beim ersten echten Sprechen im Cache. Da der Cache Neustarts überlebt, läuft das Vorwärmen nur beim ersten Start mit einer Stimme.
+- Mit `ttsSplitSentences` speichert der Bot die einzelnen Teile fester Sätze, nicht die ganzen Sätze. Nach dem Umschalten werden sie deshalb einmal neu erzeugt.
+
+`⏱`-Zeilen mit Satzteilung: Jeder Teil bekommt eine eigene `⏱ ansage`-Zeile. `⏱ reaktion` misst bis zum ersten hörbaren Teil. Bei späteren Teilen enthält `warte` auch die Zeit, in der die Teile davor gesprochen wurden. `tts` beginnt bei geteilten Ansagen genau dann, wenn die Sprachausgabe den Teil übernimmt. Wartet eine Ansage hinter einem Satz, der gerade vorgewärmt wird, zählt diese Zeit zu `warte`, nicht zu `tts`. Wird Teil 1 nie hörbar (keine Synthese, Wiedergabe gescheitert), misst `reaktion` bis zum nächsten hörbaren Teil.
 
 ## Latenz messen
 

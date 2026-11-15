@@ -145,6 +145,8 @@ Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennu
 | `tts` | `piper` | `piper` (natürlich, lokal, muss eingerichtet werden) oder `say` (nur macOS, ohne Einrichtung). |
 | `piperVoice` | `models/de_DE-thorsten-high.onnx` | Piper-Stimme, relativ zu `dir`. |
 | `piperLengthScale` | `0.95` | Sprechtempo. Über 1 = langsamer, unter 1 = schneller. |
+| `ttsSplitSentences` | `false` | Lange Ansagen satzweise sprechen: Der erste Satz klingt, während die nächsten noch erzeugt werden. Siehe [VOICE.md](VOICE.md#schneller-erster-ton). |
+| `ttsDiskCache` | `false` | Feste Standardsätze ohne Spielinhalt (`FIXED_LINES`) als Audio unter `<dir>/tts-cache/` ablegen und in Sprechpausen vorab erzeugen. Überlebt Neustarts. |
 | `sayVoice` | `Anna` | Stimme für `tts: "say"`. Deutsche Stimmen mit vollem Namen angeben, z.B. `Anna`, `Reed (Deutsch (Deutschland))`. |
 | `silenceMs` | `900` | Sprechpause, nach der eine Äußerung als beendet gilt. |
 | `minSpeechMs` | `350` | Kürzere Geräusche werden verworfen (Husten, Klicks). |

@@ -173,6 +173,17 @@ export const ConfigSchema = z.object({
       /** >1 = langsamer, <1 = schneller. */
       piperLengthScale: z.number().default(0.95),
       sayVoice: z.string().default('Anna'),
+      /**
+       * Lange Ansagen satzweise sprechen: Der erste Satz klingt schon, während die nächsten noch erzeugt
+       * werden. Senkt die Zeit bis zum ersten Ton bei langen Fragen auf die Dauer des ersten Satzes.
+       */
+      ttsSplitSentences: z.boolean().default(false),
+      /**
+       * Feste Standardsätze (`FIXED_LINES` in `src/voice/narration.ts`, ohne Namen oder Spielinhalt) als
+       * Audio unter `<dir>/tts-cache/` ablegen. Überlebt Neustarts; fehlende kurze Sätze werden in
+       * Sprechpausen vorab erzeugt.
+       */
+      ttsDiskCache: z.boolean().default(false),
       /** Sprechpause, nach der eine Äußerung als beendet gilt. */
       silenceMs: z.number().int().default(900),
       /** Kürzere/leisere Äußerungen werden verworfen (Husten, Klicks, Rauschen). */

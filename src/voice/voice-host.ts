@@ -51,13 +51,29 @@ export type Attention = 'answer' | 'confirm' | 'full' | 'wake';
 /** How much of an utterance is checked for "Quizmaster" when someone is not on turn. */
 const WAKE_HEAD_MS = 2000;
 
-interface QueueItem {
-  text: string;
+/** All parts of one `say`: `key` and `interruptible` hold for the whole group. */
+interface Group {
   key?: string;
   interruptible: boolean;
-  audio: Promise<Pcm | null>;
+  /** Replaced or interrupted: parts not synthesised yet are skipped, queued ones dropped. */
+  cancelled: boolean;
+  /** Resolves (with null) when the group is cancelled – the queue stops waiting for a dropped part's audio. */
+  dropped: Promise<null>;
+  drop: () => void;
+  /** Parts not yet spoken or dropped – `done` resolves the `say` at 0. */
+  left: number;
   done: () => void;
+}
+
+interface QueueItem {
+  text: string;
+  group: Group;
+  /** Same as `group.interruptible` (echo protection reads it from here). */
+  interruptible: boolean;
+  audio: Promise<Pcm | null>;
   times: SpeechTimes;
+  /** Splitting: lets the synthesis chain move on without this part (its engine call hangs). */
+  abandon?: () => void;
 }
 
 interface Spoken {
@@ -65,7 +81,19 @@ interface Spoken {
   to: number;
   interruptible: boolean;
   text: string;
+  /** Splitting: the group of the part – its interval is stretched over the gap to the group's next part. */
+  group?: Group;
 }
+
+/**
+ * Splitting: how long the bot waits in the gap for the next part of a group it is already speaking, as
+ * "still talking" (deaf to everyone not on turn). After that the group is given up like an interrupt, so a
+ * hung engine (Piper has no timeout) leaves the bot mute but never deaf for long. Why 15 s: on a 1-vCPU
+ * server Piper (thorsten-high) needs ~8 s for a whole 246-character question and rarely over 4 s for one
+ * sentence; a part may also wait behind one pre-warm line (≤ 80 characters, ~2.5 s). And the part's
+ * synthesis already ran while the previous part played. 15 s is three times the worst real part.
+ */
+export const PART_GAP_LIMIT_MS = 15_000;
 
 /** Words the German TTS voice gets wrong, spelled the way it pronounces them right. */
 const PRONOUNCE: [RegExp, string][] = [
@@ -93,6 +121,58 @@ export function forSpeech(text: string): string {
   return out;
 }
 
+/** Parts shorter than this are joined to a neighbour: one more synthesis call is not worth a few words. */
+export const MIN_PART_CHARS = 25;
+
+/** Words that end in a full stop without ending a sentence (compared in lower case). */
+const ABBREVIATIONS = new Set(
+  'ca bzw usw etc evtl ggf inkl exkl bspw vgl dr prof nr st str mio mrd jh jhd chr vs sog hl allg abs abb ff mind max min'.split(' '),
+);
+
+/**
+ * Splits speakable text into sentence parts for `voice.ttsSplitSentences`: a cut only after `.`, `!` or
+ * `?` (also behind a closing quote) followed by a space and a capital letter, digit or opening quote. A
+ * full stop after a digit ("1. September", "Geschichte für 200."), a single letter ("z. B.", "A.") or a
+ * known abbreviation ("ca.", "Nr.") never cuts; neither does "…". From the first answer option on
+ * ("A: …", "A) …") nothing is cut, so the options stay one part. Parts under `MIN_PART_CHARS` are joined
+ * to the next one (the last one to the previous). Why: the first part is the first sentence, so its
+ * synthesis is short (≈ 1 s for ~30 characters on a 1-vCPU server) and the rest is made while it plays –
+ * Piper is faster than real time, so the next sentence is usually ready before the current one ends.
+ * Commas never cut: that would break the intonation.
+ */
+export function splitSentences(text: string): string[] {
+  const options = text.search(/(?:^|\s)[A-H][:)]\s/);
+  const stopAt = options < 0 ? text.length : options;
+  const sentences: string[] = [];
+  let from = 0;
+  for (const m of text.matchAll(/([.!?])["“”»’']?(?=\s+["„“»']?[\p{Lu}\d])/gu)) {
+    const end = m.index + m[0].length;
+    if (end > stopAt) break;
+    if (m[1] === '.') {
+      const word = /(\S+)\.$/u.exec(text.slice(from, m.index + 1))?.[1] ?? '';
+      const bare = word.replace(/^[(„"»']+/u, '');
+      if (/\d$/.test(bare) || /^\p{L}$/u.test(bare) || /\.\p{L}$/u.test(bare) || ABBREVIATIONS.has(bare.toLowerCase())) continue;
+    }
+    sentences.push(text.slice(from, end).trim());
+    from = end;
+  }
+  sentences.push(text.slice(from).trim());
+  const parts: string[] = [];
+  let buf = '';
+  for (const s of sentences.filter(Boolean)) {
+    buf = buf ? `${buf} ${s}` : s;
+    if (buf.length >= MIN_PART_CHARS) {
+      parts.push(buf);
+      buf = '';
+    }
+  }
+  if (buf) {
+    if (parts.length) parts[parts.length - 1] = `${parts.at(-1)} ${buf}`;
+    else parts.push(buf);
+  }
+  return parts;
+}
+
 /**
  * One voice session: speaks queued sentences one after another (synthesising the
  * next while the current one plays) and turns utterances into text.
@@ -104,26 +184,95 @@ export class VoiceHost {
   private spoken: Spoken[] = [];
   private closed = false;
   private currentFrom = 0;
+  /**
+   * Splitting: when the first part of the group being spoken started. Stays set in the gap while the next
+   * part of the same group is still being synthesised – the bot is still talking (barge-in, echo, rule 8).
+   */
+  private groupFrom = 0;
+  /** Someone started to speak (`onSpeechStart`): pre-warming waits until their utterance is in. */
+  private speechHolds = new Map<string, { release: () => void; timer: ReturnType<typeof setTimeout> }>();
   /** The sentence playing now was cut short by barge-in. */
   private cut = false;
   /** `⏱` measurement – timestamps only, never awaited. */
   private latency: LatencyMeter;
   /** The sentence whose synthesis was started last (serial engines like Piper start the next one after it). */
   private lastSynth: SpeechTimes | null = null;
+  /** `ttsSplitSentences`: the last part handed to the engine – the next one starts only after it. */
+  private synthTail: Promise<unknown> = Promise.resolve();
+  /** Held on the TTS while the queue is not empty (pre-warming waits, see `TextToSpeech.hold`). */
+  private speakHold: (() => void) | null = null;
 
   constructor(private d: VoiceHostDeps) {
     this.latency = new LatencyMeter({ enabled: d.cfg.latencyLog !== false, log: d.latencyLog ?? ((l) => log.info(l)) });
-    d.transport.onUtterance((u) => void this.hear(u).catch((e) => log.warn(`Erkennung: ${(e as Error).message}`)));
+    d.transport.onUtterance((u) => {
+      const release = this.hold();
+      this.endSpeechHold(u.speaker.id);
+      void this.hear(u)
+        .catch((e) => log.warn(`Erkennung: ${(e as Error).message}`))
+        .finally(release);
+    });
     // Discord tells us when someone starts to speak: the person on turn stops a hint right away.
     d.transport.onSpeechStart?.((s) => {
-      if (this.playing?.interruptible && this.currentFrom && this.mayInterrupt(s)) this.interrupt(s.displayName);
+      this.speechStarted(s);
+      if (this.playing?.interruptible && this.speaking() && this.mayInterrupt(s)) this.interrupt(s.displayName);
     });
     d.transport.onClose(() => {
       this.closed = true;
-      this.queue.splice(0).forEach((q) => q.done());
+      this.cancel(() => true);
+      this.releaseSpeakHold();
+      for (const id of [...this.speechHolds.keys()]) this.endSpeechHold(id);
       this.latencySummary();
       d.onClose?.();
     });
+  }
+
+  /** Tells the TTS the voice path is busy; never throws. */
+  private hold(): () => void {
+    try {
+      const release = this.d.tts.hold?.();
+      return () => {
+        try {
+          release?.();
+        } catch {
+          /* never breaks the voice path */
+        }
+      };
+    } catch {
+      return () => {};
+    }
+  }
+
+  /** The bot is talking: a part plays, or the next part of the same group is on its way (since when, 0 = not). */
+  private speaking(): number {
+    return this.currentFrom || this.groupFrom;
+  }
+
+  /**
+   * Hold the TTS from someone's first sound on, not only once their utterance is complete: pre-warming
+   * must not start while they talk. Released when their utterance arrives (then `hear` holds) or – the
+   * transport drops utterances without audio – after the longest possible utterance.
+   */
+  private speechStarted(s: Speaker): void {
+    const old = this.speechHolds.get(s.id);
+    if (old) clearTimeout(old.timer);
+    const release = old?.release ?? this.hold();
+    const timer = setTimeout(() => this.endSpeechHold(s.id), (this.d.cfg.maxSpeechSec + 2) * 1000 + this.d.cfg.silenceMs);
+    timer.unref?.();
+    this.speechHolds.set(s.id, { release, timer });
+  }
+
+  private endSpeechHold(id: string): void {
+    const h = this.speechHolds.get(id);
+    if (!h) return;
+    this.speechHolds.delete(id);
+    clearTimeout(h.timer);
+    h.release();
+  }
+
+  private releaseSpeakHold(): void {
+    const release = this.speakHold;
+    this.speakHold = null;
+    release?.();
   }
 
   get label(): string {
@@ -142,35 +291,84 @@ export class VoiceHost {
   say(text: string, opts: { key?: string; interruptible?: boolean } = {}): Promise<void> {
     const clean = forSpeech(text);
     if (!clean || this.closed) return Promise.resolve();
-    if (opts.key) {
-      for (const q of this.queue.filter((q) => q.key === opts.key)) q.done();
-      this.queue = this.queue.filter((q) => q.key !== opts.key);
-    }
+    if (opts.key) this.cancel((g) => g.key === opts.key);
+    // `ttsSplitSentences`: one part per sentence – all parts form a group, see `Group`.
+    const parts = this.d.cfg.ttsSplitSentences ? splitSentences(clean) : [clean];
     return new Promise<void>((resolve) => {
-      const cache = this.d.tts.cached?.(clean) ?? false;
-      const times = this.latency.queued({ engine: this.d.tts.engine ?? 'unbekannt', chars: clean.length, cache });
-      // A synthesis still running when this one is queued delays its real start (one sentence at a time).
-      // A cache hit needs no synthesis: it neither waits for one nor holds up the next sentence.
-      const before = !cache && this.lastSynth?.synthDoneAt === undefined ? this.lastSynth : null;
-      if (!cache) this.lastSynth = times;
-      const raw = this.d.tts.synth(clean);
-      const synthDone = () => {
-        times.synthDoneAt = this.latency.stamp();
-        times.synthStartAt = before?.synthDoneAt ?? times.queuedAt;
-      };
-      raw.then(synthDone, synthDone); // side branch: the queue below does not wait for it
-      const audio = raw.catch((e) => {
-        log.warn(`TTS „${clean.slice(0, 40)}“: ${(e as Error).message}`);
-        return null;
-      });
-      this.queue.push({ text: clean, key: opts.key, interruptible: !!opts.interruptible, audio, done: resolve, times });
+      let drop = () => {};
+      const dropped = new Promise<null>((r) => (drop = () => r(null)));
+      const group: Group = { key: opts.key, interruptible: !!opts.interruptible, cancelled: false, dropped, drop, left: parts.length, done: resolve };
+      for (const part of parts) this.queue.push(this.item(part, group));
+      if (!this.speakHold) this.speakHold = this.hold();
       void this.pump().catch((e) => log.warn(`Sprechen: ${(e as Error).message}`));
     });
   }
 
+  /** One queued part: its synthesis is started (or, when splitting, chained) right away. */
+  private item(text: string, group: Group): QueueItem {
+    const cache = this.d.tts.cached?.(text) ?? false;
+    const times = this.latency.queued({ engine: this.d.tts.engine ?? 'unbekannt', chars: text.length, cache });
+    let raw: Promise<Pcm | null>;
+    let abandon: (() => void) | undefined;
+    let before: SpeechTimes | null = null;
+    /** When the engine reported starting on it (`SynthOptions.onStart`, e.g. after a pre-warm line). */
+    let engineStart: number | undefined;
+    if (this.d.cfg.ttsSplitSentences && !cache) {
+      // One part at a time, in queue order: a part reaches the engine only after the previous one is done,
+      // so a part of a dropped group is skipped instead of holding up the next sentence behind it.
+      raw = this.synthTail.then(() => {
+        if (group.cancelled || this.closed) return null;
+        times.synthStartAt = this.latency.stamp();
+        // The engine may still finish a pre-warm line first: then it tells when it really starts on this one.
+        return this.d.tts.synth(text, { onStart: () => (times.synthStartAt = this.latency.stamp()) });
+      });
+      // Normally the next part waits for this one; a part given up in the gap (`PART_GAP_LIMIT_MS`) lets it go.
+      const given = new Promise<void>((r) => (abandon = r));
+      this.synthTail = Promise.race([raw.catch(() => {}), given]);
+    } else {
+      // A synthesis still running when this one is queued delays its real start (one sentence at a time).
+      // A cache hit needs no synthesis: it neither waits for one nor holds up the next sentence.
+      before = !cache && this.lastSynth?.synthDoneAt === undefined ? this.lastSynth : null;
+      if (!cache) this.lastSynth = times;
+      raw = this.d.tts.synth(text, { onStart: () => (engineStart = this.latency.stamp()) });
+    }
+    const synthDone = () => {
+      times.synthDoneAt = this.latency.stamp();
+      times.synthStartAt ??= Math.max(before?.synthDoneAt ?? times.queuedAt, engineStart ?? 0);
+    };
+    raw.then(synthDone, synthDone); // side branch: the queue below does not wait for it
+    const audio = raw.catch((e) => {
+      log.warn(`TTS „${text.slice(0, 40)}“: ${(e as Error).message}`);
+      return null;
+    });
+    return { text, group, interruptible: group.interruptible, audio, times, abandon };
+  }
+
+  /** A part is over (spoken, failed or dropped); the `say` resolves with its group's last part. */
+  private finish(item: QueueItem): void {
+    if (--item.group.left <= 0) item.group.done();
+  }
+
+  /** Removes queued parts. */
+  private drop(which: (q: QueueItem) => boolean): void {
+    const gone = this.queue.filter(which);
+    this.queue = this.queue.filter((q) => !which(q));
+    gone.forEach((q) => this.finish(q));
+  }
+
+  /** Drops every group that matches, with all its remaining parts (also syntheses still running). */
+  private cancel(which: (g: Group) => boolean): void {
+    const groups = new Set([...this.queue.map((q) => q.group), ...(this.playing ? [this.playing.group] : [])].filter(which));
+    for (const g of groups) {
+      g.cancelled = true;
+      g.drop();
+    }
+    this.drop((q) => groups.has(q.group));
+  }
+
   /** Drops everything not yet spoken (e.g. the game ended). */
   clear(): void {
-    this.queue.splice(0).forEach((q) => q.done());
+    this.cancel(() => true);
   }
 
   /**
@@ -190,10 +388,19 @@ export class VoiceHost {
     while (!this.closed && this.queue.length) {
       const item = (this.playing = this.queue.shift()!);
       item.times.pickedAt = this.latency.stamp();
-      const pcm = await item.audio;
+      // Splitting: a dropped group's part is not waited for – its synthesis may finish later, unheard.
+      let pcm = await (this.d.cfg.ttsSplitSentences ? this.partAudio(item) : item.audio);
+      // Splitting: nothing of a replaced or interrupted group is heard any more, not even a part that was
+      // still being synthesised. (Without splitting, the picked sentence plays as it always did.)
+      if (item.group.cancelled && this.d.cfg.ttsSplitSentences) pcm = null;
+      else if (!pcm) this.handOnReaction(item);
       if (pcm) {
         log.info(`🔊 ${item.text}`);
         const from = (this.currentFrom = Date.now());
+        // The next part of the same group: the gap before it still counts as talking for later utterances.
+        const prev = this.spoken.at(-1);
+        if (this.groupFrom && prev?.group === item.group) prev.to = Math.max(prev.to, from);
+        if (!this.groupFrom) this.groupFrom = from;
         this.cut = false;
         let started = false;
         const onStart = () => {
@@ -211,14 +418,51 @@ export class VoiceHost {
           started = true;
           this.latency.started(item.times, from);
         }
+        if (!started) this.handOnReaction(item); // never audible: the next part answers
         this.currentFrom = 0;
         const to = this.cut ? Date.now() : Math.max(Date.now(), from + durationMs(pcm));
-        this.spoken.push({ from, to, interruptible: item.interruptible, text: item.text });
+        this.spoken.push({ from, to, interruptible: item.interruptible, text: item.text, group: item.group });
         if (this.spoken.length > 30) this.spoken.shift();
       }
-      item.done();
       this.playing = null;
+      this.finish(item);
+      // The group is over (or dropped): until its next part plays, the bot keeps talking only within a group.
+      const next = this.queue[0];
+      if (!next || next.group !== item.group || item.group.cancelled) this.groupFrom = 0;
     }
+    if (!this.queue.length || this.closed) this.releaseSpeakHold();
+  }
+
+  /**
+   * Splitting: a part's audio, or null once its group is dropped. In the gap of a group already being
+   * spoken, at most `PART_GAP_LIMIT_MS` – then the group is given up, so the bot does not stay deaf.
+   */
+  private async partAudio(item: QueueItem): Promise<Pcm | null> {
+    if (!this.groupFrom) return Promise.race([item.audio, item.group.dropped]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const limit = new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        log.warn(`Sprachausgabe: der nächste Teil einer Ansage kam nicht innerhalb von ${PART_GAP_LIMIT_MS / 1000} s – Rest verworfen`);
+        item.abandon?.();
+        this.cancel((g) => g === item.group);
+        resolve(null);
+      }, PART_GAP_LIMIT_MS);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([item.audio, item.group.dropped, limit]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** A part that never sounds (no audio, playback failed or never started) hands its reaction to the group's next part. */
+  private handOnReaction(item: QueueItem): void {
+    const r = item.times.reaction;
+    const next = this.queue[0];
+    if (!r || next?.group !== item.group || next.times.reaction) return;
+    next.times.reaction = r;
+    item.times.reaction = undefined;
   }
 
   /** The fast model if there is one; if it fails (not started, crashed twice), the main model takes over. */
@@ -246,6 +490,9 @@ export class VoiceHost {
     if (this.cut) return;
     this.cut = true;
     log.info(`✋ ${who} unterbricht mich`);
+    // The rest of the interrupted announcement goes too, not just the part playing now.
+    const current = this.playing?.group;
+    if (current) this.cancel((g) => g === current);
     this.d.transport.stop();
   }
 
@@ -255,7 +502,13 @@ export class VoiceHost {
     const tail = 300;
     const out: Pick<Spoken, 'interruptible' | 'text'>[] = this.spoken.filter((s) => u.startedAt >= s.from && u.startedAt <= s.to + tail);
     // Still talking: anything that started after the current sentence began overlaps.
-    if (this.currentFrom && this.playing && u.startedAt >= this.currentFrom) out.push(this.playing);
+    const since = this.speaking();
+    if (since && this.playing && u.startedAt >= since) {
+      out.push(this.playing);
+      // Between two parts: the part just spoken is what may come back as echo.
+      const last = this.spoken.at(-1);
+      if (!this.currentFrom && last) out.push(last);
+    }
     return out;
   }
 
@@ -270,7 +523,7 @@ export class VoiceHost {
     // Barge-in: the person on turn may talk over hints and prompts – whatever else they talked over stays ignored.
     const bargeIn = over.length > 0 && over.every((o) => o.interruptible) && this.mayInterrupt(u.speaker);
     if (over.length && !bargeIn) return log.info(`🙉 ${who} sprach, während ich sprach – ignoriert`);
-    if (bargeIn && this.playing?.interruptible && this.currentFrom) this.interrupt(who);
+    if (bargeIn && this.playing?.interruptible && this.speaking()) this.interrupt(who);
     let text: string;
     const attention = this.d.attention?.(u.speaker) ?? 'full';
     const passes: SttPass[] = [];
