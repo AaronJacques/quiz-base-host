@@ -172,11 +172,50 @@ export const ConfigSchema = z.object({
       whisperAudioCtx: z.number().int().min(0).max(1500).default(0),
       language: z.string().default('de'),
       /**
-       * Spracherkennung: `whisper` = lokal (whisper.cpp, wie oben), `deepgram` = Cloud (Deepgram, EU-Endpunkt,
+       * Spracherkennung: `whisper` = nur lokal (Engine aus `localStt`, Standard whisper.cpp), `deepgram` = Cloud (Deepgram, EU-Endpunkt,
        * Schlüssel aus `.env`). Mit Cloud hört sie nur die Phasen in `sttCloudFor`, der Rest bleibt lokal.
        * Siehe docs/VOICE.md „Erkennung: lokal oder Cloud“.
        */
       stt: z.enum(['whisper', 'deepgram']).default('whisper'),
+      /**
+       * Die lokale Erkennung (unabhängig von `stt`): `whisper` = whisper.cpp (Modelle oben), `parakeet` =
+       * NVIDIA Parakeet TDT 0.6b v3 über sherpa-onnx (`parakeet` unten) für die Phasen in `parakeetFor`, viel
+       * schneller auf kleinen Servern und besser bei Namen, kennt aber keinen Prompt. Mit `stt: deepgram` ist
+       * sie für diese Phasen der Rückfall. Siehe docs/VOICE.md „Parakeet statt whisper.cpp“.
+       */
+      localStt: z.enum(['whisper', 'parakeet']).default('whisper'),
+      /**
+       * Bei `localStt: parakeet`: welche Phasen Parakeet hört. Standard nur `answer` (gesprochene Antworten):
+       * Kurze Befehle („Ja“, „Hier“, „Nein“, Rufname) gibt das Modell oft englisch wieder („Yeah“, „Nine“),
+       * die Sprache lässt sich nicht festlegen. Die übrigen Phasen hört whisper wie bisher (`whisperFastModel`,
+       * sonst `whisperModel`). Nur zwei Werte: `["answer"]` (Mischbetrieb) oder alle vier Phasen (nur Parakeet,
+       * kein whisper-server, Befehle mit den bekannten Schwächen). Einzelne Befehlsphasen brächten nur eine
+       * zusätzliche Erkennung (dort zählt ohnehin whispers Text) und sind ein Konfigurationsfehler.
+       */
+      parakeetFor: z
+        .array(z.enum(['answer', 'confirm', 'full', 'wake']))
+        .refine(
+          (a) => {
+            const set = new Set(a);
+            return set.size === a.length && ((set.size === 1 && set.has('answer')) || set.size === 4);
+          },
+          'nur ["answer"] (Parakeet für Antworten, whisper für den Rest) oder alle vier Phasen ["answer", "confirm", "full", "wake"] (nur Parakeet, ohne whisper) – andere Kombinationen brächten nur zusätzliche Erkennungen',
+        )
+        .default(['answer']),
+      /** Parakeet (bei `localStt: parakeet`). Wird nur dann installiert und geladen. */
+      parakeet: z
+        .object({
+          /** Ordner mit encoder/decoder/joiner/tokens, relativ zu `dir`. Das offizielle Modell lädt `voice-setup`. */
+          model: z.string().default('models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8'),
+          /** Rechen-Threads; 0 = automatisch (Kerne, höchstens 4 – auf 1 vCPU also 1). */
+          threads: z.number().int().min(0).max(16).default(0),
+          /** Frist je Erkennung ab Übergabe an den bereiten Worker: so viele ms plus `deadlinePerSecMs` je Audiosekunde. */
+          deadlineMs: z.number().int().min(1000).default(8000),
+          deadlinePerSecMs: z.number().int().min(0).default(500),
+          /** So lange darf der Worker zum Laden des Modells brauchen (Kaltstart auf 1 vCPU ~5 s). */
+          startTimeoutMs: z.number().int().min(1000).default(60_000),
+        })
+        .prefault({}),
       /**
        * Bei `stt: deepgram`: welche Phasen (`attention`) die Cloud hört. `answer` = wer eine Frage beantwortet,
        * `confirm` = Rückfrage „Paris?“, `full` = Kartenwahl, „Hier!“, Menüs, `wake` = Prüfung auf den Rufnamen
@@ -259,7 +298,8 @@ export const ConfigSchema = z.object({
       leaveOnGameEnd: z.boolean().default(true),
     })
     // A smaller audio window hears only its first n/50 seconds – longer utterances would be cut off unheard.
-    .transform((v) => ({ ...v, maxSpeechSec: v.whisperAudioCtx > 0 ? Math.min(v.maxSpeechSec, audioCtxSeconds(v.whisperAudioCtx)) : v.maxSpeechSec }))
+    // (Only whisper has that window – if Parakeet hears every attention, the whole utterance counts.)
+    .transform((v) => ({ ...v, maxSpeechSec: !parakeetHearsAll(v) && v.whisperAudioCtx > 0 ? Math.min(v.maxSpeechSec, audioCtxSeconds(v.whisperAudioCtx)) : v.maxSpeechSec }))
     .prefault({}),
 
   companion: z
@@ -272,6 +312,11 @@ export const ConfigSchema = z.object({
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
+
+/** Does Parakeet hear every attention (no whisper-server at all)? */
+export function parakeetHearsAll(v: { localStt: string; parakeetFor: string[] }): boolean {
+  return v.localStt === 'parakeet' && ['answer', 'confirm', 'full', 'wake'].every((a) => v.parakeetFor.includes(a));
+}
 
 /** Seconds of audio a Whisper encoder window of `n` frames covers (1500 frames = 30 s), rounded down. */
 export function audioCtxSeconds(n: number): number {

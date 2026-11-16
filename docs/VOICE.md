@@ -6,7 +6,7 @@ Der Bot kommt in euren Voice-Channel, moderiert das Quiz mit Stimme und versteht
 
 | Teil | Werkzeug | Zeit pro Satz (Apple M4) |
 |---|---|---|
-| Spracherkennung (STT) | [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `large-v3-turbo` (quantisiert, 550 MB), dauerhaft geladen | ~0,5–1 s |
+| Spracherkennung (STT) | [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `large-v3-turbo` (quantisiert, 550 MB), dauerhaft geladen; für Antworten wahlweise [Parakeet](#parakeet-statt-whispercpp) | ~0,5–1 s |
 | Sprachausgabe (TTS) | [Piper](https://github.com/OHF-Voice/piper1-gpl) Stimme `de_DE-thorsten-high`, dauerhaft geladen | ~0,2–0,5 s |
 | Voice-Verbindung | `@discordjs/voice` mit DAVE (Ende-zu-Ende-Verschlüsselung), Opus per WebAssembly (eigene Anbindung, `src/voice/opus.ts`) | – |
 
@@ -92,6 +92,7 @@ Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel des Spiel
 
 ## Tipps & Grenzen
 
+- **Erfundene Abspänne**: Whisper erfindet bei Stille manchmal Untertitel-Abspänne („Untertitel im Auftrag des ZDF“, „Copyright WDR 2021“, „Vielen Dank fürs Zuschauen“). Der Bot verwirft eine Äußerung nur, wenn sie *ganz* aus so einem Satz besteht, und nie, wenn sie „Meine Antwort ist …“ enthält („Meine Antwort ist die ARD“ zählt). Zusammengesetzte Formen kommen deshalb durch („Vielen Dank fürs Zuschauen. Untertitel im Auftrag des ZDF für funk“, „Mehr Infos auf www.ard.de“, „ARD-Text“). Das ist harmlos: Ohne Schlüsselwort ist das keine Antwort, keine Karte und kein Befehl; höchstens kommt einmal pro Spiel der Hinweis auf „Meine Antwort ist …“.
 - **Kopfhörer**: Wer den Bot über Lautsprecher hört, schickt seine Stimme zurück ins Mikro. Was jemand sagt, **während der Bot spricht**, wird deshalb ignoriert (`voice.ignoreWhileSpeaking`). Also kurz ausreden lassen. Bei Musikfragen sind Kopfhörer Pflicht.
 - **Dazwischenreden (Barge-in)**: Ausnahme ist, wer gerade dran ist. Sagt der Bot einen Hinweis, eine Erinnerung oder eine Rückfrage („Welche Karte? Sag zum Beispiel …“, „Anna, du bist noch dran …“, „Anna, deine Antwort?“, „Tatooine?“), darf diese Person hineinreden: Der Bot verstummt und wertet, was sie sagt. Klingt es wie seine eigene Ansage (Echo über Lautsprecher), verwirft er es. Fragen, Lösungen und Zug-Ansagen laufen immer zu Ende, und für alle anderen bleibt der Echo-Schutz. Abschalten: `voice.bargeIn: false`.
 - **Hinweise** („Welche Karte? …“) kommen nur, wenn die Person am Zug nach der Zug-Ansage einen Kartenversuch macht, der nicht klappt (eine Punktzahl wie „Hund für 250“, eine Spalte wie „die zweite“ oder ein Wort, das an eine Kategorie erinnert – keine Jahreszahl im Gespräch), und höchstens einmal pro Zug – nie bei normalem Gespräch („Ähm, keine Ahnung“). Zwischen Bewertung und nächstem Zug und beim Zugwechsel gibt es keine. Abschalten: `!quiz regel kartenhinweis aus`.
@@ -121,6 +122,9 @@ Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel des Spiel
 | `whisperModel` | `models/ggml-large-v3-turbo-q5_0.bin` | genaues Hauptmodell (Antworten) |
 | `whisperFastModel` | leer (aus) | zweites, schnelles Modell für alles außer Antworten, eigener whisper-server auf `whisperPort + 1` |
 | `whisperAudioCtx` | `0` (volles Fenster) | Audiofenster `-ac` für whisper-server; 512 ≈ 10 s, begrenzt `maxSpeechSec` entsprechend |
+| `localStt` | `whisper` | lokale Erkennung: `whisper` oder `parakeet` (Parakeet für die Phasen in `parakeetFor`), siehe [Parakeet statt whisper.cpp](#parakeet-statt-whispercpp) |
+| `parakeetFor` | `answer` | welche Phasen Parakeet hört; der Rest bleibt bei whisper |
+| `parakeet` | offizielles int8-Modell, Threads automatisch, Frist 8 s + 0,5 s/Audiosekunde | Modellordner, `threads`, `deadlineMs`, `deadlinePerSecMs`, `startTimeoutMs` |
 | `stt` | `whisper` | `whisper` (lokal) oder `deepgram` (Cloud), siehe [Erkennung: lokal oder Cloud](#erkennung-lokal-oder-cloud) |
 | `sttCloudFor` | `answer`, `confirm`, `full` | welche Phasen die Cloud hört; `wake` bleibt lokal |
 | `cloudFallback` | `local` | bei Cloud-Ausfall dieselbe Äußerung lokal erkennen; `none` = kein Rückfall |
@@ -151,6 +155,39 @@ Während der Rückfrage („Tatooine?“) hört zuerst das schnelle Modell, dami
 ```
 
 `npx qbhost voice-setup` lädt beide Modelle, `npm run doctor` prüft beide.
+
+## Parakeet statt whisper.cpp
+
+Für gesprochene Antworten gibt es eine zweite lokale Erkennung: **NVIDIA Parakeet TDT 0.6b v3** (int8) über [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). Auf einem Server mit 1 vCPU braucht sie ~0,4 s pro Antwort statt ~4,7 s (whisper `small-q5_1`, `-ac 512`) und erkennt Namen besser (Goethe, Washington, Mozart, „1989“ als Zahl). Der Standard bleibt whisper.cpp; wer Parakeet nicht einschaltet, lädt weder Paket noch Modell.
+
+**Einschalten:**
+```json
+"voice": { "localStt": "parakeet", "whisperModel": "models/ggml-small-q5_1.bin", "whisperFastModel": "models/ggml-base-q5_1.bin", "whisperAudioCtx": 512 }
+```
+Danach `npx qbhost voice-setup` (im Docker-Container passiert das beim nächsten Start von selbst) und `npm run doctor`.
+
+- **Was hört was:** Parakeet hört die Phasen in `parakeetFor`, Standard nur `answer`: Wer eine Frage beantwortet. Alles andere – Kartenwahl, Ja/Nein, „Hier!“, der Rufname bei allen anderen – hört whisper wie bisher, also `whisperFastModel`, ohne schnelles Modell `whisperModel`. Mit dem Beispiel oben laufen genau zwei Erkenner: Parakeet und ein whisper-server mit `base`. Das Hauptmodell `small` wird dann gar nicht mehr gestartet (es würde nur noch Antworten hören).
+- **Parakeet zuerst, whisper für alles, was keine Antwort ist:** In einer Phase, die Parakeet hört, zählt sein Text nur, wenn er eine Antwort mit Schlüsselwort ist („Meine Antwort ist …“). Sonst hört whisper dieselbe Aufnahme noch einmal, und nur dessen Text geht in Befehle, Rufname, Ja/Nein und Kartenwahl. Die antwortende Person kann also weiter „Quizmaster, wiederhole die Frage“ oder „Quizmaster, Spiel beenden“ sagen. Fällt Parakeet aus, hört whisper die Antwort; Ja/Nein und der Rufname gehen nie an Parakeet, auch nicht als Rückfall. Nur wenn es gar keinen whisper gibt (`parakeetFor` mit allen vier Phasen), zählt Parakeets Text für alles. In der Rückfrage gilt dasselbe: Hat whisper „Meine Antwort ist …“ gehört, hört Parakeet noch einmal, und sein Text zählt nur, wenn er das Schlüsselwort auch hat; sonst (leer, Fehler, „mein Antwort ist“) bleibt whispers Text – nie ein dritter Durchgang, und eine verhörte neue Antwort bestätigt nie die alte.
+
+  | Äußerung | Engines (Reihenfolge) | Zeit auf 1 vCPU (geschätzt aus den Einzelmessungen) | gemessen auf dem M4 |
+  |---|---|---|---|
+  | Antwort mit Schlüsselwort (Antwortphase) | Parakeet | ~0,4 s (heute small ~4,7 s) | 55–75 ms |
+  | Befehl mit Rufname (Antwortphase) | Parakeet, dann whisper base | ~0,4 + 1,3 s | 85–135 ms |
+  | lautes Nachdenken (Antwortphase) | Parakeet, dann whisper base | ~0,4 + 1,3 s | – |
+  | „Ja“ auf „Paris?“ | whisper base | ~1,3 s | 30–40 ms |
+  | neue Antwort in der Rückfrage | whisper base, dann Parakeet; dessen Text nur mit Schlüsselwort (nie ein dritter Durchgang) | ~1,3 + 0,4 s (heute 1,3 + 4,7 s) | ~160 ms |
+
+  Auf dem Mac (beide `say`-Stimmen, je 5 Läufe) versteht der Bot so in der Antwortphase 9 von 12 Rufname-Befehlen richtig (whisper `small` allein: 5 von 12; die drei übrigen verhört auch whisper `base`), alle „Ja“ und alle Antworten außer „Papies“ (Reed). Die `⏱`-Zeile nennt dann beide Engines (`engine=parakeet:…+whisper:base-q5_1`), `stt` ist die Summe.
+- **Stopp-Rückfrage:** Hat die Spielleitung „Quizmaster, stopp“ gesagt, hört der Bot ihr „Ja“ 20 s lang wie jede Bestätigung (`confirm`), auch wenn sie gerade eine Frage beantwortet. Das gilt bewusst auch ohne Parakeet: Mit `whisperFastModel` hört dann das schnelle Modell zuerst, eine Antwort mit Schlüsselwort danach noch einmal das Hauptmodell.
+- **Warum nicht alles mit Parakeet:** Das Modell erkennt die Sprache selbst und lässt sich nicht auf Deutsch festlegen (sherpa-onnx hat dafür keinen Schalter). Kurze Äußerungen kippen dann ins Englische: „Ja“ → „Yeah“, „Hier“/„Ich“ → „Yeah“, „Nein“ (Sprecher Reed) → „Nine“, „Nummer zwei“ → „No what's fly“, „Quizmaster“ → „Chris Master“/„This muster“. Auf dem Mac gemessen (je 5 Läufe, zwei `say`-Stimmen, Auswertung mit der echten Bot-Logik): Befehle richtig verstanden Parakeet 50/140, whisper `base` 70/140; Antworten Parakeet 75/150, whisper `small` 60/150. Wer es trotzdem will: `"parakeetFor": ["answer", "confirm", "full", "wake"]` – dann läuft kein whisper-server mehr, aber „Ja“ und „Hier!“ werden oft nicht verstanden. Andere Werte als `["answer"]` und alle vier lehnt der Bot beim Laden ab: Einzelne Befehlsphasen brächten nur zusätzliche Erkennungen, denn dort zählt ohnehin whispers Text. Der Bot rät nichts zurück („Yeah“ bleibt „Yeah“).
+- **Kein Prompt:** Parakeet kennt keine Vokabelhilfe. Kategorien, Punktwerte und Namen, die whisper als Prompt bekommt, ignoriert es (dafür wiederholt es auch keinen Prompt in Schleife). Die Ausgabe hat Großschreibung, Satzzeichen und Zahlen meist als Ziffern („Geschichte 300“, „Meine Antwort ist 1989.“); das verstehen Kartenwahl, Schlüsselwort und Bewertung wie bei whisper. Der Fuzzy-Judge bleibt wichtig („Papies“ statt „Paris“).
+- **Größe und Speicher:** Python-Paket `sherpa-onnx` 2.0.1 (Apache-2.0, ~40 MB, im Docker-Image vorinstalliert), Modell `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (CC-BY-4.0, Download 487 MB, entpackt 640 MB unter `<dir>/models/`). RAM des Workers ~0,9 GB auf dem 1-vCPU-Server (Linux, 1 Thread), unter macOS 1,5 GB (1 Thread) bis 2,0 GB (4 Threads): mehr Threads kosten mehr Speicher. Kaltstart ~5 s auf 1 vCPU, ~1 s auf einem M4. Gesamtbudget im Mischbetrieb: [DEPLOY.md](DEPLOY.md#kleine-server).
+- **Download:** `voice-setup` lädt das Archiv nur von der offiziellen sherpa-onnx-Release-Seite, prüft vor dem Entpacken die SHA-256-Prüfsumme (bei Abweichung wird die Datei gelöscht, nichts entpackt), entpackt nur die vier Modelldateien in einen Zwischenordner und benennt ihn erst danach um. Ein abgebrochener Download oder ein halbes Entpacken zählt nie als fertig. Das Archiv wird danach gelöscht.
+- **Robustheit:** Ein Python-Worker (`src/voice/sherpa_worker.py`) hält das Modell geladen und hört eine Äußerung nach der anderen. Jede hat eine Frist (`parakeet.deadlineMs` + `deadlinePerSecMs` je Audiosekunde, ab Übergabe an den bereiten Worker). Hängt oder stürzt der Worker, wird er neu gestartet, und dieselbe Äußerung geht an den neuen; dessen Ladezeit zählt nicht zur Frist. Scheitert sie ein zweites Mal, wird sie verworfen (Warnung ohne Inhalt). Der Worker schreibt erkannten Text nie ins Log.
+- **Threads:** `parakeet.threads`, `0` = Kerne (höchstens 4), auf 1 vCPU also 1.
+- **Cloud:** Mit `stt: "deepgram"` ist Parakeet für seine Phasen der lokale Rückfall. Parakeet ist eine lokale Engine: Audio verlässt den Rechner nicht, die Regeln unter [Datenschutz](#datenschutz) gelten unverändert.
+- **Zurückschalten:** `"localStt": "whisper"` (oder die Zeile löschen). Das Modell kann dann weg: `rm -r <dir>/models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`.
+- **Messen:** `npx tsx tools/stt-probe.ts --local parakeet clips/*.wav` misst Parakeet, auch wenn die Konfiguration whisper sagt (zum Gegenmessen auf einem Server, dessen Bot whisper nutzt); `--attention full` misst die Route für Kartenwahl und Befehle. Die Ausgabe nennt zusätzlich Kaltstart und RAM des Workers.
 
 ## Erkennung: lokal oder Cloud
 
@@ -225,7 +262,8 @@ npx tsx tools/stt-probe.ts --engine cloud --prompt 'Quizmaster, Meine Antwort is
 
 - Jede WAV-Datei läuft `--runs` mal (Standard 5) plus einen Aufwärmlauf, der nicht zählt (Modell laden, Verbindung aufbauen).
 - Ausgabe je Datei: Engine, Median, Maximum, ob ein Rückfall nötig war, und der erkannte Text. Am Ende p50/p90 über alle Läufe.
-- Ohne `--engine` gilt die Konfiguration samt Rückfall. `--engine local` erzwingt whisper.cpp, `--engine cloud` erzwingt Deepgram ohne Rückfall, damit Fehler sichtbar werden. `--config <datei>` nimmt eine andere Konfiguration.
+- Ohne `--engine` gilt die Konfiguration samt Rückfall. `--engine local` erzwingt die lokale Erkennung, `--engine cloud` erzwingt Deepgram ohne Rückfall, damit Fehler sichtbar werden. `--local whisper|parakeet` erzwingt die lokale Engine, `--attention answer|full|confirm|wake` die Route (Standard `answer`; `full` = Kartenwahl, „Hier!“, Befehle). `--json <datei>` speichert alle Läufe. `--config <datei>` nimmt eine andere Konfiguration.
+- Am Ende: Kaltstart der Engine (erstes Laden) und ihr Speicher (Parakeet: Spitzenwert des Workers, whisper: aktueller RSS des whisper-servers).
 - Fehlt der Schlüssel, bricht das Werkzeug mit „Deepgram-Schlüssel fehlt“ ab. Es gibt nur die Texte der übergebenen Clips aus, keine Schlüssel.
 - Jeder Cloud-Lauf ist eine echte, abgerechnete Anfrage (wenige Sekunden Audio je Lauf).
 

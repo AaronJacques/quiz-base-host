@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, renameSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -9,6 +10,7 @@ import { createLogger } from '../core/logger.ts';
 import { FIXED_LINES } from './narration.ts';
 import { createSttRoutes, fastWhisperPort, sttNeeds, type SttRouteDeps } from './providers.ts';
 import { WhisperServerStt, type LocalStt, type SpeechToText } from './stt.ts';
+import { PARAKEET_FILES, PARAKEET_MODEL, parakeetModelReady, ParakeetStt, SHERPA_ONNX_VERSION } from './stt-sherpa.ts';
 import { CachedTts, createEngine, DiskCachedTts, ttsIdentity, type TextToSpeech } from './tts.ts';
 import { forSpeech, splitSentences } from './voice-host.ts';
 
@@ -136,6 +138,7 @@ export async function voiceProblems(config: Config, env: NodeJS.ProcessEnv = pro
     }
   }
   for (const m of needs.required) if (!existsSync(path.resolve(v.dir, m))) out.push(`Whisper-Modell fehlt (${m})`);
+  if (needs.parakeet === 'required') out.push(...(await parakeetProblems(v)));
   if (v.tts === 'piper') {
     if (!existsSync(path.resolve(v.dir, 'venv/bin/python'))) out.push('Piper-Umgebung fehlt');
     if (!existsSync(path.resolve(v.dir, v.piperVoice))) out.push(`Piper-Stimme fehlt (${v.piperVoice})`);
@@ -150,8 +153,10 @@ export async function voiceProblems(config: Config, env: NodeJS.ProcessEnv = pro
 export async function voiceWarnings(config: Config): Promise<string[]> {
   const v = config.voice;
   const needs = sttNeeds(v);
-  if (!needs.fallback.length) return [];
   const out: string[] = [];
+  // Parakeet that only stands in for the cloud: the same checks as `voiceProblems`, as warnings.
+  if (needs.parakeet === 'fallback') out.push(...(await parakeetProblems(v)).map((p) => `Rückfall nicht verfügbar: ${p}`));
+  if (!needs.fallback.length) return out;
   if (!needs.required.length) {
     try {
       await run(v.whisperBin, ['--help']);
@@ -161,6 +166,92 @@ export async function voiceWarnings(config: Config): Promise<string[]> {
   }
   for (const m of needs.fallback) if (!existsSync(path.resolve(v.dir, m))) out.push(`Rückfall nicht verfügbar: Whisper-Modell fehlt (${m})`);
   return out;
+}
+
+/** What Parakeet is missing: the Python environment, the sherpa-onnx package, the complete model folder. */
+export async function parakeetProblems(v: Config['voice']): Promise<string[]> {
+  const py = path.resolve(v.dir, 'venv/bin/python');
+  const model = path.resolve(v.dir, v.parakeet.model);
+  const out: string[] = [];
+  if (!existsSync(py)) out.push(`Python-Umgebung für Parakeet fehlt (${path.join(v.dir, 'venv')})`);
+  else if (!(await sherpaInstalled(py))) out.push(`Python-Paket sherpa-onnx fehlt (für Parakeet, Version ${SHERPA_ONNX_VERSION})`);
+  if (!parakeetModelReady(model)) out.push(`Parakeet-Modell fehlt oder ist unvollständig (${v.parakeet.model})`);
+  return out;
+}
+
+/** Is sherpa-onnx importable in this interpreter, in the pinned version? */
+async function sherpaInstalled(py: string): Promise<boolean> {
+  try {
+    const { stdout } = await run(py, ['-c', 'import sherpa_onnx; print(sherpa_onnx.__version__)'], { timeout: 30_000 });
+    return stdout.trim() === SHERPA_ONNX_VERSION;
+  } catch {
+    return false;
+  }
+}
+
+export async function sha256File(file: string): Promise<string> {
+  const h = createHash('sha256');
+  await pipeline(createReadStream(file), h);
+  return h.digest('hex');
+}
+
+/**
+ * Members of a tar listing (`tar -tvf`) that may be unpacked: plain files and folders below `root/`, no
+ * absolute path, no `..`, no links or devices. Throws on anything else – the archive is not used at all then.
+ */
+export function safeTarMembers(listing: string, names: string[], root: string): string[] {
+  const out: string[] = [];
+  for (const line of listing.split('\n').filter((l) => l.trim())) {
+    const type = line[0];
+    if (type !== '-' && type !== 'd') throw new Error(`Archiv enthält einen Link oder Sondereintrag: ${line.slice(0, 120)}`);
+  }
+  for (const name of names.filter((n) => n.trim())) {
+    const n = name.replace(/\/$/, '');
+    if (path.isAbsolute(n) || n.split(/[\\/]/).includes('..') || (n !== root && !n.startsWith(`${root}/`))) throw new Error(`Archiv enthält einen Pfad außerhalb von ${root}/: ${n.slice(0, 120)}`);
+    out.push(n);
+  }
+  return out;
+}
+
+/**
+ * Downloads the official Parakeet model (once), checks its SHA-256 before anything is unpacked, unpacks
+ * only the model files into a temporary folder and renames that into place – an interrupted download or
+ * unpack never counts as done. A wrong checksum deletes the file. An own model folder (other name) must be
+ * there already.
+ */
+export async function setupParakeetModel(v: Config['voice'], src: { url: string; sha256: string; name: string } = PARAKEET_MODEL): Promise<void> {
+  const target = path.resolve(v.dir, v.parakeet.model);
+  if (parakeetModelReady(target)) return;
+  if (path.basename(target) !== src.name) throw new Error(`Eigenes Parakeet-Modell ${target} fehlt oder ist unvollständig (${PARAKEET_FILES.join(', ')}).`);
+  const parent = path.dirname(target);
+  const archive = path.join(parent, `${src.name}.tar.bz2`);
+  const tmp = path.join(parent, `.${src.name}.unpack`);
+  mkdirSync(parent, { recursive: true });
+  await download(src.url, archive);
+  const sum = await sha256File(archive);
+  if (sum !== src.sha256) {
+    rmSync(archive, { force: true });
+    throw new Error(`Parakeet-Modell: Prüfsumme stimmt nicht (erwartet ${src.sha256}, erhalten ${sum}) – Datei gelöscht, nichts entpackt.`);
+  }
+  const wanted = PARAKEET_FILES.map((f) => `${src.name}/${f}`);
+  const { stdout: names } = await run('tar', ['-tjf', archive], { maxBuffer: 16 * 1024 * 1024 });
+  const { stdout: listing } = await run('tar', ['-tvjf', archive], { maxBuffer: 16 * 1024 * 1024 });
+  const members = safeTarMembers(listing, names.split('\n'), src.name);
+  const missing = wanted.filter((w) => !members.includes(w));
+  if (missing.length) throw new Error(`Parakeet-Archiv unvollständig: ${missing.join(', ')} fehlt`);
+  rmSync(tmp, { recursive: true, force: true });
+  mkdirSync(tmp, { recursive: true });
+  try {
+    log.info(`Entpacke ${src.name} …`);
+    // Only the named model files: nothing else of the archive lands on disk.
+    await run('tar', ['-xjf', archive, '-C', tmp, ...wanted], { maxBuffer: 16 * 1024 * 1024 });
+    if (!parakeetModelReady(path.join(tmp, src.name))) throw new Error('Parakeet-Modell nach dem Entpacken unvollständig');
+    rmSync(target, { recursive: true, force: true });
+    renameSync(path.join(tmp, src.name), target);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  rmSync(archive, { force: true }); // ~490 MB – the unpacked folder is all that is needed
 }
 
 async function download(url: string, file: string): Promise<void> {
@@ -226,6 +317,7 @@ export async function setupVoice(config: Config): Promise<void> {
   const models = [...needs.required, ...needs.fallback];
   if (needs.cloud && !process.env[v.deepgram.keyEnv]?.trim()) log.warn(`Deepgram-Schlüssel fehlt: ${v.deepgram.keyEnv} in .env setzen – bis dahin startet die Sprachsteuerung nicht.`);
 
+  const parakeet = !!needs.parakeet;
   if (models.length) {
     try {
       await run(v.whisperBin, ['--help']);
@@ -245,29 +337,49 @@ export async function setupVoice(config: Config): Promise<void> {
     else if (!existsSync(model)) throw new Error(`Eigenes Whisper-Modell ${model} fehlt.`);
   }
 
-  if (v.tts === 'piper') {
+  if (v.tts === 'piper' || parakeet) {
     const py = path.resolve(v.dir, 'venv/bin/python');
     if (!existsSync(py)) {
-      log.info('Erstelle Python-Umgebung für Piper …');
+      log.info(`Erstelle Python-Umgebung für ${[v.tts === 'piper' && 'Piper', parakeet && 'Parakeet'].filter(Boolean).join(' und ')} …`);
       await run('python3', ['-m', 'venv', path.resolve(v.dir, 'venv')]).catch((e) => {
         throw new Error(`Python-venv nicht möglich (${(e as Error).message.split('\n')[0]}). Debian/Ubuntu: sudo apt install python3-venv`);
       });
     }
+  }
+  if (v.tts === 'piper') {
+    const py = path.resolve(v.dir, 'venv/bin/python');
     log.info(`Installiere ${PIPER_VERSION} …`);
     await run(py, ['-m', 'pip', 'install', '-q', PIPER_VERSION], { maxBuffer: 64 * 1024 * 1024 });
     await setupPiperVoice(v);
+  }
+  if (parakeet) {
+    const py = path.resolve(v.dir, 'venv/bin/python');
+    // Pre-installed in the Docker image (its venv is read-only for the container user): only install if missing.
+    if (await sherpaInstalled(py)) log.info(`sherpa-onnx ${SHERPA_ONNX_VERSION} ✓`);
+    else {
+      log.info(`Installiere sherpa-onnx==${SHERPA_ONNX_VERSION} …`);
+      await run(py, ['-m', 'pip', 'install', '-q', `sherpa-onnx==${SHERPA_ONNX_VERSION}`], { maxBuffer: 64 * 1024 * 1024 }).catch((e) => {
+        throw new Error(`sherpa-onnx konnte nicht installiert werden (${(e as Error).message.split('\n')[0]})`);
+      });
+    }
+    await setupParakeetModel(v);
   }
 
   // Self-test of the local engines only: no cloud call (no cost, works without a key).
   log.info('Selbsttest: Sprechen → Erkennen …');
   const tts = createEngine(v);
-  const local = models.map((m) => [m === v.whisperModel ? 'Hauptmodell' : 'schnelles Modell', m === v.whisperModel ? new WhisperServerStt(v) : new WhisperServerStt(v, { model: m, port: fastWhisperPort(v) })] as const);
+  const local: (readonly [string, SpeechToText])[] = [
+    ...models.map((m) => [m === v.whisperModel ? 'Hauptmodell' : 'schnelles Modell', m === v.whisperModel ? new WhisperServerStt(v) : new WhisperServerStt(v, { model: m, port: fastWhisperPort(v) })] as const),
+    ...(parakeet ? [['Parakeet', new ParakeetStt(v)] as const] : []),
+  ];
   try {
     const pcm = await tts.synth('Willkommen zum Tafelquiz. Anna, du bist dran.');
     for (const [label, stt] of local) {
       const text = await stt.transcribe(pcm);
       log.info(`Erkannt (${label}): „${text}“`);
-      if (!/tafel\s?quiz/i.test(text)) log.warn(`Die Erkennung (${label}) klingt ungewöhnlich – Modell/Stimme prüfen.`);
+      // Parakeet has no prompt and may write the rare word "Tafelquiz" otherwise ("Tafelquets"): the greeting counts.
+      const ok = label === 'Parakeet' ? /tafel|willkommen/i.test(text) : /tafel\s?quiz/i.test(text);
+      if (!ok) log.warn(`Die Erkennung (${label}) klingt ungewöhnlich – Modell/Stimme prüfen.`);
     }
   } finally {
     await Promise.all([tts.close(), ...local.map(([, s]) => s.close())]);

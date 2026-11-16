@@ -19,12 +19,16 @@ RUN git clone --depth 1 --branch "${WHISPER_VERSION}" https://github.com/ggml-or
 # Playwright image = Ubuntu 24.04 + Node + Chromium with all system libraries; must match package.json.
 FROM mcr.microsoft.com/playwright:v1.58.2-noble
 ARG PIPER_VERSION=1.3.0
+# Parakeet STT (voice.localStt "parakeet"), must equal SHERPA_ONNX_VERSION in src/voice/stt-sherpa.ts (a test checks it).
+# ~40 MB in the image; the model (~490 MB, .tar.bz2 – hence bzip2) is only downloaded by voice-setup when the config asks for it.
+ARG SHERPA_ONNX_VERSION=2.0.1
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3-venv libgomp1 tini \
+ && apt-get install -y --no-install-recommends python3-venv libgomp1 tini bzip2 \
  && rm -rf /var/lib/apt/lists/*
-# Piper lives in the image; the voice setup expects it at <voice.dir>/venv (linked by the entrypoint).
-RUN python3 -m venv /opt/piper && /opt/piper/bin/pip install --no-cache-dir "piper-tts==${PIPER_VERSION}"
+# Piper (and sherpa-onnx) live in the image; the voice setup expects them at <voice.dir>/venv (linked by the
+# entrypoint). The container user cannot write /opt, so voice-setup only checks sherpa-onnx here.
+RUN python3 -m venv /opt/piper && /opt/piper/bin/pip install --no-cache-dir "piper-tts==${PIPER_VERSION}" "sherpa-onnx==${SHERPA_ONNX_VERSION}"
 COPY --from=whisper /usr/local/bin/whisper-server /usr/local/bin/whisper-server
 
 WORKDIR /app

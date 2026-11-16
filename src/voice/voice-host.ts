@@ -4,7 +4,7 @@ import { durationMs, head, rms, type Pcm } from './audio.ts';
 import { extractAnswer, isEcho, stripWakeWord } from './commands.ts';
 import { LatencyMeter, type SpeechTimes, type SttPass } from './latency.ts';
 import { FallbackStt, SttTrouble } from './providers.ts';
-import { isCloud, type LocalStt, type SpeechToText, type SttOptions } from './stt.ts';
+import { isAnswersOnly, isCloud, type LocalStt, type SpeechToText, type SttOptions } from './stt.ts';
 import type { Speaker, Utterance, VoiceTransport } from './transport.ts';
 import { SynthTimeout, type TextToSpeech } from './tts.ts';
 
@@ -522,10 +522,16 @@ export class VoiceHost {
   private route(a: Attention, cloud = true): SpeechToText | null {
     const d = this.d;
     if (!cloud) {
-      // Never a cloud engine here, however the deps are wired: without a local one there is none (null).
+      // The attention's own route if it is local (a local 'Ja' goes where 'confirm' goes, never to Parakeet
+      // only because 'full' is in `parakeetFor`); else the local main / fast engine. Never a cloud engine
+      // here, however the deps are wired: without a local one there is none (null).
+      const own = localOnly(this.route(a, true));
+      if (own) return own;
       const main = this.localMain();
       const fast = localOnly(d.localFastStt === undefined ? d.fastStt : d.localFastStt);
-      return a === 'answer' ? (main ?? fast ?? null) : (fast ?? main ?? null);
+      if (a === 'answer') return main ?? fast ?? null;
+      const other = fast ?? main ?? null;
+      return isAnswersOnly(other) ? (this.commandStt() ?? other) : other;
     }
     if (a === 'answer') return d.stt;
     if (a === 'confirm') return d.confirmStt ?? d.fastStt ?? d.stt;
@@ -538,6 +544,34 @@ export class VoiceHost {
   /** The local main model: `stt` itself unless the routing names another one; never a cloud engine (null). */
   private localMain(): SpeechToText | null {
     return localOnly(this.d.localStt === undefined ? this.d.stt : this.d.localStt);
+  }
+
+  /**
+   * The local engine whose text may be a command, wake word, yes/no or card: the first local one that is not
+   * answers-only (Parakeet next to whisper) – whisper's fast model, else its main one. null = none (then
+   * Parakeet is the only engine and its text counts for everything).
+   */
+  private commandStt(): SpeechToText | null {
+    const d = this.d;
+    // A cloud route's local fallback counts too (with Deepgram whisper may only stand behind the cloud).
+    const all = [d.localFastStt, d.fastStt, d.confirmStt, d.wakeStt, d.localStt, d.stt];
+    for (const s of [...all, ...all.map((x) => (x instanceof FallbackStt ? x.fallback : null))]) {
+      const local = localOnly(s);
+      if (local && !isAnswersOnly(local)) return local;
+    }
+    return null;
+  }
+
+  /**
+   * `listen`, and if an answers-only engine heard it without the answer keyword, the same audio once more
+   * with the command engine (whisper) – only that text counts then. Answers stay on the fast path.
+   */
+  private async hearOnce(stt: SpeechToText, pcm: Pcm, prompt: string, passes: SttPass[]): Promise<{ text: string; reheard: boolean }> {
+    const { text, by } = await this.listen(stt, pcm, prompt, passes);
+    if (!isAnswersOnly(by) || extractAnswer(text) !== null) return { text, reheard: false };
+    const cmd = this.commandStt();
+    if (!cmd || cmd === by) return { text, reheard: false };
+    return { text: (await this.listen(cmd, pcm, prompt, passes)).text, reheard: true };
   }
 
   /**
@@ -564,22 +598,46 @@ export class VoiceHost {
   }
 
   /**
-   * Hears with `stt`. If a local engine fails (not started, crashed twice), the local main model takes
-   * over – never a cloud route, so a failed local check cannot send audio out. A cloud route keeps its
-   * own fallback rule (`cloudFallback`; with `none` its failure stays a failure).
+   * The second pass of a confirmation with an answers-only engine (Parakeet): its text replaces whisper's only
+   * if it is an answer with the keyword too. Empty, without the keyword, or failed → whisper's text stays (it
+   * has the keyword) – no fallback, so never a third recognition, and never "Genau, mein Antwort ist Rom"
+   * read as "Genau" (a yes to the old answer).
    */
-  private async listen(stt: SpeechToText, pcm: Pcm, prompt: string, passes: SttPass[]): Promise<string> {
+  private async answerAgain(main: SpeechToText, pcm: Pcm, heard: string, passes: SttPass[]): Promise<string> {
+    passes.push({ engine: engineOf(main) });
+    try {
+      const again = await main.transcribe(pcm, this.d.prompt(), this.sttOpts(passes));
+      return extractAnswer(again) !== null ? again : heard;
+    } catch (e) {
+      const failed = passes.at(-1);
+      if (failed) failed.fallback = true; // ⏱ rueckfall=ja: whisper's text counts
+      log.warn(`Erkennung mit ${engineOf(main)}: ${(e as Error).message} – nehme whispers Text`);
+      return heard;
+    }
+  }
+
+  /**
+   * Hears with `stt`; `by` is the engine whose text it is (a cloud route's local fallback, if that heard it).
+   * If a local engine fails (not started, crashed twice), the local main model takes over – never a cloud
+   * route, so a failed local check cannot send audio out, and never an answers-only engine (Parakeet next to
+   * whisper): a failed Parakeet hands over to whisper, a failed whisper does not hand "Ja" to Parakeet.
+   * A cloud route keeps its own fallback rule (`cloudFallback`; with `none` its failure stays a failure).
+   */
+  private async listen(stt: SpeechToText, pcm: Pcm, prompt: string, passes: SttPass[]): Promise<{ text: string; by: SpeechToText }> {
+    let viaFallback = false;
     try {
       passes.push({ engine: engineOf(stt) });
-      return await stt.transcribe(pcm, prompt, this.sttOpts(passes));
+      const text = await stt.transcribe(pcm, prompt, this.sttOpts(passes, () => (viaFallback = true)));
+      return { text, by: viaFallback && stt instanceof FallbackStt && stt.fallback ? stt.fallback : stt };
     } catch (e) {
-      const local = this.localMain();
+      let local = this.localMain();
+      if (isAnswersOnly(local)) local = this.commandStt();
       if (!local || local === stt || sameEngine(stt, local) || stt instanceof FallbackStt) throw e;
-      log.warn(`Erkennung mit ${engineOf(stt)}: ${(e as Error).message} – nehme das lokale Hauptmodell`);
+      log.warn(`Erkennung mit ${engineOf(stt)}: ${(e as Error).message} – nehme ${isAnswersOnly(stt) ? 'whisper' : 'das lokale Hauptmodell'}`);
       const failed = passes.at(-1);
       if (failed) failed.fallback = true; // ⏱ rueckfall=ja
       passes.push({ engine: engineOf(local) });
-      return local.transcribe(pcm, prompt, this.sttOpts(passes));
+      return { text: await local.transcribe(pcm, prompt, this.sttOpts(passes)), by: local };
     }
   }
 
@@ -594,10 +652,11 @@ export class VoiceHost {
     this.warnRarely('wake', 'Rufnamen-Prüfung gescheitert (lokale Erkennung nicht bereit) – Äußerung verworfen');
   }
 
-  /** Lets a cloud route tell the measurement that its local fallback heard the utterance. Synchronous. */
-  private sttOpts(passes: SttPass[]): SttOptions {
+  /** Lets a cloud route tell the measurement (and `listen`) that its local fallback heard the utterance. Synchronous. */
+  private sttOpts(passes: SttPass[], onFallback?: () => void): SttOptions {
     return {
       onFallback: (engine, tried) => {
+        onFallback?.();
         const last = passes.at(-1);
         if (tried || !last) {
           if (last) last.fallback = true;
@@ -666,7 +725,7 @@ export class VoiceHost {
       }
       let heard: string;
       try {
-        heard = await this.listen(wake, start, this.d.cfg.wakeWords.join(', '), passes);
+        heard = (await this.hearOnce(wake, start, this.d.cfg.wakeWords.join(', '), passes)).text;
       } catch (e) {
         return this.wakeFailed(e, passes);
       }
@@ -675,7 +734,7 @@ export class VoiceHost {
         return log.debug(`🔇 ${who} ist nicht dran – kein Rufname, verworfen`);
       }
       // Addressed to the bot (the wake word was heard): the whole utterance is heard like any command ('full').
-      text = start === u.pcm ? heard : await this.listen(this.route('full')!, u.pcm, this.d.prompt(), passes);
+      text = start === u.pcm ? heard : (await this.hearOnce(this.route('full')!, u.pcm, this.d.prompt(), passes)).text;
     } else {
       // Cloud only for whom the bot clearly let speak the whole utterance; everyone else locally (or not at all).
       const cloud = this.cloudOk(u);
@@ -685,13 +744,16 @@ export class VoiceHost {
         log.debug(`🔇 ${who}: keine lokale Erkennung für diese Person – verworfen`);
         return this.warnRarely('no-local', 'Keine lokale Spracherkennung für eine Äußerung, die nicht in die Cloud darf – verworfen');
       }
-      text = await this.listen(first, u.pcm, this.d.prompt(), passes);
+      const once = await this.hearOnce(first, u.pcm, this.d.prompt(), passes);
+      text = once.text;
       // "Genau, meine Antwort ist zehn" while "Paris?" waits for "Ja": a new answer – hear it precisely
-      // (only if the main model is another engine than the one that just heard it).
+      // (only if the main model is another engine than the one that just heard it; not after whisper already
+      // heard it again for an answers-only engine – never a third recognition).
       const main = this.route('answer', cloud);
-      if (attention === 'confirm' && main && first !== main && !sameEngine(first, main) && extractAnswer(text) !== null) {
+      if (attention === 'confirm' && !once.reheard && main && first !== main && !sameEngine(first, main) && extractAnswer(text) !== null) {
         log.debug(`🎙 ${who}: neue Antwort in der Rückfrage – noch einmal mit dem Hauptmodell`);
-        text = await this.listen(main, u.pcm, this.d.prompt(), passes);
+        if (isAnswersOnly(main)) text = await this.answerAgain(main, u.pcm, text, passes);
+        else text = (await this.listen(main, u.pcm, this.d.prompt(), passes)).text;
       }
     }
     const sttDoneAt = this.latency.stamp();

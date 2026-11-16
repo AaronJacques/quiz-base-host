@@ -1,11 +1,17 @@
 // Measures speech recognition with real clips – the same routes the bot builds from the config, so local
 // and cloud can be compared on the same machine (docs/VOICE.md "Erkennung: lokal oder Cloud"):
-//   npx tsx tools/stt-probe.ts [--runs N] [--prompt '<Komma-Liste>'] [--engine local|cloud] [--config <datei>] <wav…>
-// Each WAV goes N times (default 5, plus one warm-up run) through the 'answer' route. Prints per file the
-// engine, median, maximum, fallback yes/no and the recognised text, then p50/p90 over all runs.
-// `--engine local` forces whisper.cpp, `--engine cloud` forces Deepgram without fallback (failures show).
+//   npx tsx tools/stt-probe.ts [--runs N] [--prompt '<Komma-Liste>'] [--engine local|cloud] [--local whisper|parakeet]
+//                              [--attention answer|full|confirm|wake] [--json <datei>] [--config <datei>] <wav…>
+// Each WAV goes N times (default 5, plus one warm-up run) through the 'answer' route (or `--attention`:
+// `full` = card choice, "Hier!", commands – the fast model with whisper). Prints per file the engine,
+// median, maximum, fallback yes/no and the recognised text, then p50/p90 over all runs, the cold start
+// (first warm-up) and the memory of the local recogniser.
+// `--engine local` forces local recognition, `--engine cloud` forces Deepgram without fallback (failures show).
+// `--local parakeet|whisper` forces the local engine whatever the config says (measure Parakeet on a server
+// whose bot runs whisper: the probe starts its own worker / whisper-server – mind the port of a running bot).
 // Prints only the texts of the given clips – never keys or other secrets.
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
@@ -14,15 +20,44 @@ import { setLogLevel } from '../src/core/logger.ts';
 import { decodeWav, durationMs, type Pcm } from '../src/voice/audio.ts';
 import { percentile } from '../src/voice/latency.ts';
 import { createSttRoutes, type SttRoutes } from '../src/voice/providers.ts';
-import type { SpeechToText } from '../src/voice/stt.ts';
+import { ParakeetStt } from '../src/voice/stt-sherpa.ts';
+import { WhisperServerStt, type SpeechToText } from '../src/voice/stt.ts';
+import type { Attention } from '../src/voice/voice-host.ts';
 
 export type ProbeEngine = 'local' | 'cloud' | undefined;
+export type ProbeLocal = Config['voice']['localStt'] | undefined;
 
-/** The voice config to measure: as configured, or forced to one engine for the 'answer' route. */
-export function probeVoice(v: Config['voice'], engine: ProbeEngine): Config['voice'] {
-  if (engine === 'local') return { ...v, stt: 'whisper' };
-  if (engine === 'cloud') return { ...v, stt: 'deepgram', sttCloudFor: [...new Set([...v.sttCloudFor, 'answer' as const])], cloudFallback: 'none' };
-  return v;
+/** The voice config to measure: as configured, or forced to one engine (cloud for `attention`, a local engine). */
+export function probeVoice(v: Config['voice'], engine: ProbeEngine, local?: ProbeLocal, attention: Attention = 'answer'): Config['voice'] {
+  let out = v;
+  if (local) out = { ...out, localStt: local };
+  if (engine === 'local') out = { ...out, stt: 'whisper' };
+  if (engine === 'cloud') out = { ...out, stt: 'deepgram', sttCloudFor: [...new Set([...out.sttCloudFor, attention])], cloudFallback: 'none' };
+  return out;
+}
+
+/** The engine that hears `attention` – the same choice as `VoiceHost.route`. */
+export function probeRoute(r: SttRoutes, attention: Attention): SpeechToText {
+  if (attention === 'answer') return r.stt;
+  if (attention === 'confirm') return r.confirmStt ?? r.fastStt ?? r.stt;
+  if (attention === 'wake') return r.wakeStt ?? r.fastStt ?? r.stt;
+  return r.fastStt ?? r.stt;
+}
+
+/** Memory of the local recogniser behind `stt` (MB): Parakeet's peak, whisper-server's current RSS; null if unknown. */
+export async function probeMemory(stt: SpeechToText, v: Config['voice']): Promise<{ mb: number; what: string } | null> {
+  const inner = (stt as { fallback?: SpeechToText | null }).fallback ?? stt;
+  try {
+    if (inner instanceof ParakeetStt) return { mb: await inner.stats(), what: 'Peak Worker' };
+    if (inner instanceof WhisperServerStt) {
+      const pid = readFileSync(path.resolve(v.dir, `whisper-server-${inner.port}.pid`), 'utf8').trim();
+      const kb = Number(execFileSync('ps', ['-o', 'rss=', '-p', pid], { encoding: 'utf8' }).trim());
+      return Number.isFinite(kb) && kb > 0 ? { mb: Math.round(kb / 1024), what: 'RSS whisper-server' } : null;
+    }
+  } catch {
+    /* not measurable (adopted server, no ps) */
+  }
+  return null;
 }
 
 export interface ProbeRun {
@@ -108,19 +143,28 @@ async function main(): Promise<void> {
       runs: { type: 'string', default: '5' },
       prompt: { type: 'string', default: '' },
       engine: { type: 'string' },
+      local: { type: 'string' },
+      attention: { type: 'string', default: 'answer' },
+      json: { type: 'string' },
       config: { type: 'string' },
       verbose: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   });
   if (values.help || !positionals.length) {
-    console.log("Aufruf: npx tsx tools/stt-probe.ts [--runs N] [--prompt '<Komma-Liste>'] [--engine local|cloud] [--config <datei>] <wav…>");
+    console.log(
+      "Aufruf: npx tsx tools/stt-probe.ts [--runs N] [--prompt '<Komma-Liste>'] [--engine local|cloud] [--local whisper|parakeet] [--attention answer|full|confirm|wake] [--json <datei>] [--config <datei>] <wav…>",
+    );
     process.exit(values.help ? 0 : 1);
   }
   const runs = Number(values.runs);
   if (!Number.isInteger(runs) || runs < 1) throw new Error('--runs braucht eine ganze Zahl ≥ 1');
   const engine = values.engine as ProbeEngine;
   if (engine !== undefined && engine !== 'local' && engine !== 'cloud') throw new Error('--engine ist local oder cloud');
+  const local = values.local as ProbeLocal;
+  if (local !== undefined && local !== 'whisper' && local !== 'parakeet') throw new Error('--local ist whisper oder parakeet');
+  const attention = values.attention as Attention;
+  if (!['answer', 'full', 'confirm', 'wake'].includes(attention)) throw new Error('--attention ist answer, full, confirm oder wake');
   setLogLevel(values.verbose ? 'debug' : 'warn');
   try {
     process.loadEnvFile('.env');
@@ -128,7 +172,7 @@ async function main(): Promise<void> {
     /* no .env */
   }
   const config = loadConfig(values.config ?? 'qbhost.config.json');
-  const v = probeVoice(config.voice, engine);
+  const v = probeVoice(config.voice, engine, local, attention);
   if (v.stt === 'deepgram' && !process.env[v.deepgram.keyEnv]?.trim()) {
     console.error(`❌ Deepgram-Schlüssel fehlt: ${v.deepgram.keyEnv} in .env setzen (oder --engine local)`);
     process.exit(1);
@@ -137,8 +181,12 @@ async function main(): Promise<void> {
   let routes: SttRoutes | null = null;
   try {
     routes = createSttRoutes(v);
-    const stt = routes.stt;
-    console.log(`Route answer: ${stt.engine ?? 'unbekannt'}${v.stt === 'deepgram' ? ` (Rückfall: ${v.cloudFallback})` : ''}, ${runs} Läufe + 1 Aufwärmlauf je Datei${values.prompt ? ', mit Prompt' : ''}\n`);
+    const stt = probeRoute(routes, attention);
+    console.log(`Route ${attention}: ${stt.engine ?? 'unbekannt'}${v.stt === 'deepgram' ? ` (Rückfall: ${v.cloudFallback})` : ''}, ${runs} Läufe + 1 Aufwärmlauf je Datei${values.prompt ? ', mit Prompt' : ''}\n`);
+    // Cold start: the engine starts (model load) – what the first utterance after a (re)start waits for.
+    const t0 = performance.now();
+    await stt.warmup?.();
+    const coldMs = performance.now() - t0;
     const rows: ProbeRow[] = [];
     for (const { file, pcm } of clips) {
       await probeOnce(stt, pcm, values.prompt); // warm-up: model load, connection
@@ -147,6 +195,9 @@ async function main(): Promise<void> {
       rows.push(summarizeRuns(path.basename(file), durationMs(pcm), measured));
     }
     console.log(formatProbe(rows));
+    const mem = await probeMemory(stt, v);
+    console.log(`Kaltstart: ${Math.round(coldMs)} ms${mem ? `, RAM (${mem.what}): ${mem.mb} MB` : ''}`);
+    if (values.json) writeFileSync(values.json, JSON.stringify({ route: attention, engine: stt.engine, coldMs: Math.round(coldMs), memMb: mem?.mb ?? null, rows }, null, 1));
   } finally {
     await Promise.all(routes?.all.map((s) => s.close()) ?? []);
   }

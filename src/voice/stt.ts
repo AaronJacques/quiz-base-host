@@ -5,6 +5,7 @@ import type { Config } from '../config.ts';
 import { createLogger, sleep } from '../core/logger.ts';
 import { encodeWav, resample, toMono, type Pcm } from './audio.ts';
 import { killOnExit } from './children.ts';
+import { extractAnswer } from './commands.ts';
 
 const log = createLogger('stt');
 
@@ -36,6 +37,21 @@ export interface SpeechToText {
  */
 export type LocalStt = SpeechToText & { readonly cloud?: false };
 
+const ANSWERS_ONLY = new WeakSet<object>();
+
+/**
+ * Marks a local engine whose text counts only as a spoken answer (Parakeet next to whisper): an utterance
+ * it hears without the answer keyword is heard again by whisper, and only whisper's text is taken as a
+ * command, wake word, yes/no or card (`VoiceHost`). Set by `createSttRoutes`; never on the only engine.
+ */
+export function markAnswersOnly(stt: SpeechToText): void {
+  ANSWERS_ONLY.add(stt);
+}
+
+export function isAnswersOnly(stt: SpeechToText | null | undefined): boolean {
+  return !!stt && ANSWERS_ONLY.has(stt);
+}
+
 /** Does this engine (maybe) send audio to a cloud provider? */
 export function isCloud(stt: SpeechToText): boolean {
   return stt.cloud === true;
@@ -62,27 +78,38 @@ export function promptTerms(prompt: string, max = 50): string[] {
 
 /**
  * Phrases Whisper invents on silence, noise or music (it was trained on subtitled videos).
- * Matched against the whole transcript after normalisation.
+ * Matched against the whole transcript after normalisation: only an utterance that is nothing but such a
+ * phrase is dropped, never one that merely contains a word of it ("Leonardo", "Meine Antwort ist die ARD").
  */
 const HALLUCINATIONS = [
   /^vielen dank( fürs zuschauen| für ihre aufmerksamkeit)?$/,
   /^danke( schön| fürs zuschauen)?$/,
   /^tschüss$/,
   /^untertitel.*$/,
-  /^.*(amara\.org|zdf|swr|ard|copyright|www\.).*$/,
+  // Subtitle credits as the whole utterance: "Untertitel der Amara.org-Community", "Copyright WDR 2021",
+  // "ZDF für funk, 2017", "SWR 2020", "www.zdf.de". Dots are gone after normalisation ("amaraorg", "wwwzdfde").
+  /^.*amara ?org.*$/,
+  /^copyright\b.*$/,
+  /^(?:(?:im auftrag )?(?:des|der|vom|von|das|die) )?(?:zdf|swr|ard|wdr|ndr|mdr|br|funk)(?: (?:für|und) (?:funk|zdf|ard))*(?: \d{4})?$/,
+  /^www\S*$/,
   /^bis zum nächsten mal$/,
   /^(musik|applaus|lachen|stille|piepen)$/,
   /^thank you( for watching)?$/,
 ];
 
-/** Strips stage directions and known hallucinations; returns '' if nothing real is left. */
+/**
+ * Strips stage directions and known hallucinations; returns '' if nothing real is left. An utterance with
+ * the answer keyword ("Meine Antwort ist Danke", "… die ARD", "… WWW") is never a hallucination – no
+ * subtitle credit starts like that – so it is kept whatever follows.
+ */
 export function cleanTranscript(raw: string): string {
   const text = raw
     .replace(/\[[^\]]*\]|\([^)]*\)|\*[^*]*\*|♪+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   const norm = text.toLowerCase().replace(/[.!?,;:…"„“]+/g, '').trim();
-  if (!norm || HALLUCINATIONS.some((r) => r.test(norm))) return '';
+  if (!norm) return '';
+  if (extractAnswer(text) === null && HALLUCINATIONS.some((r) => r.test(norm))) return '';
   return text;
 }
 

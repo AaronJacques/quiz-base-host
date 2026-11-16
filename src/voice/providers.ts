@@ -3,7 +3,8 @@ import { createLogger } from '../core/logger.ts';
 import type { Pcm } from './audio.ts';
 import { apiKey, CloudError, redact, type CloudErrorKind } from './http.ts';
 import { DeepgramStt } from './stt-deepgram.ts';
-import { WhisperServerStt, type LocalStt, type SpeechToText, type SttOptions } from './stt.ts';
+import { ParakeetStt } from './stt-sherpa.ts';
+import { markAnswersOnly, WhisperServerStt, type LocalStt, type SpeechToText, type SttOptions } from './stt.ts';
 import type { Attention } from './voice-host.ts';
 
 const log = createLogger('voice');
@@ -205,8 +206,18 @@ function kindOf(e: unknown): CloudErrorKind {
 
 const ATTENTIONS: Attention[] = ['answer', 'confirm', 'full', 'wake'];
 
-/** Which local Whisper model an attention uses: answers the precise main one, the rest the fast one if set. */
-type LocalModel = 'main' | 'fast';
+/**
+ * The local engines: whisper's precise main model, whisper's fast one, and Parakeet. With
+ * `localStt: parakeet` it hears the attentions in `parakeetFor` (default only answers); everything else
+ * follows whisper's rule – answers the main model, the rest the fast one if set.
+ */
+type LocalModel = 'main' | 'fast' | 'parakeet';
+
+/** The local engine that hears attention `a` (whether or not the cloud hears it first). */
+function localFor(v: Config['voice'], a: Attention): LocalModel {
+  if (v.localStt === 'parakeet' && v.parakeetFor.includes(a)) return 'parakeet';
+  return a === 'answer' || !v.whisperFastModel ? 'main' : 'fast';
+}
 
 export interface SttRoute {
   /** The cloud hears this attention (`voice.sttCloudFor`). */
@@ -217,33 +228,47 @@ export interface SttRoute {
 
 /** The routing as data – `createSttRoutes`, `voiceProblems` and `setupVoice` all follow it. */
 export function sttPlan(v: Config['voice']): Record<Attention, SttRoute> {
-  const localFor = (a: Attention): LocalModel => (a === 'answer' || !v.whisperFastModel ? 'main' : 'fast');
   const out = {} as Record<Attention, SttRoute>;
   for (const a of ATTENTIONS) {
     const cloud = v.stt !== 'whisper' && v.sttCloudFor.includes(a);
-    out[a] = { cloud, local: cloud && v.cloudFallback === 'none' ? null : localFor(a) };
+    out[a] = { cloud, local: cloud && v.cloudFallback === 'none' ? null : localFor(v, a) };
   }
   return out;
 }
 
-/** Whisper model files (relative to `dir`) the routing needs: `required` hear on their own, `fallback` only stand in for the cloud. */
-export function sttNeeds(v: Config['voice']): { required: string[]; fallback: string[]; cloud: boolean } {
-  const file = (m: LocalModel) => (m === 'main' ? v.whisperModel : v.whisperFastModel);
+export interface SttNeeds {
+  /** Whisper model files (relative to `dir`) that hear on their own. */
+  required: string[];
+  /** Whisper model files that only stand in for the cloud. */
+  fallback: string[];
+  cloud: boolean;
+  /** Parakeet (`voice.parakeet.model`): hears on its own, only stands in for the cloud, or not needed (undefined). */
+  parakeet?: 'required' | 'fallback';
+}
+
+/** What the routing needs locally – only that is checked (`voiceProblems`), loaded (`setupVoice`) and started. */
+export function sttNeeds(v: Config['voice']): SttNeeds {
+  const file = (m: Exclude<LocalModel, 'parakeet'>) => (m === 'main' ? v.whisperModel : v.whisperFastModel);
   const required = new Set<string>();
   const fallback = new Set<string>();
+  let parakeet: SttNeeds['parakeet'];
   const plan = sttPlan(v);
   for (const a of ATTENTIONS) {
     const r = plan[a];
     if (!r.local) continue;
-    (r.cloud ? fallback : required).add(file(r.local));
+    if (r.local === 'parakeet') parakeet = r.cloud ? (parakeet ?? 'fallback') : 'required';
+    else (r.cloud ? fallback : required).add(file(r.local));
   }
   for (const m of required) fallback.delete(m);
-  return { required: [...required], fallback: [...fallback], cloud: ATTENTIONS.some((a) => plan[a].cloud) };
+  return { required: [...required], fallback: [...fallback], cloud: ATTENTIONS.some((a) => plan[a].cloud), ...(parakeet ? { parakeet } : {}) };
 }
 
 export interface SttRouteDeps {
-  /** A local engine (default: `WhisperServerStt`); tests pass fakes. Never a cloud engine (type `LocalStt`). */
-  local?: (o: { model: string; port: number }) => LocalStt;
+  /**
+   * A local engine (default: `WhisperServerStt`, or `ParakeetStt` for `engine: 'parakeet'` – then `model` is
+   * the model folder and `port` 0); tests pass fakes. Never a cloud engine (type `LocalStt`).
+   */
+  local?: (o: { model: string; port: number; engine: Config['voice']['localStt'] }) => LocalStt;
   /** The cloud engine (default: `DeepgramStt` from `voice.deepgram`); it records its own usage. */
   cloud?: (v: Config['voice'], key: string, usage?: UsageSink) => SpeechToText;
   env?: NodeJS.ProcessEnv;
@@ -284,29 +309,49 @@ export function fastWhisperPort(v: Config['voice']): number {
 
 /**
  * Builds the engines per attention. `voice.stt: whisper` → exactly as before: the main Whisper model for
- * answers, the fast one (if set) for the rest, no wrapper. With a cloud engine, each attention in
+ * answers, the fast one (if set) for the rest, no wrapper. `localStt: parakeet` → Parakeet for the
+ * attentions in `parakeetFor`, whisper (by its rule) for the rest; whisper models no attention uses are
+ * never built – with `parakeetFor` = all four there is no whisper-server at all. With a cloud engine, each attention in
  * `sttCloudFor` gets it with the attention's local engine as fallback (`cloudFallback: local`); the
  * others stay local. `wake` is not in the default list: side talk never leaves the server.
  * Throws if the cloud key is missing (`voiceProblems` reports that first).
  */
 export function createSttRoutes(v: Config['voice'], deps: SttRouteDeps = {}): SttRoutes {
-  const makeLocal = deps.local ?? ((o) => new WhisperServerStt(v, o));
+  const makeLocal = deps.local ?? ((o) => (o.engine === 'parakeet' ? new ParakeetStt(v) : new WhisperServerStt(v, o)));
   const locals = new Map<LocalModel, LocalStt>();
   const local = (m: LocalModel): LocalStt => {
     let e = locals.get(m);
     if (!e) {
-      e = m === 'main' ? makeLocal({ model: v.whisperModel, port: v.whisperPort }) : makeLocal({ model: v.whisperFastModel, port: fastWhisperPort(v) });
+      if (m === 'parakeet') e = makeLocal({ model: v.parakeet.model, port: 0, engine: 'parakeet' });
+      else e = m === 'main' ? makeLocal({ model: v.whisperModel, port: v.whisperPort, engine: 'whisper' }) : makeLocal({ model: v.whisperFastModel, port: fastWhisperPort(v), engine: 'whisper' });
       locals.set(m, e);
     }
     return e;
   };
   const plan = sttPlan(v);
+  // Parakeet next to whisper hears answers only: whatever it hears without the keyword, whisper hears again.
+  const answersOnly = () => {
+    const p = locals.get('parakeet');
+    if (p && (locals.has('main') || locals.has('fast'))) markAnswersOnly(p);
+  };
 
   if (!ATTENTIONS.some((a) => plan[a].cloud)) {
-    const stt = local('main');
-    const fastStt = v.whisperFastModel ? local('fast') : undefined;
-    const all = fastStt ? [stt, fastStt] : [stt];
-    return { stt, fastStt, warm: all, warmFallback: [], all };
+    // Only the engines some attention uses are built (and so started): never a model nobody hears with.
+    const stt = local(localFor(v, 'answer'));
+    const full = local(localFor(v, 'full'));
+    const confirm = local(localFor(v, 'confirm'));
+    const wake = local(localFor(v, 'wake'));
+    const all = [...new Set([stt, full, confirm, wake])];
+    answersOnly();
+    return {
+      stt,
+      fastStt: full === stt ? undefined : full,
+      ...(confirm !== full ? { confirmStt: confirm } : {}),
+      ...(wake !== full ? { wakeStt: wake } : {}),
+      warm: all,
+      warmFallback: [],
+      all,
+    };
   }
 
   const key = apiKey(v.deepgram.keyEnv, deps.env);
@@ -325,6 +370,7 @@ export function createSttRoutes(v: Config['voice'], deps: SttRouteDeps = {}): St
     return w;
   };
   const routes = { answer: route('answer'), confirm: route('confirm'), full: route('full'), wake: route('wake') };
+  answersOnly();
   const own = new Set(ATTENTIONS.filter((a) => !plan[a].cloud).map((a) => routes[a]));
   const fallbacks = [...wrapped.values()].map((w) => w.fallback).filter((f): f is SpeechToText => !!f && !own.has(f));
   return {
@@ -336,8 +382,9 @@ export function createSttRoutes(v: Config['voice'], deps: SttRouteDeps = {}): St
     warmFallback: v.warmFallback ? fallbacks : [],
     all: [cloud, ...locals.values()],
     breaker,
-    localStt: locals.get('main') ?? null,
-    localFastStt: locals.get('fast') ?? null,
+    // The local engines for whatever must not go to the cloud: the answer one, and the one for the rest.
+    localStt: locals.get(localFor(v, 'answer')) ?? null,
+    localFastStt: (localFor(v, 'full') !== localFor(v, 'answer') ? locals.get(localFor(v, 'full')) : undefined) ?? null,
   };
 }
 

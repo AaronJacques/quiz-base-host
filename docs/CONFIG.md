@@ -131,7 +131,7 @@ Discord-Bot (`npx qbhost discord`). Einrichtung: [DISCORD.md](DISCORD.md).
 
 ## `voice`
 
-Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennung) und Piper oder macOS `say` (Sprachausgabe). Einrichtung: `npx qbhost voice-setup`, Details: [VOICE.md](VOICE.md).
+Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennung, für Antworten wahlweise Parakeet) und Piper oder macOS `say` (Sprachausgabe). Einrichtung: `npx qbhost voice-setup`, Details: [VOICE.md](VOICE.md).
 
 | Option | Default | Bedeutung |
 |---|---|---|
@@ -143,8 +143,14 @@ Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennu
 | `whisperFastModel` | leer (aus) | Zweites, schnelles Modell, relativ zu `dir`, z.B. `models/ggml-base-q5_1.bin`. Läuft als eigener whisper-server auf `whisperPort + 1` und hört alles, wobei keine Antwort erwartet wird (Kartenwahl, Rufname, Befehle, Ja/Nein, „Hier!“). Siehe [VOICE.md](VOICE.md#zwei-modelle-für-langsame-rechner). |
 | `whisperPort` | `8178` | Port des lokalen Whisper-Servers (das schnelle Modell nimmt den nächsten). |
 | `whisperAudioCtx` | `0` | Audiofenster des Whisper-Encoders (`-ac <n>`), `0` = volles Fenster (1500 = 30 s). `512` ≈ 10 s ist auf kleinen Servern etwa dreimal schneller. `maxSpeechSec` wird auf das Fenster begrenzt (n/50 Sekunden). |
-| `language` | `de` | Sprache der Spracherkennung. |
-| `stt` | `whisper` | Spracherkennung: `whisper` (lokal, whisper.cpp) oder `deepgram` (Cloud, EU-Endpunkt). Siehe [VOICE.md](VOICE.md#erkennung-lokal-oder-cloud). |
+| `language` | `de` | Sprache der Spracherkennung (whisper, Deepgram; Parakeet erkennt die Sprache selbst). |
+| `localStt` | `whisper` | Lokale Spracherkennung: `whisper` (whisper.cpp) oder `parakeet` (NVIDIA Parakeet TDT 0.6b v3 über sherpa-onnx, für die Phasen in `parakeetFor`). Unabhängig von `stt`: mit `stt: deepgram` ist sie der Rückfall. Siehe [VOICE.md](VOICE.md#parakeet-statt-whispercpp). |
+| `parakeetFor` | `["answer"]` | Bei `localStt: parakeet`: welche Phasen Parakeet hört (`answer`, `confirm`, `full`, `wake`). Die übrigen hört whisper (`whisperFastModel`, sonst `whisperModel`). Kurze Befehle („Ja“, „Hier“) gibt Parakeet oft englisch wieder, daher Standard nur `answer`. In diesen Phasen zählt Parakeets Text nur als Antwort mit Schlüsselwort; alles andere hört whisper noch einmal. Alle vier = kein whisper-server mehr, dann zählt Parakeets Text für alles. Erlaubt sind nur `["answer"]` und alle vier Phasen; jede andere Kombination ist beim Laden ein Konfigurationsfehler. |
+| `parakeet.model` | `models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` | Modellordner relativ zu `dir` (encoder/decoder/joiner `.int8.onnx` + `tokens.txt`). Das offizielle Modell lädt `voice-setup` (487 MB, geprüft per SHA-256); ein eigener Ordner muss vorhanden sein. |
+| `parakeet.threads` | `0` | Rechen-Threads, `0` = Kerne (höchstens 4). |
+| `parakeet.deadlineMs` / `deadlinePerSecMs` | `8000` / `500` | Frist je Erkennung ab Übergabe an den bereiten Worker: `deadlineMs` + `deadlinePerSecMs` je Audiosekunde. Danach Neustart des Workers und ein zweiter Versuch; scheitert der auch, wird die Äußerung verworfen. |
+| `parakeet.startTimeoutMs` | `60000` | So lange darf der Worker zum Laden des Modells brauchen. |
+| `stt` | `whisper` | Spracherkennung: `whisper` (nur lokal, Engine aus `localStt`) oder `deepgram` (Cloud, EU-Endpunkt). Siehe [VOICE.md](VOICE.md#erkennung-lokal-oder-cloud). |
 | `sttCloudFor` | `["answer","confirm","full"]` | Bei `stt: deepgram`: welche Phasen die Cloud hört (`answer`, `confirm`, `full`, `wake`). Der Rest hört lokal. `wake` (Rufnamen-Prüfung bei allen, die nicht dran sind) fehlt absichtlich: Nebengespräche verlassen den Server nie. Die Cloud hört nur verknüpfte Personen, die laut Spiel gerade sprechen dürfen; siehe die Tabelle in VOICE.md. |
 | `cloudFallback` | `local` | Fällt die Cloud aus: `local` = dieselbe Äußerung lokal erkennen, `none` = kein Rückfall (dann „⚠️ Sprache gestört – bitte tippen“ einmal pro Spiel). |
 | `warmFallback` | `true` | Lokale Rückfall-Modelle beim Beitritt mitstarten; sonst Kaltstart von mehreren Sekunden beim ersten Ausfall. Startet eins nicht (Modell fehlt), gibt es eine Warnung, der Beitritt klappt trotzdem. Hält die Modelle dauerhaft im RAM. |
@@ -164,7 +170,7 @@ Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennu
 | `silenceMs` | `900` | Sprechpause, nach der eine Äußerung als beendet gilt. |
 | `minSpeechMs` | `350` | Kürzere Geräusche werden verworfen (Husten, Klicks). |
 | `minRms` | `250` | Leisere Geräusche werden verworfen. |
-| `maxSpeechSec` | `15` | Obergrenze für eine Äußerung in Sekunden. Mit `whisperAudioCtx` höchstens dessen Fenster (512 → 10 s). |
+| `maxSpeechSec` | `15` | Obergrenze für eine Äußerung in Sekunden. Mit `whisperAudioCtx` höchstens dessen Fenster (512 → 10 s), außer Parakeet hört alle Phasen. |
 | `ignoreWhileSpeaking` | `true` | Was jemand sagt, während der Bot spricht, wird ignoriert (Schutz vor Echo ohne Kopfhörer). |
 | `bargeIn` | `true` | Wer gerade dran ist, darf Hinweise, Erinnerungen und Rückfragen des Bots unterbrechen. Der Bot verstummt und wertet die Äußerung, außer sie klingt wie seine eigene Ansage. Fragen, Lösungen und alle anderen Personen bleiben beim Echo-Schutz. `false` = wie früher. |
 | `wakeWords` | `quizmaster`, `quiz master`, `quizmeister`, `quizhost`, `quiz host` | Rufnamen für Sprachbefehle. |

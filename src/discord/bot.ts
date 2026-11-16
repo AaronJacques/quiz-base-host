@@ -1270,8 +1270,10 @@ export class QuizBot {
   private attention(userId: string): Attention {
     const a = this.turnAttention(userId);
     // Asked "Soll ich das Spiel beenden?": a plain "Ja" must get through (fast model, local like any confirmation).
+    // Also while the asker is answering a question: 'answer' may be Parakeet (`voice.parakeetFor`), which writes a
+    // lone "Ja" as "Yeah". 'confirm' hears a new "Meine Antwort ist …" a second time with the answer engine.
     const ask = this.voiceGame()?.endAsk;
-    return a === 'wake' && ask?.userId === userId && Date.now() <= ask.until ? 'confirm' : a;
+    return (a === 'wake' || a === 'answer') && ask?.userId === userId && Date.now() <= ask.until ? 'confirm' : a;
   }
 
   private turnAttention(userId: string): Attention {

@@ -92,4 +92,19 @@ Die Vorlage `deploy/qbhost.config.server.example.json` kombiniert deshalb zwei M
 "voice": { "enabled": true, "whisperModel": "models/ggml-small-q5_1.bin", "whisperFastModel": "models/ggml-base-q5_1.bin", "whisperAudioCtx": 512 }
 ```
 
+**Antworten mit Parakeet (optional):** `"localStt": "parakeet"` in die `voice`-Einstellung oben. Dann hört NVIDIA Parakeet (sherpa-onnx, im Image vorinstalliert) gesprochene Antworten in ~0,4 s statt ~4,7 s und erkennt Namen besser; `base-q5_1` hört weiter alles andere, `small-q5_1` wird nicht mehr gestartet. Beim nächsten Start lädt der Container das Modell einmalig (487 MB Download, 640 MB auf dem Volume, kurzzeitig beides). Befehle der antwortenden Person („Quizmaster, wiederhole die Frage“) hören Parakeet und danach `base` (~0,4 + 1,3 s), Antworten nur Parakeet.
+
+*Speicher und CPU im Mischbetrieb* (3,8 GB, 1 vCPU), gleichzeitig im RAM:
+
+| Prozess | RAM |
+|---|---|
+| Parakeet-Worker, 1 Thread (`parakeet.threads` 0 = 1 auf 1 vCPU) | ~0,9 GB (Server-Messung; macOS zeigt 1,5 GB, mit 4 Threads 2,0 GB) |
+| whisper-server `base-q5_1`, `-ac 512` | ~0,2 GB |
+| Piper `thorsten-high` | ~0,25 GB |
+| Chromium (quiz-base) und Node-Bot | grob 0,5–0,8 GB (nicht gemessen) |
+
+Zusammen ~1,9–2,2 GB, mit Chromium bis ~2,7 GB, also etwa 0,5 GB mehr als `small` + `base` (~0,35 + 0,2 GB). Startet der Parakeet-Worker neu (Hänger, Absturz), wird der alte vorher hart beendet; gemessen lagen nie zwei Worker gleichzeitig im Speicher, für einen kurzen Moment kann der Speicher des alten aber noch belegt sein, während der neue lädt. Der neue Worker braucht ~5 s Kaltstart, die wartende Äußerung kommt danach dran. Auf 1 vCPU teilen sich Erkennung, Piper und Chromium den Kern: unter Last etwa doppelte Zeiten.
+
+Messen, bevor man umstellt: am besten **nicht während eines Spiels**. Neben dem laufenden whisper-Bot liegen dann zusätzlich Parakeet (~0,9 GB), ein zweites Piper aus dem Selbsttest und ein zweiter Node-Prozess im RAM (zusammen grob 3,0–3,5 GB), und das Entpacken (bzip2, 487 MB) und Laden des Modells belegen den einen Kern für ein bis zwei Minuten. So geht es: eine Kopie der Konfiguration mit `"localStt": "parakeet"` als `data/probe.json` ablegen, dann `docker compose -f app/deploy/compose.yml exec bot node_modules/.bin/tsx src/cli.ts voice-setup --config .qbhost/probe.json` (lädt nur das Modell nach) und `… exec bot node_modules/.bin/tsx tools/stt-probe.ts --local parakeet <wav…>` (Zeiten, Kaltstart, RAM). Zurück: Zeile entfernen und neu starten. Details: [VOICE.md](VOICE.md#parakeet-statt-whispercpp).
+
 Auf stärkeren Servern `whisperFastModel` und `whisperAudioCtx` weglassen und `whisperModel` wieder auf `models/ggml-large-v3-turbo-q5_0.bin` setzen.

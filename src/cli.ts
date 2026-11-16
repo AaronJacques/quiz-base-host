@@ -198,7 +198,8 @@ switch (command) {
     await check(`Sprachsteuerung (STT ${cloudStt ? 'Cloud + lokal' : 'lokal'}, TTS lokal)`, async () => {
       const problems = await voiceProblems(config);
       if (problems.length) throw new Error(`${problems.join('; ')} → npx qbhost voice-setup`);
-      return `${cloudStt ? 'Deepgram' : 'whisper.cpp'} + ${config.voice.tts === 'piper' ? 'Piper' : 'say'} bereit`;
+      const local = config.voice.localStt === 'parakeet' ? 'Parakeet (sherpa-onnx)' : 'whisper.cpp';
+      return `${cloudStt ? `Deepgram (Rückfall ${local})` : local} + ${config.voice.tts === 'piper' ? 'Piper' : 'say'} bereit`;
     });
     for (const w of await voiceWarnings(config).catch(() => [])) console.log(`⚠️  ${w} → npx qbhost voice-setup (bei Cloud-Ausfall sonst nur der Hinweis im Chat)`);
     if (cloudStt) {
