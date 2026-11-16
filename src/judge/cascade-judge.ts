@@ -18,7 +18,7 @@ export interface CascadeStage {
 interface Outcome {
   result: JudgeResult;
   decided: boolean;
-  /** A stage threw (LLM error / timeout) – a later run should try again. */
+  /** A stage threw (LLM error / timeout) or the early budget was used up – a later run should try again. */
   failed: boolean;
   /** First stage not run yet (the interactive one, after an early judgement). */
   next: number;
@@ -27,6 +27,12 @@ interface Outcome {
 }
 
 const UNSURE: JudgeResult = { verdict: 'unsure', method: 'fuzzy', confidence: 0 };
+
+/**
+ * At most this many early calls of an expensive stage (LLM) per scope (question + player). More replaced answers are
+ * judged at "Ja", as before early judging – a long back-and-forth costs at most two extra calls (rule 4).
+ */
+export const EARLY_LLM_CALLS_PER_SCOPE = 2;
 
 /**
  * Chain of responsibility: ask each judge in order until one is sure.
@@ -39,6 +45,8 @@ const UNSURE: JudgeResult = { verdict: 'unsure', method: 'fuzzy', confidence: 0 
 export class CascadeJudge implements AnswerJudge {
   /** Early judgements by scope + verdict key. Only the newest few are kept (see `prejudge`). */
   private early = new Map<string, Promise<Outcome>>();
+  /** Early calls of an expensive stage made per scope (see `EARLY_LLM_CALLS_PER_SCOPE`). */
+  private earlyCalls = new Map<string, number>();
 
   constructor(
     private stages: CascadeStage[],
@@ -105,6 +113,17 @@ export class CascadeJudge implements AnswerJudge {
           note(line);
           return { result: { ...hit, method: 'cache' }, decided: true, failed, next: i, line };
         }
+      }
+      // Early and expensive (LLM): only within the budget of this scope – beyond it "Ja" judges as before.
+      if (early && stage.cache && input.scope) {
+        const used = this.earlyCalls.get(input.scope) ?? 0;
+        if (used >= EARLY_LLM_CALLS_PER_SCOPE) {
+          log.debug(`vorab ${stage.name}: Obergrenze erreicht – Bewertung erst beim „Ja“`);
+          return { result: last, decided: false, failed: true, next: i };
+        }
+        // Old scopes (earlier questions) are dropped; a few dozen entries at most.
+        if (!this.earlyCalls.has(input.scope) && this.earlyCalls.size >= 64) this.earlyCalls.delete(this.earlyCalls.keys().next().value!);
+        this.earlyCalls.set(input.scope, used + 1);
       }
       try {
         last = await stage.judge.judge(input);

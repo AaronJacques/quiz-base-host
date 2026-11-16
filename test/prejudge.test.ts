@@ -102,6 +102,17 @@ describe('CascadeJudge.prejudge', () => {
     expect(calls.llm).toBe(5);
   });
 
+  it('A1: at most two early LLM calls per question and player; a third replaced answer is judged at "Ja"', async () => {
+    const { judge, calls } = cascade(async () => ({ verdict: 'wrong', method: 'llm', confidence: 0.9 }));
+    for (const a of ['Lyon', 'Marseille', 'Nizza']) await judge.prejudge(input(a));
+    expect(calls.llm).toBe(2); // Lyon, Marseille – Nizza waits for "Ja"
+    await judge.judge(input('Nizza'));
+    expect(calls.llm).toBe(3); // the one call at "Ja", as before the feature
+    // Another player of the same question has a budget of their own.
+    await judge.prejudge(input('Lyon', 'q1|Ben'));
+    expect(calls.llm).toBe(4);
+  });
+
   it('is used once: a second judge of the same input asks again', async () => {
     const { judge, calls } = cascade(async () => ({ verdict: 'correct', method: 'llm', confidence: 0.9 }));
     await judge.prejudge(input('Kegel'));
@@ -237,6 +248,48 @@ describe('TafelquizController: judging starts while "Paris?" waits for "Ja"', ()
     t.answer('Pins');
     await until(() => t.verdicts.length === 1);
     expect(t.verdicts[0]).toMatchObject({ answer: 'Pins', correct: false });
+    expect(t.llm.calls).toHaveLength(2);
+    await run;
+  });
+
+  it('A1: replaced three times → two early calls, and one at "Ja" for the last answer', async () => {
+    const t = setup();
+    const run = t.start();
+    await t.waitAsked();
+    for (const [i, a] of ['Kegel', 'Kugel', 'Bahn'].entries()) {
+      t.pending(a);
+      if (i < 2) {
+        await until(() => t.llm.calls.length === i + 1);
+        t.llm.calls[i]!.resolve(false);
+      }
+      await tick(20);
+    }
+    expect(t.llm.answers()).toEqual(['Kegel', 'Kugel']);
+    t.answer('Bahn');
+    await until(() => t.llm.calls.length === 3);
+    t.llm.calls[2]!.resolve(false);
+    await until(() => t.verdicts.length === 1);
+    expect(t.llm.answers()).toEqual(['Kegel', 'Kugel', 'Bahn']);
+    expect(t.meter.byPurpose).toEqual({ prejudge: 2, judge: 1 });
+    await run;
+  });
+
+  it('A1: back to an answer judged early within the budget: "Ja" needs no call at all', async () => {
+    const t = setup();
+    const run = t.start();
+    await t.waitAsked();
+    t.pending('Kegel');
+    await until(() => t.llm.calls.length === 1);
+    t.llm.calls[0]!.resolve(false);
+    await tick(20);
+    t.pending('Kugel');
+    await until(() => t.llm.calls.length === 2);
+    t.llm.calls[1]!.resolve(false);
+    await tick(20);
+    t.pending('Kegel'); // the cache knows it now
+    await tick(20);
+    t.answer('Kegel');
+    await until(() => t.verdicts.length === 1);
     expect(t.llm.calls).toHaveLength(2);
     await run;
   });
