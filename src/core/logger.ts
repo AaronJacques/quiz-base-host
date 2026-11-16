@@ -31,4 +31,15 @@ export function createLogger(scope: string): Logger {
   };
 }
 
-export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Wait `ms`. With a `signal` the wait ends early (resolves, never rejects) as soon as it is aborted. */
+export const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((r) => {
+    if (signal?.aborted) return r();
+    const done = () => {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', done);
+      r();
+    };
+    const t = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });

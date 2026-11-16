@@ -124,8 +124,32 @@ export class FakeTafelquizPage implements TafelquizPort {
     this.turn = (this.turn + 1) % this.players.length;
     return this.ok('close');
   };
+  /** Test hook: like quiz-base (live ~1.3 s), the new score shows this long after the award click. */
+  scoreDelayMs = 0;
+  /** Test hook: with `scoreDelayMs`, show the new score counting up in this many steps instead of at once. */
+  scoreSteps = 1;
+  /** Test hook: the award click fails (nothing is applied). */
+  awardFails = false;
+  /** Test hook: the page applies these points instead of the requested ones (e.g. a different quick button). */
+  awardApplies: number | null = null;
   award = (name: string, delta: number) => {
-    this.players.find((p) => p.name === name)!.score += delta;
+    if (this.awardFails) {
+      this.log.push(`award failed ${name} ${delta}`);
+      return Promise.resolve({ ok: false, error: 'no points section' });
+    }
+    const p = this.players.find((x) => x.name === name)!;
+    const applied = this.awardApplies ?? delta;
+    if (this.scoreDelayMs > 0 && this.scoreSteps > 1) {
+      // Count up/down in steps like an animated score; the chunks add up to `applied`.
+      let done = 0;
+      for (let i = 1; i <= this.scoreSteps; i++) {
+        const upTo = Math.round((applied * i) / this.scoreSteps);
+        const chunk = upTo - done;
+        done = upTo;
+        setTimeout(() => (p.score += chunk), (this.scoreDelayMs * i) / this.scoreSteps);
+      }
+    } else if (this.scoreDelayMs > 0) setTimeout(() => (p.score += applied), this.scoreDelayMs);
+    else p.score += applied;
     return this.ok(`award ${name} ${delta}`);
   };
   endGame = () => {

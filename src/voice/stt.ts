@@ -125,6 +125,51 @@ export function cleanTranscript(raw: string): string {
   return text;
 }
 
+/** A loop needs at least this many back-to-back copies; real answers repeat far less ("Tora! Tora! Tora!"). */
+const LOOP_MIN_REPEATS = 6;
+/** Longest repeated word sequence that counts as a loop ("Sport für 100, 200, 300, 400," = 6 words). */
+const LOOP_MAX_WORDS = 8;
+
+/**
+ * Without temperature fallback whisper may hand back a pass that loops on the prompt until its token limit
+ * ("Sport, Serie 200, Sport, Serie 200, …", "Fügel, Fügel, …"). The same word sequence repeated at least
+ * LOOP_MIN_REPEATS times in a row (words compared without case and punctuation) is kept once, and a cut-off rest of
+ * it at the very end goes too. Anything repeated fewer times – "Duran Duran", "Baden-Baden", "New York, New York",
+ * "Tora! Tora! Tora!" – stays exactly as it is.
+ */
+export function collapseLoops(text: string): string {
+  const words = text.split(' ');
+  const keys = words.map((w) => w.toLowerCase().replace(/[.!?,;:…"„“'-]+/g, ''));
+  const same = (a: number, b: number, len: number) => {
+    for (let k = 0; k < len; k++) if (keys[a + k] !== keys[b + k]) return false;
+    return true;
+  };
+  const out: string[] = [];
+  let changed = false;
+  let i = 0;
+  while (i < words.length) {
+    let next = i + 1;
+    let keep = 1;
+    for (let len = 1; len <= LOOP_MAX_WORDS && i + len * LOOP_MIN_REPEATS <= words.length; len++) {
+      let reps = 1;
+      while (i + (reps + 1) * len <= words.length && same(i, i + reps * len, len)) reps++;
+      if (reps < LOOP_MIN_REPEATS) continue;
+      let end = i + reps * len;
+      // The token limit cuts the last copy off ("…, Sport, Serie 200, Sp"): drop such a rest at the end.
+      let k = 0;
+      while (end + k < words.length && k < len && (keys[end + k] === keys[i + k] || (end + k === words.length - 1 && !!keys[end + k] && keys[i + k]!.startsWith(keys[end + k]!)))) k++;
+      if (end + k === words.length) end = words.length;
+      next = end;
+      keep = len;
+      changed = true;
+      break;
+    }
+    out.push(...words.slice(i, i + keep));
+    i = next;
+  }
+  return changed ? out.join(' ').replace(/[,;]+$/, '') : text;
+}
+
 /**
  * whisper.cpp's `whisper-server`, started once and kept warm (model loading takes seconds).
  * If it dies (crash, `pkill`), the next `transcribe` starts it again – like Piper.
@@ -270,12 +315,16 @@ export class WhisperServerStt implements SpeechToText {
     form.set('response_format', 'json');
     form.set('language', this.cfg.language);
     form.set('temperature', '0');
+    // No temperature fallback: a pass rejected by the entropy check is not decoded again at 0.2, 0.4, … – those re-runs
+    // cost base 6–7 s per outlier on 1 vCPU (prompt loops). Measured not worse for base, small and large-v3-turbo
+    // (hits equal or better, max 10.1 → 2.7 s on base), see docs/VOICE.md. whisper-server reads it per request.
+    form.set('temperature_inc', '0');
     if (prompt) form.set('prompt', prompt);
     const t0 = Date.now();
     const res = await fetch(`${this.url}/inference`, { method: 'POST', body: form, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) });
     if (!res.ok) throw new Error(`whisper-server ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const raw = String(((await res.json()) as { text?: string }).text ?? '');
-    const text = cleanTranscript(raw);
+    const text = collapseLoops(cleanTranscript(raw));
     log.debug(`STT ${Date.now() - t0} ms (${path.basename(this.model, '.bin').replace(/^ggml-/, '')}): "${raw.trim()}"${text !== raw.trim() ? ` → "${text}"` : ''}`);
     return text;
   }

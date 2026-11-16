@@ -22,7 +22,7 @@ import { VoiceBridge } from '../src/discord/voice-bridge.ts';
 import { LoopbackTransport } from '../src/voice/loopback.ts';
 import { createVoiceKit, voiceProblems } from '../src/voice/index.ts';
 import { END_ASK_LINE, END_KEEP_LINE, gameOverLine, GOODBYE_LINE, questionLine, revealLine, turnLine, verdictLine } from '../src/voice/narration.ts';
-import { cleanTranscript, WhisperServerStt, type SpeechToText } from '../src/voice/stt.ts';
+import { cleanTranscript, collapseLoops, WhisperServerStt, type SpeechToText } from '../src/voice/stt.ts';
 import { VoiceHost, type Attention } from '../src/voice/voice-host.ts';
 import type { Speaker, Utterance, VoiceTransport } from '../src/voice/transport.ts';
 import type { TextToSpeech } from '../src/voice/tts.ts';
@@ -615,6 +615,42 @@ describe('QuizBot voice (review fixes)', () => {
   }, 20000);
 });
 
+describe('voice: whisper loops are kept once (collapseLoops)', () => {
+  const loop = (unit: string, n: number, rest = '') => `${Array(n).fill(unit).join(', ')}${rest}`;
+
+  it('cuts a loop on the prompt down to one copy, also with a cut-off rest at the end', () => {
+    // Measured (base, VPS / large, Mac): the pass loops until the token limit.
+    expect(collapseLoops(loop('Sport, Serie 200', 25, ', Sp'))).toBe('Sport, Serie 200');
+    expect(collapseLoops(`Geschichte, Flügel, ${loop('Fügel', 26)}`)).toBe('Geschichte, Flügel, Fügel');
+    expect(collapseLoops(`füllen, ${loop('Flaggen, Sport, Serie', 30, ', Flaggen, Sport, Se')}`)).toBe('füllen, Flaggen, Sport, Serie');
+    expect(collapseLoops(loop('Geschichte 300', 8))).toBe('Geschichte 300');
+    expect(collapseLoops(`${loop('Sport für 100, 200, 300, 400', 7)},`)).toBe('Sport für 100, 200, 300, 400');
+    expect(collapseLoops(`Meine Antwort ist ${loop('Paris', 12)}.`)).toBe('Meine Antwort ist Paris');
+    // The kept text still makes the same card as before.
+    expect(spokenToDigits(collapseLoops(loop('Sport, Serie 200', 25)))).toContain('200');
+  });
+
+  it('never changes real answers and names that repeat a word', () => {
+    for (const t of [
+      'Duran Duran',
+      'Meine Antwort ist Duran Duran',
+      'Baden-Baden',
+      'Bora Bora',
+      'New York, New York',
+      'Tora! Tora! Tora!',
+      'Sing, Sing, Sing',
+      'Meine Antwort ist Que Sera, Sera',
+      'Na na na na na, hey hey, goodbye',
+      'Mahna Mahna',
+      'Ja, ja, ja',
+      'Sport für 100',
+      'Geschichte 300, Geschichte 300',
+      '',
+    ])
+      expect(collapseLoops(t)).toBe(t);
+  });
+});
+
 describe('voice: whisper-server restarts (F5, F21)', () => {
   const freePort = () =>
     new Promise<number>((resolve) => {
@@ -662,6 +698,33 @@ describe('voice: whisper-server restarts (F5, F21)', () => {
       await stt.close();
     }
   }, 20000);
+
+  it('asks whisper-server without temperature fallback (temperature 0, temperature_inc 0) – latency-logic 1', async () => {
+    const http = await import('node:http');
+    const bodies: string[] = [];
+    const srv = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        if (req.url === '/inference') bodies.push(Buffer.concat(chunks).toString('latin1'));
+        res.end(req.url === '/inference' ? JSON.stringify({ text: 'Sport für 100' }) : 'ok');
+      });
+    });
+    const port = await freePort();
+    await new Promise<void>((r) => srv.listen(port, '127.0.0.1', () => r()));
+    const { dir } = fakeWhisper();
+    const stt = new WhisperServerStt(ConfigSchema.parse({ voice: { dir, whisperModel: 'models/m.bin', whisperPort: port } }).voice);
+    try {
+      expect(await stt.transcribe(pcm, 'Sport, Flaggen')).toBe('Sport für 100');
+      const field = (name: string) => bodies[0]!.match(new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r]*)`))?.[1];
+      expect(field('temperature')).toBe('0');
+      expect(field('temperature_inc')).toBe('0');
+      expect(field('prompt')).toBe('Sport, Flaggen');
+    } finally {
+      await stt.close();
+      srv.close();
+    }
+  });
 
   it('recovers when a server it did not start goes away', async () => {
     const { dir, bin } = fakeWhisper();

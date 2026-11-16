@@ -3,8 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { ConfigSchema } from '../src/config.ts';
-import { EventBus } from '../src/core/events.ts';
-import { setLogLevel } from '../src/core/logger.ts';
+import { EventBus, type HostEvents } from '../src/core/events.ts';
+import { setLogLevel, sleep } from '../src/core/logger.ts';
 import { CascadeJudge } from '../src/judge/cascade-judge.ts';
 import { FuzzyJudge } from '../src/judge/fuzzy-judge.ts';
 import { createJudge, JudgeCache, type JudgeKit } from '../src/judge/index.ts';
@@ -628,4 +628,320 @@ describe('TafelquizController: no pick is lost during a turn (review F12)', () =
       vi.useRealTimers();
     }
   }, 30000);
+});
+
+describe('sleep with a signal', () => {
+  it('ends early on abort and never rejects', async () => {
+    const ac = new AbortController();
+    const t = Date.now();
+    const p = sleep(5000, ac.signal);
+    setTimeout(() => ac.abort(), 20);
+    await p;
+    expect(Date.now() - t).toBeLessThan(1000);
+    await sleep(5000, ac.signal); // already aborted → at once
+    expect(Date.now() - t).toBeLessThan(1000);
+  });
+});
+
+describe('TafelquizController: verdict before the score animation (latency-logic 2)', () => {
+  /** One question on a page that shows new scores after `scoreDelayMs` (quiz-base: ~1.3 s). */
+  function scoreGame(opts: { game?: Record<string, unknown>; scoreDelayMs?: number; answers?: Record<string, string> } = {}) {
+    const g = setup(opts.game);
+    g.page.scoreDelayMs = opts.scoreDelayMs ?? 0;
+    const answers = opts.answers ?? { Anna: '5', Ben: '10' };
+    let first = true;
+    g.bus.on('host:turn', ({ player }) => {
+      if (!first) return void g.page.endGame();
+      first = false;
+      setTimeout(() => g.bus.emit('player:pick', { player, col: 0, row: 0 }), 5);
+    });
+    const answeredAt: Record<string, number> = {};
+    g.bus.on('host:await-answer', ({ player }) =>
+      setTimeout(() => {
+        answeredAt[player] = Date.now();
+        g.bus.emit('player:answer', { player, answer: answers[player] ?? '?' });
+      }, 5),
+    );
+    g.bus.on('host:say', ({ text }) => {
+      if (text.startsWith('🔔 Buzzer frei')) setTimeout(() => g.page.buzz('Ben'), 20);
+    });
+    const score = (name: string) => g.page.players.find((p) => p.name === name)!.score;
+    const verdicts: { player: string; delta: number; after: number; shown: number }[] = [];
+    g.bus.on('host:verdict', (v) => verdicts.push({ player: v.player, delta: v.delta, after: Date.now() - answeredAt[v.player]!, shown: score(v.player) }));
+    const scoresAt: { reveal: Record<string, number> | null; buzzerOpen: number | null; benAsked: number | null } = { reveal: null, buzzerOpen: null, benAsked: null };
+    let lastScores: Record<string, number> = {};
+    g.bus.on('host:scores', ({ players }) => (lastScores = Object.fromEntries(players.map((p) => [p.name, p.score]))));
+    g.bus.on('host:reveal', () => (scoresAt.reveal = lastScores));
+    g.bus.on('host:notice', (n) => n.kind === 'buzzer-open' && (scoresAt.buzzerOpen = score('Anna')));
+    g.bus.on('host:await-answer', ({ player }) => player === 'Ben' && (scoresAt.benAsked = score('Anna')));
+    return { ...g, verdicts, scoresAt, score };
+  }
+
+  it('announces the verdict right after the click; buzzer round and reveal see the new scores', async () => {
+    const g = scoreGame({ scoreDelayMs: 300 });
+    await g.controller.run(new AbortController().signal);
+    expect(g.verdicts.map(({ player, delta }) => ({ player, delta }))).toEqual([
+      { player: 'Anna', delta: -50 },
+      { player: 'Ben', delta: 100 },
+    ]);
+    for (const v of g.verdicts) {
+      expect(v.shown).toBe(0); // announced before quiz-base shows the new score …
+      expect(v.after).toBeLessThan(250); // … without waiting for it
+    }
+    // Everything that reads scores afterwards sees the page's new scores.
+    expect(g.scoresAt.buzzerOpen).toBe(-50);
+    expect(g.scoresAt.benAsked).toBe(-50);
+    expect(g.scoresAt.reveal).toEqual({ Anna: -50, Ben: 100 });
+    // The page order stays: points first, then the animation.
+    const log = g.page.log;
+    expect(log.indexOf('award Anna -50')).toBeLessThan(log.indexOf('animate Falsch'));
+  }, 10000);
+
+  it('a failed award click announces nothing early: wait first, then the verdict as before, with a warning', async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => (lines.push(String(chunk)), true));
+    setLogLevel('warn');
+    try {
+      const g = scoreGame({ game: { buzzerOnWrong: false }, answers: { Anna: '10' } });
+      g.page.awardFails = true;
+      let animatedBeforeVerdict = false;
+      g.bus.on('host:verdict', () => (animatedBeforeVerdict = g.page.log.includes('animate Richtig')));
+      await g.controller.run(new AbortController().signal);
+      expect(g.verdicts).toHaveLength(1);
+      expect(g.verdicts[0]!.after).toBeGreaterThanOrEqual(2900); // the old 3 s score wait came first
+      expect(g.verdicts[0]!.delta).toBe(100); // unchanged from today
+      expect(animatedBeforeVerdict).toBe(true);
+      expect(g.score('Anna')).toBe(0);
+      const warn = lines.join('');
+      expect(warn).toContain('Punkte für Anna (100) nicht vergeben');
+      expect(warn).toContain('Punktestand von Anna: erwartet 100, quiz-base zeigt 0');
+    } finally {
+      spy.mockRestore();
+      setLogLevel('error');
+    }
+  }, 10000);
+
+  it('the page applies other points: the verdict names the expected ones, later messages the real score, one warning', async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => (lines.push(String(chunk)), true));
+    setLogLevel('warn');
+    try {
+      const g = scoreGame({ game: { buzzerOnWrong: false }, answers: { Anna: '10' }, scoreDelayMs: 100 });
+      g.page.awardApplies = 50;
+      await g.controller.run(new AbortController().signal);
+      expect(g.verdicts.map((v) => v.delta)).toEqual([100]);
+      expect(g.verdicts[0]!.after).toBeLessThan(250);
+      expect(g.scoresAt.reveal).toEqual({ Anna: 50, Ben: 0 });
+      const warns = lines.filter((l) => l.includes('Punktestand von'));
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain('erwartet 100, quiz-base zeigt 50');
+      expect(warns[0]).not.toContain('"10"'); // no answer text in the warning
+    } finally {
+      spy.mockRestore();
+      setLogLevel('error');
+    }
+  }, 10000);
+
+  it('stopping the game between the verdict and the new score: no hanging wait, one verdict, no more clicks', async () => {
+    const g = scoreGame({ game: { buzzerOnWrong: false }, answers: { Anna: '10' }, scoreDelayMs: 10_000 });
+    const ac = new AbortController();
+    let clicksAtVerdict = -1;
+    let stoppedAt = 0;
+    g.bus.on('host:verdict', () => {
+      clicksAtVerdict = g.page.log.length;
+      stoppedAt = Date.now();
+      ac.abort();
+    });
+    await g.controller.run(ac.signal);
+    expect(Date.now() - stoppedAt).toBeLessThan(500);
+    expect(g.verdicts).toHaveLength(1);
+    expect(g.page.log.slice(clicksAtVerdict)).toEqual([]);
+  }, 10000);
+
+  it('the game ended in the browser between the verdict and the new score: the wait ends, one verdict, no animation', async () => {
+    const g = scoreGame({ game: { buzzerOnWrong: false }, answers: { Anna: '10' }, scoreDelayMs: 10_000 });
+    let endedAt = 0;
+    g.bus.on('host:verdict', () => {
+      endedAt = Date.now();
+      void g.page.endGame();
+    });
+    const over: unknown[] = [];
+    g.bus.on('host:game-over', (o) => over.push(o));
+    await g.controller.run(new AbortController().signal);
+    expect(Date.now() - endedAt).toBeLessThan(1000);
+    expect(g.verdicts).toHaveLength(1);
+    expect(over).toHaveLength(1);
+    expect(g.page.log).not.toContain('animate Richtig');
+  }, 10000);
+
+  it('a second answer while the score is still animating is ignored: one verdict per player', async () => {
+    const g = scoreGame({ scoreDelayMs: 300 });
+    g.bus.on('host:verdict', (v) => setTimeout(() => g.bus.emit('player:answer', { player: v.player, answer: '10' }), 10));
+    g.bus.on('host:await-answer', ({ player }) => setTimeout(() => g.bus.emit('player:answer', { player, answer: player === 'Anna' ? '5' : '10' }), 6));
+    await g.controller.run(new AbortController().signal);
+    expect(g.verdicts.map((v) => v.player)).toEqual(['Anna', 'Ben']);
+    expect(g.scoresAt.reveal).toEqual({ Anna: -50, Ben: 100 });
+  }, 10000);
+
+  /** Like the session: a point correction goes straight to the page (the fake shows it after `scoreDelayMs` too). */
+  const bookCorrections = (g: ReturnType<typeof scoreGame>) =>
+    g.bus.on('operator:command', (c) => c.command === 'punkte' && void g.page.award(c.args[0]!, Number(c.args[1])));
+  const warnings = async (fn: () => Promise<void>) => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => (lines.push(String(chunk)), true));
+    setLogLevel('warn');
+    try {
+      await fn();
+    } finally {
+      spy.mockRestore();
+      setLogLevel('error');
+    }
+    return lines.join('');
+  };
+
+  for (const steps of [1, 6]) {
+    it(`overruled to "richtig" while the score still shows (${steps === 1 ? 'at once' : 'counting up'}): the wait ends at the corrected score, no warning, "Richtig" on the page, no buzzer round`, async () => {
+      const g = scoreGame({ scoreDelayMs: 300 });
+      g.page.scoreSteps = steps;
+      bookCorrections(g);
+      // What the bot sends for "!quiz richtig" after "falsch (−50)": 100 − (−50).
+      let verdictAt = 0;
+      g.bus.on('host:verdict', (v) => {
+        if (v.player !== 'Anna') return;
+        verdictAt = Date.now();
+        setTimeout(() => g.bus.emit('operator:command', { command: 'punkte', args: ['Anna', '150'] }), 100);
+      });
+      let revealAt = 0;
+      g.bus.on('host:reveal', () => (revealAt = Date.now()));
+      const notices: string[] = [];
+      g.bus.on('host:notice', (n) => notices.push(n.kind));
+      const warn = await warnings(() => g.controller.run(new AbortController().signal));
+      expect(warn).not.toContain('Punktestand von');
+      expect(revealAt - verdictAt).toBeLessThan(1500); // not the 3 s timeout
+      expect(g.page.log).toContain('animate Richtig');
+      expect(g.page.log).not.toContain('animate Falsch');
+      expect(notices).not.toContain('buzzer-open');
+      expect(g.page.log).not.toContain('releaseBuzzer');
+      expect(g.scoresAt.reveal).toEqual({ Anna: 100, Ben: 0 });
+    }, 10000);
+  }
+
+  it('overruled to "falsch" in the window: "Falsch" on the page, the real score at the reveal, no warning', async () => {
+    const g = scoreGame({ scoreDelayMs: 300, answers: { Anna: '10' } });
+    bookCorrections(g);
+    g.bus.on('host:verdict', (v) => setTimeout(() => g.bus.emit('operator:command', { command: 'punkte', args: [v.player, '-150'] }), 50));
+    const warn = await warnings(() => g.controller.run(new AbortController().signal));
+    expect(warn).not.toContain('Punktestand von');
+    expect(g.page.log).toContain('animate Falsch');
+    expect(g.page.log).not.toContain('animate Richtig');
+    expect(g.scoresAt.reveal).toEqual({ Anna: -50, Ben: 0 });
+  }, 10000);
+
+  it('a correction of another player in the window does not change the wait or the outcome', async () => {
+    const g = scoreGame({ scoreDelayMs: 300, game: { buzzerOnWrong: false }, answers: { Anna: '10' } });
+    bookCorrections(g);
+    g.bus.on('host:verdict', () => setTimeout(() => g.bus.emit('operator:command', { command: 'punkte', args: ['Ben', '150'] }), 50));
+    const warn = await warnings(() => g.controller.run(new AbortController().signal));
+    expect(warn).not.toContain('Punktestand von');
+    expect(g.page.log).toContain('animate Richtig');
+    expect(g.scoresAt.reveal?.Anna).toBe(100);
+    await sleep(500); // the fake shows Ben's correction 300 ms after it was booked
+    expect(g.score('Ben')).toBe(150);
+  }, 10000);
+
+  it('counting-up scores: the verdict comes first, buzzer round and reveal see only the final scores', async () => {
+    const g = scoreGame({ scoreDelayMs: 600 });
+    g.page.scoreSteps = 6;
+    const warn = await warnings(() => g.controller.run(new AbortController().signal));
+    expect(g.verdicts.map((v) => v.shown)).toEqual([0, 0]);
+    expect(g.verdicts.every((v) => v.after < 250)).toBe(true);
+    expect(g.scoresAt.buzzerOpen).toBe(-50);
+    expect(g.scoresAt.reveal).toEqual({ Anna: -50, Ben: 100 });
+    expect(warn).not.toContain('Punktestand von');
+  }, 10000);
+
+  it('a failed award click and the game stopped during the wait: no verdict, no clicks, no hanging wait', async () => {
+    const g = scoreGame({ answers: { Anna: '10' } });
+    g.page.awardFails = true;
+    const ac = new AbortController();
+    let failedAt = -1;
+    const award = g.page.award;
+    g.page.award = (name: string, delta: number) => {
+      const r = award(name, delta);
+      failedAt = g.page.log.length;
+      setTimeout(() => ac.abort(), 200);
+      return r;
+    };
+    const t = Date.now();
+    await warnings(() => g.controller.run(ac.signal));
+    expect(Date.now() - t).toBeLessThan(2500); // not the 3 s wait
+    expect(g.verdicts).toHaveLength(0);
+    expect(g.page.log.slice(failedAt)).toEqual([]);
+  }, 10000);
+
+  it('a failed award click and the game ended in the browser during the wait: the verdict as before, no buzzer round on the results', async () => {
+    const g = scoreGame(); // Anna answers wrong, buzzer round is on
+    g.page.awardFails = true;
+    const award = g.page.award;
+    g.page.award = (name: string, delta: number) => {
+      const r = award(name, delta);
+      setTimeout(() => void g.page.endGame(), 200);
+      return r;
+    };
+    const t = Date.now();
+    await warnings(() => g.controller.run(new AbortController().signal));
+    expect(Date.now() - t).toBeLessThan(2500);
+    expect(g.verdicts.map((v) => ({ player: v.player, delta: v.delta }))).toEqual([{ player: 'Anna', delta: -50 }]);
+    expect(g.page.log).not.toContain('releaseBuzzer');
+    expect(g.page.log).not.toContain('animate Falsch');
+  }, 10000);
+});
+
+describe('TafelquizController: the page watchdog does not delay the work (latency-logic 5)', () => {
+  /** Fake time, pollMs 500 (watchdog pause 1 s like the default): how long from the event to the reaction. */
+  async function reaction(at: number) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const { bus, page } = setup({ buzzerOnWrong: false, answerTimeoutSec: 30 });
+      const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbwd-'));
+      const config = ConfigSchema.parse({ game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, answerTimeoutSec: 30, buzzerOnWrong: false }, judge: { cacheFile: path.join(tmp, 'c.json') }, llm: { provider: 'none' } });
+      const controller = new TafelquizController({ page, bus, judge: createJudge(config, bus, null, new UsageMeter()), game: config.game, pollMs: 500 });
+      let turn: HostEvents['host:turn'] | null = null;
+      let asked: string | null = null;
+      bus.on('host:turn', (t) => (turn ??= t));
+      bus.on('host:await-answer', (a) => (asked ??= a.player));
+      let verdictAt = 0;
+      bus.on('host:verdict', () => (verdictAt ||= Date.now()));
+      const ac = new AbortController();
+      const run = controller.run(ac.signal);
+      while (!turn) await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(at);
+      const t = turn as HostEvents['host:turn'];
+      const pickAt = Date.now();
+      bus.emit('player:pick', { player: t.player, col: t.open[0]!.col, row: t.open[0]!.row });
+      let openedAt = 0;
+      while (!page.log.some((l) => l.startsWith('open')) && Date.now() - pickAt < 3000) await vi.advanceTimersByTimeAsync(1);
+      openedAt = Date.now();
+      while (!asked) await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(at);
+      const answerAt = Date.now();
+      bus.emit('player:answer', { player: asked, answer: '10' });
+      while (!verdictAt && Date.now() - answerAt < 3000) await vi.advanceTimersByTimeAsync(1);
+      ac.abort();
+      await vi.advanceTimersByTimeAsync(5000);
+      await run.catch(() => {});
+      return { pick: openedAt - pickAt, answer: verdictAt - answerAt, opened: page.log.filter((l) => l.startsWith('open')).length };
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  for (const at of [0, 130, 470, 990]) {
+    it(`pick → openCell and answer → verdict without the 1 s watchdog pause (event at +${at} ms)`, async () => {
+      const r = await reaction(at);
+      expect(r.pick).toBeLessThan(30);
+      expect(r.answer).toBeLessThan(30);
+      expect(r.opened).toBe(1);
+    }, 20000);
+  }
 });

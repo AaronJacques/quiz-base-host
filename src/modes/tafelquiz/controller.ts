@@ -212,7 +212,7 @@ export class TafelquizController implements GameMode {
     this.lastPick = { ...cell, player: current.name };
     this.say(`${current.name} nimmt ${cell.category} für ${cell.points}.`);
     await this.d.page.openCell(cell.col, cell.row);
-    await this.d.page.waitFor((x) => x.phase === 'question', 5000, 250);
+    await this.d.page.waitFor((x) => x.phase === 'question', 5000, 100);
   }
 
   // ───────────────────────────── Question ─────────────────────────────
@@ -329,16 +329,59 @@ export class TafelquizController implements GameMode {
     const delta = scoreFor(q.points, correct, viaBuzzer, this.d.game);
     if (result.verdict === 'unsure') log.warn('Keine sichere Entscheidung – werte als falsch ohne Abzug');
     const appliedDelta = result.verdict === 'unsure' ? 0 : delta;
-    if (appliedDelta !== 0) {
-      const before = (await this.d.page.state()).players.find((p) => p.name === player)?.score;
-      await this.d.page.award(player, appliedDelta);
-      // quiz-base shows new scores with a delay – wait so the next score announcement is current.
-      if (before !== undefined) await this.d.page.waitFor((x) => x.players.find((p) => p.name === player)?.score === before + appliedDelta, 3000, 150);
+    const verdict = () => {
+      this.d.bus.emit('host:verdict', { player, answer: answerText, correct, delta: appliedDelta, reason: result.reason });
+      this.say(`${correct ? '✅' : '❌'} ${player}: "${answerText}" ist ${correct ? 'richtig' : 'falsch'}${appliedDelta ? ` (${appliedDelta > 0 ? '+' : ''}${appliedDelta})` : ''}.`);
+    };
+    if (appliedDelta === 0) {
+      await this.d.page.animate(correct ? 'Richtig' : 'Falsch');
+      verdict();
+      return correct;
     }
-    await this.d.page.animate(correct ? 'Richtig' : 'Falsch');
-    this.d.bus.emit('host:verdict', { player, answer: answerText, correct, delta: appliedDelta, reason: result.reason });
-    this.say(`${correct ? '✅' : '❌'} ${player}: "${answerText}" ist ${correct ? 'richtig' : 'falsch'}${appliedDelta ? ` (${appliedDelta > 0 ? '+' : ''}${appliedDelta})` : ''}.`);
-    return correct;
+    const before = (await this.d.page.state()).players.find((p) => p.name === player)?.score;
+    const awarded = await this.d.page.award(player, appliedDelta);
+    // The click went through: announce at once – quiz-base takes ~1.3 s to show the new score. A failed click keeps the
+    // order as before (wait first, then announce), so nothing is announced earlier than the page could show it.
+    const early = awarded.ok;
+    if (early) verdict();
+    else log.warn(`Punkte für ${player} (${appliedDelta}) nicht vergeben: ${awarded.error ?? 'unbekannter Fehler'}`);
+    // quiz-base shows new scores with a delay – wait so that everything reading the scores next (buzzer round, reveal,
+    // standings, next turn) sees the page's real score. A game ended meanwhile (stopped, or in the browser) ends the wait.
+    // The early verdict lets the game leader overrule it while we wait ("!quiz richtig/falsch", a correction): the
+    // session books those points on the page right away. Count them in, so the wait ends at the corrected score.
+    let fix = 0;
+    const offFix = this.d.bus.on('operator:command', (c) => {
+      if (c.command !== 'punkte' || c.args.length < 2 || c.args.slice(0, -1).join(' ') !== player) return;
+      const n = Number(c.args[c.args.length - 1]);
+      if (Number.isFinite(n)) fix += n;
+    });
+    try {
+      if (before !== undefined) {
+        const shown = await this.d.page.waitFor(
+          (x) => this.signal.aborted || x.phase === 'results' || x.players.find((p) => p.name === player)?.score === before + appliedDelta + fix,
+          3000,
+          150,
+        );
+        if (this.signal.aborted) return false; // game ended: no more clicks (and no late verdict)
+        if (shown?.phase === 'results') {
+          if (!early) verdict(); // as before: the verdict still counts (the results show its points)
+          return true; // question over: no buzzer round on the results screen – the main loop reports the results
+        }
+        if (!shown) {
+          const now = await this.d.page.state().catch(() => null);
+          log.warn(`Punktestand von ${player}: erwartet ${before + appliedDelta + fix}, quiz-base zeigt ${now?.players.find((p) => p.name === player)?.score ?? '?'}`);
+        }
+      }
+    } finally {
+      offFix();
+    }
+    // Overruled in the window (the points now are what the other outcome gives): the page shows that outcome, and a
+    // verdict turned into "richtig" opens no buzzer round. "richtig" → "falsch" opens none either, like a later correction.
+    const flipped = fix !== 0 && appliedDelta + fix === scoreFor(q.points, !correct, viaBuzzer, this.d.game);
+    const shownCorrect = flipped ? !correct : correct;
+    await this.d.page.animate(shownCorrect ? 'Richtig' : 'Falsch');
+    if (!early) verdict();
+    return correct || shownCorrect;
   }
 
   private async buzzerRound(
@@ -430,7 +473,9 @@ export class TafelquizController implements GameMode {
     let changed = false;
     const watcher = (async () => {
       while (!ac.signal.aborted) {
-        await sleep(this.d.pollMs * 2);
+        // The pause ends as soon as the work is done (or the page changed) – `await watcher` below then only
+        // waits for a state() that is already running, not for the rest of the pause.
+        await sleep(this.d.pollMs * 2, ac.signal);
         if (ac.signal.aborted) return;
         const s = await this.d.page.state().catch(() => null);
         if (s && !stillValid(s)) {
