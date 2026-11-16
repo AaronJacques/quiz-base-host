@@ -617,6 +617,23 @@ export class VoiceHost {
   }
 
   /**
+   * The same second pass through any other route (a cloud route, whisper's main model). Whichever engine
+   * really heard it decides: if that was an answers-only one (Parakeet as the cloud's fallback), its text
+   * counts only with the keyword, and its failure keeps whisper's text – like `answerAgain`. Otherwise the
+   * route's text counts as before.
+   */
+  private async answerAgainVia(main: SpeechToText, pcm: Pcm, heard: string, passes: SttPass[]): Promise<string> {
+    try {
+      const { text, by } = await this.listen(main, pcm, this.d.prompt(), passes);
+      return isAnswersOnly(by) && extractAnswer(text) === null ? heard : text;
+    } catch (e) {
+      if (!(main instanceof FallbackStt && isAnswersOnly(main.fallback))) throw e;
+      log.warn(`Erkennung mit ${engineOf(main)}: ${(e as Error).message} – nehme whispers Text`);
+      return heard;
+    }
+  }
+
+  /**
    * Hears with `stt`; `by` is the engine whose text it is (a cloud route's local fallback, if that heard it).
    * If a local engine fails (not started, crashed twice), the local main model takes over – never a cloud
    * route, so a failed local check cannot send audio out, and never an answers-only engine (Parakeet next to
@@ -753,7 +770,7 @@ export class VoiceHost {
       if (attention === 'confirm' && !once.reheard && main && first !== main && !sameEngine(first, main) && extractAnswer(text) !== null) {
         log.debug(`🎙 ${who}: neue Antwort in der Rückfrage – noch einmal mit dem Hauptmodell`);
         if (isAnswersOnly(main)) text = await this.answerAgain(main, u.pcm, text, passes);
-        else text = (await this.listen(main, u.pcm, this.d.prompt(), passes)).text;
+        else text = await this.answerAgainVia(main, u.pcm, text, passes);
       }
     }
     const sttDoneAt = this.latency.stamp();

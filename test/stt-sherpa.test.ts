@@ -1048,6 +1048,27 @@ describe('F1/F3/F4: Parakeet first, whisper for everything that is no answer (vo
     expect(await w.say('confirm', 'Ja')).toEqual({ used: ['fast: Ja', 'main: Ja'], bot: 'Ja' });
   });
 
+  it('F12: Deepgram for answers only, cloud down – Parakeet as its fallback counts in the confirmation only with the keyword', async () => {
+    const dg = { ...hybrid, stt: 'deepgram', sttCloudFor: ['answer'] };
+    const lost = (t: string) => t.replace('meine Antwort', 'mein Antwort');
+    // Cloud fails → Parakeet stands in and loses the keyword ("Genau, mein Antwort ist" = a yes to the old answer): whisper's text counts.
+    // After 3 failures the cloud pauses: Parakeet hears without a cloud try – same rule.
+    const r = hostRig(dg, { cloudAllowed: true, fail: ['cloud'], parakeet: lost });
+    for (let i = 0; i < 4; i++) {
+      const res = await r.say('confirm', 'Genau, meine Antwort ist Rom');
+      expect(res.bot, `Durchgang ${i + 1}`).toBe('Genau, meine Antwort ist Rom');
+      expect(res.used, `Durchgang ${i + 1}`).toEqual(['fast: Genau, meine Antwort ist Rom', ...(i < 3 ? ['cloud: Genau, meine Antwort ist Rom'] : []), 'parakeet: Genau, meine Antwort ist Rom']);
+    }
+    // Cloud and Parakeet both fail: whisper's text stays (no "Sprache gestört", no lost answer).
+    const both = hostRig(dg, { cloudAllowed: true, fail: ['cloud', 'parakeet'] });
+    expect((await both.say('confirm', 'Genau, meine Antwort ist Rom')).bot).toBe('Genau, meine Antwort ist Rom');
+    // Parakeet keeps the keyword: its text counts, as with the cloud's own text.
+    const kept = hostRig(dg, { cloudAllowed: true, fail: ['cloud'], parakeet: (t) => t.replace('Rom', 'Rohm') });
+    expect((await kept.say('confirm', 'Genau, meine Antwort ist Rom')).bot).toBe('Genau, meine Antwort ist Rohm');
+    const ok = hostRig(dg, { cloudAllowed: true, parakeet: lost });
+    expect(await ok.say('confirm', 'Genau, meine Antwort ist Rom')).toEqual({ used: ['fast: Genau, meine Antwort ist Rom', 'cloud: Genau, meine Antwort ist Rom'], bot: 'Genau, meine Antwort ist Rom' });
+  });
+
   it('with Deepgram: the extra whisper pass is local and never another cloud call', async () => {
     const dg = { ...hybrid, stt: 'deepgram' };
     // The cloud heard it: its text counts as it is – no second pass at all.
