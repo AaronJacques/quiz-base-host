@@ -112,6 +112,11 @@ export class FallbackStt implements SpeechToText {
   readonly engine: string;
   /** May send the audio to the cloud – never a "local only" engine, whatever its fallback is. */
   readonly cloud = true;
+  /**
+   * A second local engine for when the fallback cannot hear (mixed mode: whisper for Parakeet while it loads
+   * or restarts). Never a cloud engine. Set by `createSttRoutes`.
+   */
+  standIn: LocalStt | null = null;
 
   constructor(
     readonly primary: SpeechToText,
@@ -180,7 +185,19 @@ export class FallbackStt implements SpeechToText {
     try {
       return await this.fallback.transcribe(pcm, prompt, { signal: opts.signal });
     } catch (e) {
-      throw new SttTrouble(`Cloud-Erkennung gestört (${reason}), lokaler Rückfall gescheitert: ${this.clean(e)}`);
+      const stand = this.standIn;
+      if (!stand || opts.signal?.aborted) throw new SttTrouble(`Cloud-Erkennung gestört (${reason}), lokaler Rückfall gescheitert: ${this.clean(e)}`);
+      // Parakeet (still loading, restarting, failed): whisper hears it instead – local as well.
+      try {
+        opts.onFallback?.(stand.engine ?? 'lokal', true);
+      } catch {
+        /* measurement only */
+      }
+      try {
+        return await stand.transcribe(pcm, prompt, { signal: opts.signal });
+      } catch (e2) {
+        throw new SttTrouble(`Cloud-Erkennung gestört (${reason}), lokaler Rückfall gescheitert: ${this.clean(e2)}`);
+      }
     }
   }
 
@@ -330,9 +347,14 @@ export function createSttRoutes(v: Config['voice'], deps: SttRouteDeps = {}): St
   };
   const plan = sttPlan(v);
   // Parakeet next to whisper hears answers only: whatever it hears without the keyword, whisper hears again.
-  const answersOnly = () => {
+  const answersOnly = (wrapped: Iterable<FallbackStt> = []) => {
     const p = locals.get('parakeet');
-    if (p && (locals.has('main') || locals.has('fast'))) markAnswersOnly(p);
+    const whisper = locals.get('fast') ?? locals.get('main');
+    if (!p || !whisper) return;
+    markAnswersOnly(p);
+    // Never keep an answer waiting for Parakeet's start: whisper hears until it is ready.
+    if ('failFast' in p) (p as { failFast: boolean }).failFast = true;
+    for (const w of wrapped) if (w.fallback === p) w.standIn = whisper;
   };
 
   if (!ATTENTIONS.some((a) => plan[a].cloud)) {
@@ -370,7 +392,7 @@ export function createSttRoutes(v: Config['voice'], deps: SttRouteDeps = {}): St
     return w;
   };
   const routes = { answer: route('answer'), confirm: route('confirm'), full: route('full'), wake: route('wake') };
-  answersOnly();
+  answersOnly(wrapped.values());
   const own = new Set(ATTENTIONS.filter((a) => !plan[a].cloud).map((a) => routes[a]));
   const fallbacks = [...wrapped.values()].map((w) => w.fallback).filter((f): f is SpeechToText => !!f && !own.has(f));
   return {

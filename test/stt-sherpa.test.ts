@@ -17,9 +17,9 @@ import { TafelquizController } from '../src/modes/tafelquiz/controller.ts';
 import { FakeTafelquizPage } from './fake-page.ts';
 import type { Pcm } from '../src/voice/audio.ts';
 import { createVoiceKit, parakeetProblems, safeTarMembers, setupParakeetModel, voiceProblems, voiceWarnings } from '../src/voice/index.ts';
-import { createSttRoutes, sttNeeds, sttPlan, type SttRouteDeps } from '../src/voice/providers.ts';
-import { normalizeParakeet, PARAKEET_FILES, PARAKEET_MODEL, parakeetThreads, ParakeetStt, SHERPA_ONNX_VERSION, SttTimeout } from '../src/voice/stt-sherpa.ts';
-import { cleanTranscript, isCloud, WhisperServerStt, type LocalStt, type SpeechToText } from '../src/voice/stt.ts';
+import { createSttRoutes, FallbackStt, sttNeeds, sttPlan, type SttRouteDeps } from '../src/voice/providers.ts';
+import { normalizeParakeet, PARAKEET_FILES, PARAKEET_MODEL, parakeetThreads, ParakeetStt, readIntoPageCache, SHERPA_ONNX_VERSION, SttTimeout } from '../src/voice/stt-sherpa.ts';
+import { cleanTranscript, isCloud, SttNotReady, WhisperServerStt, type LocalStt, type SpeechToText } from '../src/voice/stt.ts';
 import { CloudError } from '../src/voice/http.ts';
 import type { Speaker, Utterance, VoiceTransport } from '../src/voice/transport.ts';
 import type { TextToSpeech } from '../src/voice/tts.ts';
@@ -234,7 +234,7 @@ describe('localStt / parakeetFor: engine choice and routes', () => {
     const v = voiceCfg();
     expect(v.localStt).toBe('whisper');
     expect(v.parakeetFor).toEqual(['answer']);
-    expect(v.parakeet).toEqual({ model: 'models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8', threads: 0, deadlineMs: 8000, deadlinePerSecMs: 500, startTimeoutMs: 60000 });
+    expect(v.parakeet).toEqual({ model: 'models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8', threads: 0, deadlineMs: 8000, deadlinePerSecMs: 500, startTimeoutMs: 150000, preload: 'cache' });
     expect(sttNeeds(v)).toEqual({ required: [v.whisperModel], fallback: [], cloud: false });
     expect(sttNeeds(v).parakeet).toBeUndefined();
     const { made } = built(voiceCfg({ whisperFastModel: 'models/fast.bin' }));
@@ -1101,4 +1101,270 @@ describe('F7 (a): setupVoice with the defaults never touches Parakeet', () => {
     expect(existsSync(path.join(dir, 'venv'))).toBe(false);
     expect(readdirSync(path.join(dir, 'models'))).toEqual(['own-model.bin']);
   }, 30000);
+});
+
+describe('slow Parakeet start: answers never wait in the mixed mode', () => {
+  class Room implements VoiceTransport {
+    label = 'fake';
+    private handlers: ((u: Utterance) => void)[] = [];
+    constructor(private texts: Map<number, string>) {}
+    async play() {}
+    stop() {}
+    onUtterance(h: (u: Utterance) => void) {
+      this.handlers.push(h);
+    }
+    onClose() {}
+    async close() {}
+    speak(speaker: Speaker, text: string) {
+      const id = 1000 + this.texts.size;
+      this.texts.set(id, text);
+      const samples = new Int16Array(8000).fill(4000);
+      samples[0] = id;
+      const now = Date.now();
+      for (const h of this.handlers) h({ speaker, pcm: { rate: 16000, channels: 1, samples }, startedAt: now - 500, endedAt: now });
+    }
+  }
+  const anna: Speaker = { id: 'u-anna', username: 'anna', displayName: 'Anna' };
+
+  async function captureLog<T>(fn: () => Promise<T>): Promise<{ out: string; result: T }> {
+    const chunks: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((c: string | Uint8Array) => (chunks.push(String(c).replace(/\x1b\[[0-9;]*m/g, '')), true)) as typeof process.stderr.write;
+    setLogLevel('info');
+    try {
+      const result = await fn();
+      return { out: chunks.join(''), result };
+    } finally {
+      process.stderr.write = write;
+      setLogLevel('error');
+    }
+  }
+
+  /**
+   * The real ParakeetStt on the fake worker (it answers "Text <samples>"), whisper a fake that repeats the
+   * spoken text; the real routes and the real voice host. `env` steers the worker (FAKE_READY_MS …).
+   */
+  function rig(over: Record<string, unknown>, env: Record<string, string>, o: { deadlineMs?: number } = {}) {
+    const v = voiceCfg({ latencyLog: true, ...over });
+    const texts = new Map<number, string>();
+    const used: string[] = [];
+    const heard: string[] = [];
+    const state = tmp('qbsherpa-slow-');
+    let parakeet: ParakeetStt | null = null;
+    const routes = createSttRoutes(v, {
+      local: (e) => {
+        if (e.engine === 'parakeet') {
+          parakeet = new ParakeetStt(v, { command: process.execPath, args: [FAKE], env: { ...process.env, FAKE_STATE: state, FAKE_TEXT: 'Meine Antwort ist Parakeet', ...env }, deadlineMs: () => o.deadlineMs ?? 5000, startTimeoutMs: 5000 });
+          open.push(parakeet);
+          return parakeet;
+        }
+        return {
+          engine: 'whisper:fast',
+          transcribe: async (p) => {
+            const t = texts.get(p.samples[0]!) ?? '';
+            used.push(`whisper: ${t}`);
+            return t;
+          },
+          close: async () => {},
+        };
+      },
+    });
+    const room = new Room(texts);
+    new VoiceHost({
+      transport: room,
+      stt: routes.stt,
+      fastStt: routes.fastStt,
+      confirmStt: routes.confirmStt,
+      wakeStt: routes.wakeStt,
+      tts: silentTts,
+      cfg: v,
+      prompt: () => '',
+      onSpeech: (_s, t, u) => {
+        heard.push(t);
+        u?.();
+      },
+      attention: () => 'answer',
+    });
+    const say = async (text: string, waitMs = 3000) => {
+      used.length = 0;
+      const n = heard.length;
+      const t0 = Date.now();
+      room.speak(anna, text);
+      await until(() => heard.length > n, waitMs);
+      return { ms: Date.now() - t0, used: [...used], bot: heard.at(-1)! };
+    };
+    const starts = () => (existsSync(path.join(state, 'starts')) ? readFileSync(path.join(state, 'starts'), 'utf8').split('\n').filter(Boolean).map(Number) : []);
+    return { say, routes, stt: () => parakeet!, starts };
+  }
+  const hybrid = { localStt: 'parakeet', whisperFastModel: 'models/fast.bin' };
+
+  it('while the helper loads, whisper hears the answer at once (rueckfall=ja); once ready, Parakeet hears', async () => {
+    const r = rig(hybrid, { FAKE_READY_MS: '800' });
+    expect(r.stt().failFast).toBe(true);
+    const { out, result: first } = await captureLog(() => r.say('Meine Antwort ist Paris'));
+    expect(first.bot).toBe('Meine Antwort ist Paris'); // whisper's text, processed
+    expect(first.used).toEqual(['whisper: Meine Antwort ist Paris']);
+    expect(first.ms).toBeLessThan(500); // not the 800 ms load
+    expect(out).toMatch(/⏱ erkennung engine=parakeet:tdt-0\.6b-v3-int8\+whisper:fast attention=answer .* rueckfall=ja/);
+    expect(out).toMatch(/\[voice\] Erkennung mit parakeet:.*noch nicht bereit/); // info, not a warning per utterance
+    expect(out).not.toContain('Paris"'); // no transcript in the log
+    expect(r.stt().starts).toBe(1); // the first answer started it in the background
+    await until(() => r.stt().readyNow(), 5000);
+    const later = await r.say('Meine Antwort ist Rom');
+    expect(later.used).toEqual([]); // Parakeet alone
+    expect(later.bot).toBe('Meine Antwort ist Parakeet');
+    expect(r.stt().starts).toBe(1);
+  });
+
+  it('a crash mid-game: the next answer goes to whisper at once and starts a new helper in the background', async () => {
+    const r = rig(hybrid, { FAKE_READY_MS: '300' });
+    await r.stt().warmup();
+    expect((await r.say('Meine Antwort ist Rom')).bot).toBe('Meine Antwort ist Parakeet');
+    process.kill(r.starts()[0]!, 'SIGKILL');
+    await until(() => !r.stt().readyNow());
+    const during = await r.say('Meine Antwort ist Paris');
+    expect(during.used).toEqual(['whisper: Meine Antwort ist Paris']);
+    expect(during.ms).toBeLessThan(250);
+    await until(() => r.stt().readyNow(), 5000);
+    expect(r.starts()).toHaveLength(2);
+    expect((await r.say('Meine Antwort ist Bern')).bot).toBe('Meine Antwort ist Parakeet');
+  });
+
+  it('a hung helper mid-answer: after its deadline whisper hears that very answer – no wait for the restart', async () => {
+    const r = rig(hybrid, { FAKE_HANG: '1', FAKE_READY_MS: '600' }, { deadlineMs: 200 });
+    await r.stt().warmup();
+    const res = await r.say('Meine Antwort ist Paris', 3000);
+    expect(res.used).toEqual(['whisper: Meine Antwort ist Paris']);
+    expect(res.bot).toBe('Meine Antwort ist Paris');
+    expect(res.ms).toBeLessThan(500); // deadline 200 ms, not deadline + 600 ms restart
+    expect(r.stt().starts).toBe(1); // no restart loop by itself …
+    await r.say('Meine Antwort ist Rom'); // … the next answer (whisper again) starts it
+    await until(() => r.stt().readyNow(), 5000);
+    expect((await r.say('Meine Antwort ist Bern')).bot).toBe('Meine Antwort ist Parakeet');
+  });
+
+  it('Parakeet alone (all four phases, no whisper): the answer waits for the helper, with one clear warning', async () => {
+    const r = rig({ localStt: 'parakeet', parakeetFor: ['answer', 'confirm', 'full', 'wake'] }, { FAKE_READY_MS: '500' });
+    expect(r.stt().failFast).toBe(false);
+    const { out, result } = await captureLog(async () => {
+      const a = await r.say('Meine Antwort ist Paris', 4000);
+      await r.say('Meine Antwort ist Rom', 4000);
+      return a;
+    });
+    expect(result.bot).toBe('Meine Antwort ist Parakeet');
+    expect(result.ms).toBeGreaterThanOrEqual(450);
+    expect(out.match(/Parakeet lädt noch – Äußerungen warten, bis es bereit ist \(höchstens 5 s\)/g)).toHaveLength(1);
+  });
+
+  it('with Deepgram: cloud down and Parakeet still loading – whisper stands in, no extra pass, no "Sprache gestört"', async () => {
+    const v = voiceCfg({ ...hybrid, stt: 'deepgram', sttCloudFor: ['answer'] });
+    const used: string[] = [];
+    const texts = new Map<number, string>();
+    const routes = createSttRoutes(v, {
+      env: { DEEPGRAM_API_KEY: 'k' },
+      local: (e) => ({
+        engine: `${e.engine}:x`,
+        ...(e.engine === 'parakeet' ? { failFast: false } : {}),
+        transcribe: async (p) => {
+          const t = texts.get(p.samples[0]!) ?? '';
+          used.push(`${e.engine}: ${t}`);
+          if (e.engine === 'parakeet') throw new SttNotReady('lädt');
+          return t;
+        },
+        close: async () => {},
+      }),
+      cloud: () => ({ engine: 'deepgram:nova-3', cloud: true, transcribe: async () => (used.push('cloud'), Promise.reject(new CloudError('server', 'HTTP 503'))), close: async () => {} }),
+    });
+    expect((routes.stt as FallbackStt).standIn?.engine).toBe('whisper:x');
+    const heard: string[] = [];
+    const room = new Room(texts);
+    new VoiceHost({ transport: room, stt: routes.stt, fastStt: routes.fastStt, confirmStt: routes.confirmStt, wakeStt: routes.wakeStt, localStt: routes.localStt, localFastStt: routes.localFastStt, cloudAllowed: () => true, tts: silentTts, cfg: v, prompt: () => '', onSpeech: (_s, t) => void heard.push(t), attention: () => 'answer' });
+    room.speak(anna, 'Quizmaster, Stand');
+    await until(() => heard.length > 0);
+    await new Promise((res) => setTimeout(res, 30));
+    expect(used).toEqual(['cloud', 'parakeet: Quizmaster, Stand', 'whisper: Quizmaster, Stand']); // whisper once
+    expect(heard).toEqual(['Quizmaster, Stand']);
+  });
+
+  it('joining voice never waits for Parakeet in the mixed mode (it starts with the greeting)', async () => {
+    const state = tmp('qbsherpa-join-');
+    let p: ParakeetStt | null = null;
+    const config = ConfigSchema.parse({ voice: { ...hybrid, parakeet: { preload: 'off' } } });
+    const kit = createVoiceKit(config, {
+      tts: silentTts,
+      local: (e) => {
+        if (e.engine !== 'parakeet') return { engine: 'whisper:fast', warmup: async () => {}, transcribe: async () => '', close: async () => {} };
+        p = new ParakeetStt(config.voice, { command: process.execPath, args: [FAKE], env: { ...process.env, FAKE_STATE: state, FAKE_READY_MS: '1500' }, startTimeoutMs: 5000 });
+        return p;
+      },
+    });
+    expect(p!.starts).toBe(0); // preload off: nothing at bot start
+    const t0 = Date.now();
+    await kit.warmup();
+    expect(Date.now() - t0).toBeLessThan(800);
+    expect(p!.starts).toBe(1); // started, loading in the background
+    expect(p!.readyNow()).toBe(false);
+    await until(() => p!.readyNow(), 5000);
+    await kit.close();
+  });
+});
+
+describe('preload at bot start (voice.parakeet.preload)', () => {
+  function modelDir(sizes: number[]) {
+    const dir = tmp('qbsherpa-pre-');
+    const model = path.join(dir, 'models', PARAKEET_MODEL.name);
+    mkdirSync(model, { recursive: true });
+    PARAKEET_FILES.forEach((f, i) => writeFileSync(path.join(model, f), Buffer.alloc(sizes[i] ?? 10, 1)));
+    return dir;
+  }
+  const fakeLocal = (starts: string[]) => (e: { engine: string }) => ({ engine: `${e.engine}:x`, warmup: async () => void starts.push(e.engine), transcribe: async () => `${e.engine} hört`, close: async () => {} });
+
+  it('cache (default): reads the model files once in the background – the kit is there at once, recognition does not wait, nothing is started', async () => {
+    const dir = modelDir([6_000_000, 1_000_000, 500_000, 10_000]);
+    const starts: string[] = [];
+    const t0 = Date.now();
+    const kit = createVoiceKit(ConfigSchema.parse({ voice: { dir, tts: 'say', localStt: 'parakeet', whisperFastModel: 'models/fast.bin' } }), { tts: silentTts, local: fakeLocal(starts), preloadDelayMs: 0 });
+    expect(Date.now() - t0).toBeLessThan(100); // the bot start is not delayed
+    expect(kit.preloading).toBeDefined();
+    let done = false;
+    void kit.preloading!.then(() => (done = true));
+    expect(await kit.fastStt!.transcribe(pcm(800))).toBe('whisper hört'); // recognition right away, during the read
+    expect(await kit.preloading).toBe(7_510_000);
+    expect(done).toBe(true);
+    expect(starts).toEqual([]); // no helper process for the cache read
+    await kit.close();
+  });
+
+  it('close() stops a running read at once; a missing model is no error', async () => {
+    const dir = modelDir([40_000_000, 10, 10, 10]);
+    const kit = createVoiceKit(ConfigSchema.parse({ voice: { dir, tts: 'say', localStt: 'parakeet', whisperFastModel: 'models/fast.bin' } }), { tts: silentTts, local: fakeLocal([]), preloadDelayMs: 0 });
+    await new Promise((r) => setTimeout(r, 15));
+    await kit.close();
+    expect(await kit.preloading).toBeLessThan(40_000_030);
+    const none = createVoiceKit(ConfigSchema.parse({ voice: { dir: tmp('qbsherpa-none-'), tts: 'say', localStt: 'parakeet', whisperFastModel: 'models/fast.bin' } }), { tts: silentTts, local: fakeLocal([]), preloadDelayMs: 0 });
+    expect(await none.preloading).toBe(0);
+  });
+
+  it('start: the helper is started at bot start; off: nothing; whisper (default): no preload at all', async () => {
+    const dir = modelDir([10, 10, 10, 10]);
+    const starts: string[] = [];
+    createVoiceKit(ConfigSchema.parse({ voice: { dir, tts: 'say', localStt: 'parakeet', whisperFastModel: 'models/fast.bin', parakeet: { preload: 'start' } } }), { tts: silentTts, local: fakeLocal(starts) });
+    expect(starts).toEqual(['parakeet']);
+    const off = createVoiceKit(ConfigSchema.parse({ voice: { dir, tts: 'say', localStt: 'parakeet', whisperFastModel: 'models/fast.bin', parakeet: { preload: 'off' } } }), { tts: silentTts, local: fakeLocal(starts) });
+    expect(off.preloading).toBeUndefined();
+    expect(starts).toEqual(['parakeet']);
+    const whisper = createVoiceKit(ConfigSchema.parse({ voice: { dir, tts: 'say', whisperFastModel: 'models/fast.bin' } }), { tts: silentTts, local: fakeLocal(starts) });
+    expect(whisper.preloading).toBeUndefined();
+    expect(starts).toEqual(['parakeet']);
+  });
+
+  it('readIntoPageCache: every byte once, stops on abort', async () => {
+    const dir = tmp('qbsherpa-read-');
+    writeFileSync(path.join(dir, 'a'), Buffer.alloc(9_000_000));
+    writeFileSync(path.join(dir, 'b'), Buffer.alloc(123));
+    expect(await readIntoPageCache([path.join(dir, 'a'), path.join(dir, 'b')], { pauseMs: 0 })).toBe(9_000_123);
+    const ac = new AbortController();
+    ac.abort();
+    expect(await readIntoPageCache([path.join(dir, 'a')], { signal: ac.signal })).toBe(0);
+  });
 });

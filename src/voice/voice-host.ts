@@ -4,7 +4,7 @@ import { durationMs, head, rms, type Pcm } from './audio.ts';
 import { extractAnswer, isEcho, stripWakeWord } from './commands.ts';
 import { LatencyMeter, type SpeechTimes, type SttPass } from './latency.ts';
 import { FallbackStt, SttTrouble } from './providers.ts';
-import { isAnswersOnly, isCloud, type LocalStt, type SpeechToText, type SttOptions } from './stt.ts';
+import { isAnswersOnly, isCloud, SttNotReady, type LocalStt, type SpeechToText, type SttOptions } from './stt.ts';
 import type { Speaker, Utterance, VoiceTransport } from './transport.ts';
 import { SynthTimeout, type TextToSpeech } from './tts.ts';
 
@@ -611,7 +611,9 @@ export class VoiceHost {
     } catch (e) {
       const failed = passes.at(-1);
       if (failed) failed.fallback = true; // ⏱ rueckfall=ja: whisper's text counts
-      log.warn(`Erkennung mit ${engineOf(main)}: ${(e as Error).message} – nehme whispers Text`);
+      const msg = `Erkennung mit ${engineOf(main)}: ${(e as Error).message} – nehme whispers Text`;
+      if (e instanceof SttNotReady) log.info(msg);
+      else log.warn(msg);
       return heard;
     }
   }
@@ -641,16 +643,22 @@ export class VoiceHost {
    * A cloud route keeps its own fallback rule (`cloudFallback`; with `none` its failure stays a failure).
    */
   private async listen(stt: SpeechToText, pcm: Pcm, prompt: string, passes: SttPass[]): Promise<{ text: string; by: SpeechToText }> {
-    let viaFallback = false;
+    let heardBy: string | null = null;
     try {
       passes.push({ engine: engineOf(stt) });
-      const text = await stt.transcribe(pcm, prompt, this.sttOpts(passes, () => (viaFallback = true)));
-      return { text, by: viaFallback && stt instanceof FallbackStt && stt.fallback ? stt.fallback : stt };
+      const text = await stt.transcribe(pcm, prompt, this.sttOpts(passes, (engine) => (heardBy = engine)));
+      if (heardBy === null || !(stt instanceof FallbackStt)) return { text, by: stt };
+      // The cloud's local fallback heard it – or, if that could not, its stand-in (whisper for a loading Parakeet).
+      const stand = stt.standIn;
+      return { text, by: stand && heardBy === engineOf(stand) ? stand : (stt.fallback ?? stt) };
     } catch (e) {
       let local = this.localMain();
       if (isAnswersOnly(local)) local = this.commandStt();
       if (!local || local === stt || sameEngine(stt, local) || stt instanceof FallbackStt) throw e;
-      log.warn(`Erkennung mit ${engineOf(stt)}: ${(e as Error).message} – nehme ${isAnswersOnly(stt) ? 'whisper' : 'das lokale Hauptmodell'}`);
+      const msg = `Erkennung mit ${engineOf(stt)}: ${(e as Error).message} – nehme ${isAnswersOnly(stt) ? 'whisper' : 'das lokale Hauptmodell'}`;
+      // Parakeet still loading is expected after a start – no warning for every utterance.
+      if (e instanceof SttNotReady) log.info(msg);
+      else log.warn(msg);
       const failed = passes.at(-1);
       if (failed) failed.fallback = true; // ⏱ rueckfall=ja
       passes.push({ engine: engineOf(local) });
@@ -670,10 +678,10 @@ export class VoiceHost {
   }
 
   /** Lets a cloud route tell the measurement (and `listen`) that its local fallback heard the utterance. Synchronous. */
-  private sttOpts(passes: SttPass[], onFallback?: () => void): SttOptions {
+  private sttOpts(passes: SttPass[], onFallback?: (engine: string) => void): SttOptions {
     return {
       onFallback: (engine, tried) => {
-        onFallback?.();
+        onFallback?.(engine);
         const last = passes.at(-1);
         if (tried || !last) {
           if (last) last.fallback = true;

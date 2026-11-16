@@ -212,8 +212,21 @@ export const ConfigSchema = z.object({
           /** Frist je Erkennung ab Übergabe an den bereiten Worker: so viele ms plus `deadlinePerSecMs` je Audiosekunde. */
           deadlineMs: z.number().int().min(1000).default(8000),
           deadlinePerSecMs: z.number().int().min(0).default(500),
-          /** So lange darf der Worker zum Laden des Modells brauchen (Kaltstart auf 1 vCPU ~5 s). */
-          startTimeoutMs: z.number().int().min(1000).default(60_000),
+          /**
+           * So lange darf der Worker zum Laden des Modells brauchen. Gemessen auf 1 vCPU: ~3–5 s aus dem
+           * Seitencache, 53 s kalt (erster Start nach Server-Neustart, 640 MB von der Platte); unter Last eines
+           * laufenden Spiels etwa doppelt. 150 s lassen dafür Luft. Im Mischbetrieb wartet ohnehin keine
+           * Äußerung auf den Start (whisper hört so lange).
+           */
+          startTimeoutMs: z.number().int().min(1000).default(150_000),
+          /**
+           * Vorwärmen (nur mit `localStt: parakeet`): `cache` = beim Bot-Start die Modelldateien einmal gedrosselt
+           * im Hintergrund lesen (landen im Seitencache des Systems, kein eigener Speicher; der Worker startet
+           * beim Voice-Beitritt dann in Sekunden), `start` = den Worker schon beim Bot-Start laden (belegt ab dann
+           * ständig ~0,9 GB), `off` = erst beim Voice-Beitritt. Der Worker bleibt nach dem ersten Beitritt ohnehin
+           * bis zum Beenden geladen.
+           */
+          preload: z.enum(['cache', 'start', 'off']).default('cache'),
         })
         .prefault({}),
       /**

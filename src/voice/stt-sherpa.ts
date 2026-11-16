@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { open as openFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -8,7 +9,7 @@ import type { Config } from '../config.ts';
 import { createLogger } from '../core/logger.ts';
 import { pcmToBuffer, resample, toMono, type Pcm } from './audio.ts';
 import { killOnExit } from './children.ts';
-import { cleanTranscript, type SpeechToText, type SttOptions } from './stt.ts';
+import { cleanTranscript, SttNotReady, type SpeechToText, type SttOptions } from './stt.ts';
 
 const log = createLogger('stt');
 
@@ -33,6 +34,42 @@ export const PARAKEET_FILES = ['encoder.int8.onnx', 'decoder.int8.onnx', 'joiner
 /** Is the model folder complete? `voice-setup` renames it into place only after a full, checked unpack. */
 export function parakeetModelReady(dir: string, exists: (f: string) => boolean = existsSync): boolean {
   return PARAKEET_FILES.every((f) => exists(path.join(dir, f)));
+}
+
+export interface CacheReadOptions {
+  signal?: AbortSignal;
+  /** Bytes per read (default 4 MiB). */
+  chunkBytes?: number;
+  /** Pause after each read, so the read never hogs the one CPU or the disk (default 10 ms). */
+  pauseMs?: number;
+}
+
+/**
+ * Reads the files once, chunk by chunk with pauses, and drops the data: the system keeps it in its page
+ * cache, so a later worker start loads the model from memory (~3–5 s on 1 vCPU) instead of the disk
+ * (measured 53 s cold). No own memory (one reused buffer), no child process; stops at once on `signal`.
+ * The cache is the system's: under memory pressure it may be evicted again. Resolves with the bytes read.
+ */
+export async function readIntoPageCache(files: string[], o: CacheReadOptions = {}): Promise<number> {
+  const buf = Buffer.allocUnsafe(o.chunkBytes ?? 4 * 1024 * 1024);
+  const pause = o.pauseMs ?? 10;
+  let total = 0;
+  for (const file of files) {
+    if (o.signal?.aborted) break;
+    const fh = await openFile(file, 'r');
+    try {
+      for (;;) {
+        if (o.signal?.aborted) break;
+        const { bytesRead } = await fh.read(buf, 0, buf.length, null);
+        if (!bytesRead) break;
+        total += bytesRead;
+        if (pause) await new Promise((r) => setTimeout(r, pause).unref?.());
+      }
+    } finally {
+      await fh.close();
+    }
+  }
+  return total;
 }
 
 /** Threads for the worker: the configured number, or the cores (at most 4, like whisper.cpp). */
@@ -103,6 +140,16 @@ export class ParakeetStt implements SpeechToText {
   loadMs: number | null = null;
   /** Workers started so far (tests, measurement). */
   starts = 0;
+  /**
+   * Mixed mode (whisper next to it, set by `createSttRoutes`): while the worker is not ready – starting,
+   * loading, restarting – an utterance is not kept waiting but rejected at once with `SttNotReady`, and
+   * whisper hears it; the worker (re)starts in the background. Without whisper (Parakeet alone) utterances
+   * wait for the worker, with a warning.
+   */
+  failFast = false;
+  /** The worker that said "ready" – `readyNow()` while it is the running one. */
+  private upProc: ChildProcess | null = null;
+  private warnedWaiting = false;
 
   constructor(
     private cfg: Config['voice'],
@@ -168,6 +215,7 @@ export class ParakeetStt implements SpeechToText {
         if (this.proc !== proc) return; // killed on purpose (deadline, close): handled there
         this.proc = null;
         this.ready = null;
+        this.upProc = null;
         if (up) log.warn(`Parakeet-Worker beendet (${code ?? signal}) – starte ihn neu`);
         if (up) this.failed('abgestürzt');
       });
@@ -180,6 +228,8 @@ export class ParakeetStt implements SpeechToText {
         }
         if (msg.ready) {
           up = true;
+          if (this.proc === proc) this.upProc = proc;
+          this.warnedWaiting = false;
           clearTimeout(startTimer);
           this.coldStartMs = Date.now() - t0;
           this.loadMs = typeof msg.loadMs === 'number' ? msg.loadMs : null;
@@ -213,7 +263,28 @@ export class ParakeetStt implements SpeechToText {
   }
 
   /** `prompt` is ignored: Parakeet has no vocabulary prompt. */
+  /** Is the worker running and ready for an utterance now (no start, load or restart in between)? */
+  readyNow(): boolean {
+    return !this.closed && !!this.proc && this.upProc === this.proc;
+  }
+
+  /** Starts the worker in the background if it is not running or starting; a failure is only logged. */
+  private startInBackground(): void {
+    if (this.closed || this.ready) return;
+    this.start().catch((e) => log.warn(`Parakeet startet nicht: ${(e as Error).message.split('\n')[0]} – whisper hört die Antworten`));
+  }
+
   transcribe(pcm: Pcm, _prompt = '', opts: SttOptions = {}): Promise<string> {
+    if (!this.readyNow()) {
+      if (this.failFast) {
+        this.startInBackground();
+        return Promise.reject(new SttNotReady('Parakeet ist noch nicht bereit (lädt das Modell)'));
+      }
+      if (!this.warnedWaiting && !this.closed) {
+        this.warnedWaiting = true;
+        log.warn(`Parakeet lädt noch – Äußerungen warten, bis es bereit ist (höchstens ${Math.round(this.startTimeout / 1000)} s)`);
+      }
+    }
     const mono = resample(toMono(pcm), 16000);
     const job = this.enqueue('stt', pcmToBuffer(mono).toString('base64'), mono.samples.length / 16000, opts.signal);
     return job as Promise<string>;
@@ -303,6 +374,16 @@ export class ParakeetStt implements SpeechToText {
   private failed(why: string): void {
     const cur = this.current;
     this.current = null;
+    if (this.failFast) {
+      // Mixed mode: nothing waits for the restart – the utterance in the worker and all waiting ones go to
+      // whisper now (`SttNotReady`). The next utterance starts a new worker in the background (and is heard by
+      // whisper meanwhile) – a worker that keeps crashing never restarts in a loop by itself.
+      const err = new SttNotReady(`Parakeet startet neu (${why})`);
+      if (cur) clearTimeout(cur.job.timer);
+      cur?.job.reject(err);
+      for (const j of this.queue.splice(0)) if (j.kind === 'stt') j.reject(err);
+      return this.pump();
+    }
     if (cur && !cur.job.settled) {
       clearTimeout(cur.job.timer);
       cur.job.timer = undefined;
@@ -322,6 +403,7 @@ export class ParakeetStt implements SpeechToText {
     const proc = this.proc;
     this.proc = null;
     this.ready = null;
+    this.upProc = null;
     proc?.kill('SIGKILL');
   }
 
@@ -336,6 +418,7 @@ export class ParakeetStt implements SpeechToText {
     const proc = this.proc;
     this.proc = null;
     this.ready = null;
+    this.upProc = null;
     cur?.job.reject(err);
     for (const j of queued) j.reject(err);
     if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;

@@ -37,6 +37,18 @@ export interface SpeechToText {
  */
 export type LocalStt = SpeechToText & { readonly cloud?: false };
 
+/**
+ * The engine is not ready (starting, loading its model, restarting) and does not let the utterance wait:
+ * whoever routes it takes another local engine right away (`VoiceHost.listen`, `FallbackStt.standIn`).
+ * Its message never holds what was said.
+ */
+export class SttNotReady extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SttNotReady';
+  }
+}
+
 const ANSWERS_ONLY = new WeakSet<object>();
 
 /**

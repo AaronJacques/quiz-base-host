@@ -9,8 +9,8 @@ import type { Config } from '../config.ts';
 import { createLogger } from '../core/logger.ts';
 import { FIXED_LINES } from './narration.ts';
 import { createSttRoutes, fastWhisperPort, sttNeeds, type SttRouteDeps } from './providers.ts';
-import { WhisperServerStt, type LocalStt, type SpeechToText } from './stt.ts';
-import { PARAKEET_FILES, PARAKEET_MODEL, parakeetModelReady, ParakeetStt, SHERPA_ONNX_VERSION } from './stt-sherpa.ts';
+import { isAnswersOnly, WhisperServerStt, type LocalStt, type SpeechToText } from './stt.ts';
+import { PARAKEET_FILES, PARAKEET_MODEL, parakeetModelReady, ParakeetStt, readIntoPageCache, SHERPA_ONNX_VERSION } from './stt-sherpa.ts';
 import { CachedTts, createEngine, DiskCachedTts, ttsIdentity, type TextToSpeech } from './tts.ts';
 import { forSpeech, splitSentences } from './voice-host.ts';
 
@@ -47,6 +47,14 @@ export interface VoiceKitImpl {
   tts: CachedTts;
   warmup(): Promise<void>;
   close(): Promise<void>;
+  /** `voice.parakeet.preload: cache` – the background read of the model files (bytes read); undefined = none. */
+  preloading?: Promise<number>;
+}
+
+export interface VoiceKitDeps extends SttRouteDeps {
+  tts?: TextToSpeech;
+  /** Before the background read starts (default 2 s: the bot logs in first). */
+  preloadDelayMs?: number;
 }
 
 /**
@@ -54,9 +62,21 @@ export interface VoiceKitImpl {
  * recognisers per attention come from `createSttRoutes` – with `voice.stt: whisper` exactly the local
  * models as before. Throws if a cloud engine is configured without its key (`voiceProblems` says so first).
  */
-export function createVoiceKit(config: Config, deps: SttRouteDeps & { tts?: TextToSpeech } = {}): VoiceKitImpl {
+export function createVoiceKit(config: Config, deps: VoiceKitDeps = {}): VoiceKitImpl {
   const v = config.voice;
   const routes = createSttRoutes(v, deps);
+  // Parakeet next to whisper (answers-only) never holds up joining: it starts in the background, whisper
+  // hears the answers until it is ready. Alone (no whisper) it is waited for, as any engine.
+  const background = (s: SpeechToText) => isAnswersOnly(s);
+  const startLater = (s: SpeechToText) =>
+    void Promise.resolve(s.warmup?.()).catch((e) => log.warn(`Parakeet startet nicht: ${(e as Error).message.split('\n')[0]} – whisper hört die Antworten`));
+  const stop = new AbortController();
+  const parakeets = routes.all.filter((s) => s.engine?.startsWith('parakeet:'));
+  let preloading: Promise<number> | undefined;
+  if (v.localStt === 'parakeet' && parakeets.length) {
+    if (v.parakeet.preload === 'start') parakeets.forEach(startLater);
+    else if (v.parakeet.preload === 'cache') preloading = preloadParakeet(v, stop.signal, deps.preloadDelayMs ?? 2000);
+  }
   const engine = deps.tts ?? createEngine(v);
   const disk = v.ttsDiskCache ? new DiskCachedTts(engine, { dir: ttsCacheDir(v), identity: ttsIdentity(v), allow: isFixedSpeech }) : null;
   const tts = new CachedTts(disk ?? engine);
@@ -72,10 +92,12 @@ export function createVoiceKit(config: Config, deps: SttRouteDeps & { tts?: Text
     warmup: async () => {
       // A local engine that only stands in for the cloud may fail to start (model missing): voice still
       // works, a cloud failure then gets the chat notice. It never stops joining.
-      const fallbacks = routes.warmFallback.map((s) =>
+      const fallbacks = routes.warmFallback.filter((s) => !background(s)).map((s) =>
         Promise.resolve(s.warmup?.()).catch((e) => log.warn(`Rückfall nicht verfügbar (${s.engine ?? 'lokal'}): ${(e as Error).message.split('\n')[0]} – bei Cloud-Ausfall gibt es nur den Hinweis im Chat`)),
       );
-      await Promise.all([...routes.warm.map((s) => s.warmup?.()), tts.synth('Hallo.'), ...fallbacks]);
+      // Parakeet in the mixed mode starts now, right with the greeting, but nobody waits for it.
+      for (const s of [...routes.warm, ...routes.warmFallback]) if (background(s)) startLater(s);
+      await Promise.all([...routes.warm.filter((s) => !background(s)).map((s) => s.warmup?.()), tts.synth('Hallo.'), ...fallbacks]);
       // Missing short fixed lines are made in the background, only while the voice path is quiet.
       if (disk && !warming) {
         warming = true;
@@ -83,9 +105,35 @@ export function createVoiceKit(config: Config, deps: SttRouteDeps & { tts?: Text
       }
     },
     close: async () => {
-      await Promise.all([...routes.all.map((s) => s.close()), tts.close()]);
+      stop.abort();
+      await Promise.all([...routes.all.map((s) => s.close()), tts.close(), preloading?.catch(() => 0)]);
     },
+    preloading,
   };
+}
+
+/**
+ * `parakeet.preload: cache`: after `delayMs`, reads the model files once in the background (throttled), so
+ * the first worker start after a server restart loads from the page cache, not the disk. Never throws.
+ */
+async function preloadParakeet(v: Config['voice'], signal: AbortSignal, delayMs: number): Promise<number> {
+  const dir = path.resolve(v.dir, v.parakeet.model);
+  if (!parakeetModelReady(dir)) return 0;
+  try {
+    if (delayMs) await new Promise<void>((r) => {
+      const t = setTimeout(r, delayMs);
+      t.unref?.();
+      signal.addEventListener('abort', () => (clearTimeout(t), r()), { once: true });
+    });
+    if (signal.aborted) return 0;
+    const t0 = Date.now();
+    const bytes = await readIntoPageCache(PARAKEET_FILES.map((f) => path.join(dir, f)), { signal });
+    if (!signal.aborted) log.info(`Parakeet-Modell vorgewärmt (${Math.round(bytes / 1e6)} MB in ${((Date.now() - t0) / 1000).toFixed(1)} s, Seitencache)`);
+    return bytes;
+  } catch (e) {
+    log.debug(`Parakeet vorwärmen: ${(e as Error).message}`);
+    return 0;
+  }
 }
 
 /** Pre-warming starts only after this long without speaking, hearing or synthesising. */
