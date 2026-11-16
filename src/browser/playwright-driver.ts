@@ -7,19 +7,36 @@ const LAUNCH_ARGS = [
   '--autoplay-policy=no-user-gesture-required',
 ];
 
+export interface PlaywrightDriverOptions {
+  profileDir: string;
+  headless: boolean;
+  /**
+   * Also opens Chromium's DevTools port (only for `qbhost login --remote-stdio`). Chromium binds it to
+   * 127.0.0.1 and keeps its Host and Origin checks, so web pages cannot reach it.
+   */
+  remoteDebuggingPort?: number;
+}
+
+/** Chromium arguments for the given options. */
+export function launchArgs(opts: Pick<PlaywrightDriverOptions, 'remoteDebuggingPort'>): string[] {
+  const args = [...LAUNCH_ARGS];
+  if (opts.remoteDebuggingPort) args.push(`--remote-debugging-port=${opts.remoteDebuggingPort}`, '--remote-debugging-address=127.0.0.1');
+  return args;
+}
+
 /** Launches its own (visible) Chromium with a persistent profile. */
 export class PlaywrightDriver implements BrowserDriver {
   readonly name = 'playwright';
   private context?: BrowserContext;
   private page?: Page;
 
-  constructor(private opts: { profileDir: string; headless: boolean }) {}
+  constructor(private opts: PlaywrightDriverOptions) {}
 
   async open(url?: string): Promise<void> {
     this.context = await chromium.launchPersistentContext(path.resolve(this.opts.profileDir), {
       headless: this.opts.headless,
       viewport: this.opts.headless ? { width: 1440, height: 1000 } : null,
-      args: LAUNCH_ARGS,
+      args: launchArgs(this.opts),
       // Our own shutdown ends the game on quiz-base and closes the browser. Playwright's handlers would
       // close it first and, on SIGINT, call process.exit(130) – no clean end of the game, no goodbye.
       // (The browser still dies with the process: Playwright's exit hook stays.)

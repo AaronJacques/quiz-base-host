@@ -90,6 +90,7 @@ Bot-Einrichtung im Developer Portal, alle Befehle und Regeln: **[docs/DISCORD.md
 
 ```bash
 npx qbhost login                                          # einmalig: im Browserfenster selbst bei quiz-base anmelden
+npx qbhost login --server quizmaster-vps                  # Bot auf dem Server anmelden (docs/DEPLOY.md)
 npx qbhost board-create --topic "Star Wars" --categories 5 --level profi
 ```
 

@@ -73,8 +73,89 @@ docker compose -f app/deploy/compose.yml exec bot node_modules/.bin/tsx src/cli.
 - **Deploy während eines Spiels:** Ein laufendes Spiel wird beim Neustart beendet (der Bot hat 40 s, es auf quiz-base sauber zu schließen). Pushes auf `main` also nicht mitten in einer Runde.
 - **Rollback von Hand:** `mv app app.bad && mv app.prev app && docker image tag quizmaster:prev quizmaster:latest && docker compose -f app/deploy/compose.yml up -d --no-build`
 - **Kleine Server:** siehe [unten](#kleine-server). Nach einer Änderung von `qbhost.config.json` prüft der Container beim nächsten Start die Sprachmodelle und lädt neue nach (vorhandene werden übersprungen). Erzwingen: `data/voice/.ready` löschen.
+- **quiz-base-Anmeldung für eigene Boards:** vom Mac aus mit `npx qbhost login --server quizmaster-vps`, siehe [unten](#quiz-base-anmeldung-auf-dem-server).
 - **Sprachsteuerung aus:** `QBHOST_VOICE_SETUP=off` in die `.env` (keine Modell-Downloads) und `"voice": { "enabled": false }` in die Konfiguration.
 - **Updates des Servers:** Sicherheitsupdates laufen automatisch (unattended-upgrades). Neue Versionen von Chromium, whisper.cpp und Claude CLI kommen über `deploy/Dockerfile`: Version anheben, pushen.
+
+## quiz-base-Anmeldung auf dem Server
+
+Eigene Boards (`!quiz erstellen`, Lobbys mit eigenen Boards) brauchen ein quiz-base-Konto. Auf dem Server gibt es kein Browserfenster, und der SSH-Server erlaubt keine Port-Weiterleitung (`ssh -L` geht nicht). Deshalb baut `qbhost` den Weg selbst: Du meldest dich **in deinem eigenen Chrome auf dem Mac** an, die Seite läuft aber im Browser auf dem Server. Die Sitzung entsteht direkt auf dem Server, kein Token wird kopiert. Danach braucht der Bot den Mac nicht mehr.
+
+```
+Chrome (chrome://inspect) ─► 127.0.0.1:9223 auf dem Mac ─► ssh quizmaster-vps ─► Login-Container ─► Chromium (DevTools-Port nur im Container)
+```
+
+### Anmelden
+
+Voraussetzungen:
+- Der Server läuft mit einem Stand, der `login --remote-stdio` kennt (ab diesem Release, also erst deployen).
+- Der SSH-Benutzer (`admin`) darf `sudo -n docker …` ohne Passwort und hat eine POSIX-Login-Shell (bash, dash, zsh; nicht csh/tcsh).
+- Kein Push auf `main` während der Anmeldung (siehe unten).
+
+Auf dem Mac im Repo-Ordner:
+
+```bash
+npx qbhost login --server quizmaster-vps
+```
+
+1. Rückfrage „Der Bot wird für die Anmeldung kurz gestoppt; ein laufendes Spiel bricht dabei ab. Jetzt stoppen? [j/N]“: mit `j` bestätigen, wenn gerade niemand spielt. Ohne Rückfrage: `--yes`. Vorher prüft qbhost den Port auf dem Mac und auf dem Server Image, Konfiguration und Profilordner. Scheitert etwas davon, bleibt der Bot unberührt.
+2. Warten, bis `🔐 Tunnel steht: 127.0.0.1:9223 …` erscheint (der Server stoppt den Bot und startet den Login-Browser, ~10–20 s).
+3. In Chrome `chrome://inspect` öffnen.
+4. Nur beim ersten Mal: neben „Discover network targets“ auf **Configure…** klicken, **`127.0.0.1:9223`** eintragen (genau so, nicht `localhost:9223`: Unter `localhost` könnte ein anderes Programm über IPv6 antworten), **Done**. Chrome merkt sich das.
+5. Unter **Remote Target** erscheint `127.0.0.1:9223` mit „Quiz-Base – Multiplayer Quiz …“. Darunter auf **inspect** klicken.
+6. Es öffnet sich ein DevTools-Fenster, links siehst du die Seite vom Server mit dem offenen Anmelde-Dialog. Ist sie zu klein, zieh die Trennlinie nach rechts. Fehlt die Seite, klick oben links auf das Bildschirm-Symbol „Toggle screencast“.
+7. In dieser Seite selbst E-Mail und Passwort eingeben und **Anmelden** klicken. Den rechten DevTools-Teil brauchst du nicht.
+8. qbhost erkennt die Anmeldung und schließt den Tunnel. Das DevTools-Fenster meldet dann „disconnected“, es kann zu. Am Ende stehen `✅ Der Bot ist bei quiz-base angemeldet.`, `▶ Bot läuft wieder.` und `✔ Kontrolle: Der Bot läuft.` War der Bot schon vor dem Aufruf aus (z. B. absichtlich), bleibt er aus, und die Kontrolle sagt `Der Bot war vorher aus und bleibt aus.` Gestartet wird er dann nicht, etwa damit nicht zwei Bots mit demselben Discord-Token laufen.
+
+Abbrechen geht jederzeit mit **Strg+C**: Der Port auf dem Mac schließt sofort, der Server schließt den Browser sauber und startet den Bot wieder. Ein zweites Strg+C bricht hart ab, der Server räumt trotzdem auf. Spätestens nach 15 Minuten ist alles von selbst zu. `--port <n>` wählt einen anderen Port auf dem Mac, falls 9223 belegt ist; dann in Schritt 4 `127.0.0.1:<n>` eintragen.
+
+### Was dabei passiert und wer was sieht
+
+- **Server:** Image, Benutzer, Daten- und Konfigurationspfad liest das Skript aus dem Bot-Container selbst (`docker inspect`), den Profilordner aus der Bot-Konfiguration (`browser.profileDir`, muss in `data/` liegen, nicht in `data/home` oder `data/voice`). Der Profilordner darf keine `.`- oder `..`-Teile enthalten und nicht über einen Symlink erreichbar sein; sonst bricht das Skript ab, bevor es etwas ändert. Dann wird der Bot gestoppt, damit nicht zwei Browser dasselbe Profil benutzen. Bis er wieder läuft, steht seine Neustart-Regel auf `always`: Startet der Server oder Docker mitten in der Anmeldung neu, startet der Bot trotzdem wieder. Danach gilt wieder `unless-stopped`; scheitert das Zurücksetzen, sagt das Skript es mit dem Befehl dafür. **Ausnahme live-restore:** Ist in Docker `live-restore` aktiv (`docker info` zeigt „Live Restore Enabled: true“) oder lässt sich das nicht feststellen, bleibt die Regel unverändert. Mit live-restore überlebt der Login-Container einen Neustart von Docker, und `always` würde den Bot daneben starten: Dann liefen zwei Browser auf einem Profil. In diesem Fall bleibt der Bot nach einem Server-Neustart mitten in der Anmeldung aus, und die Kontrolle am Ende meldet es.
+- **Login-Container** (`docker run --rm`, Name `qbhost-login`):
+  - Headless Chromium mit dem Bot-Image.
+  - **Nur der Profilordner** (`data/profile`) ist eingehängt und beschreibbar.
+  - Die Konfiguration ist nur lesbar eingehängt; sie enthält keine Geheimnisse.
+  - Das Dateisystem des Images ist schreibgeschützt (`--read-only`).
+  - HOME, Downloads und Temp-Dateien liegen im Arbeitsspeicher (tmpfs) und verschwinden mit dem Container.
+  - Der Rest von `data/` (HOME des Bots, Board-Register, Verknüpfungen, Bewertungs-Cache, Sprachmodelle) ist im Login-Container nicht sichtbar.
+  - Er bekommt **keine** `.env` (keine Tokens) und keine Linux-Capabilities, öffnet keinen Port nach außen und schreibt **kein Container-Log** (`--log-driver none`).
+  - Der DevTools-Port hängt nur an 127.0.0.1 *im* Container; andere Container und Benutzer auf dem Server erreichen ihn nicht.
+  - Das Profil gehört danach wie vorher dem Benutzer des Bots.
+- **Ende:** Anmeldung erkannt, Strg+C, Verbindung weg oder 15 Minuten um. Dann wird der Container erst sauber gestoppt (`docker stop`), nötigenfalls hart beendet (`timeout -k`) und entfernt. Danach wird der Bot gestartet, wenn er vorher lief. Zum Schluss fragt qbhost über eine zweite SSH-Verbindung nach, ob der Bot wirklich läuft, und sagt sonst, wie man ihn startet.
+- **Das Skript** für den Server schickt dein Mac bei jedem Aufruf mit (`tools/server-login.sh` aus deinem Repo). Auf dem Server wird nichts aus dem Release-Ordner ausgeführt. Es ruft nur `sudo -n docker …` auf.
+- **SSH:** Die Verbindung leitet nichts weiter, auch wenn deine `~/.ssh/config` es für den Host vorsieht: kein ssh-Agent, kein X11, keine Ports, kein `LocalCommand`, keine geteilte Master-Verbindung.
+- **Deine Tastendrücke** gehen diesen Weg: Chrome-DevTools auf dem Mac → 127.0.0.1:9223 (qbhost leitet die Bytes nur weiter, ohne sie zu lesen oder zu speichern) → SSH (verschlüsselt) → Docker → Chromium im Container → quiz-base (HTTPS). qbhost gibt selbst nichts in die Seite ein und liest keine Formularfelder. Erkannt wird die Anmeldung wie beim lokalen `qbhost login` nur an der Beschriftung im Benutzermenü.
+- **Ehrliche Grenzen:**
+  - Solange der Tunnel steht (höchstens 15 Minuten), kann **jedes Programm, das 127.0.0.1:9223 auf deinem Mac erreicht**, den Server-Browser fernsteuern. Das sind deine eigenen Programme, andere Benutzer des Macs, Apps mit Netzwerkzugriff und eventuell Docker-Desktop-Container. Wer das tut, kann die quiz-base-Sitzung benutzen oder austauschen (z. B. den Bot mit einem *eigenen* quiz-base-Konto anmelden, sodass deine Boards samt Lösungen dort landen). Er kann Seiten aufrufen, die Konfiguration lesen und das Profil verändern, also Cookies, Seitenspeicher, Cache und Service Worker der quiz-base-Seite (quiz-base registriert einen, `sw.js`). **Das wirkt beim Bot weiter**, bis du dich abmeldest (`--logout`), denn der Bot benutzt genau dieses Profil. An Discord-Token, API-Keys und den Rest von `data/` kommt er darüber nicht: Sie sind im Login-Container nicht vorhanden. Programme startet der Bot aus dem Profil nicht (keine Erweiterungen, Playwright startet Chromium mit `--disable-extensions`, Node lädt nichts von dort). Webseiten in deinem Browser können den Port nicht benutzen, Chromium prüft Host und Origin. Führ währenddessen nichts Fremdes aus. Kommt dir ein Lauf verdächtig vor: `--logout` und neu anmelden.
+  - **Wer root (oder Docker-Rechte) auf dem Server hat**, kann während der Anmeldung mitlesen und das Profil später jederzeit lesen. Das gilt für das gespeicherte Profil aber ohnehin.
+  - Das DevTools-Fenster zeigt im Netzwerk-Tab auch die Anmeldeanfrage. Teile davon keine Screenshots.
+- Die Anmeldung bleibt im Profil `data/profile`, bis quiz-base sie beendet oder du dich abmeldest.
+
+### Abmelden (Rückweg)
+
+```bash
+npx qbhost login --server quizmaster-vps --logout
+```
+
+Das stoppt den Bot kurz, löscht den Profilordner des Bots auf dem Server und startet den Bot wieder. Danach gehen nur noch öffentliche Boards. Ob quiz-base die Sitzung damit auch auf seiner Seite beendet, ist nicht geprüft. Wer sichergehen will, ändert danach sein quiz-base-Passwort.
+
+### Wenn etwas schiefgeht
+
+- **`Server-Stand zu alt … erst deployen`:** Das Image auf dem Server kennt den Login über den Tunnel noch nicht. Pushen bzw. deployen, dann noch einmal. Der Bot wurde dabei nicht gestoppt (bzw. läuft wieder).
+- **`Port 9223 ist auf dem Mac belegt` bzw. `Auf [::1]:9223 lauscht schon ein anderes Programm`:** `--port 9224` angeben und in `chrome://inspect` `127.0.0.1:9224` eintragen.
+- **Unter „Remote Target“ steht nichts:** Läuft `npx qbhost login --server …` noch? Ist unter „Configure…“ `127.0.0.1:<Port>` eingetragen und „Discover network targets“ angehakt?
+- **Deploy während der Anmeldung:** Ein Push auf `main` startet den neuen Bot, während der Login-Browser noch dasselbe Profil benutzt. Das Skript erkennt das am Ende („Während der Anmeldung wurde neu deployt …“) und startet den alten Container nicht mehr. Die Anmeldung danach sicherheitshalber wiederholen. Besser: während der Anmeldung nicht pushen und keine Worker-Branches mergen.
+- **Server oder Docker mitten in der Anmeldung neu gestartet:** Der Bot startet wegen der Regel `always` von selbst wieder (bei live-restore nicht, siehe oben); die Anmeldung ist verloren und muss wiederholt werden. Die Neustart-Regel bleibt dann bis zum nächsten Deploy auf `always`. Die nächste Kontrolle meldet das. Zurück von Hand: `sudo docker update --restart unless-stopped <Bot-Container>`.
+- **`⚠️ Neustart-Regel … steht noch auf "always"`** bzw. **`blieb auf "always"`:** den genannten `docker update`-Befehl auf dem Server ausführen.
+- **`⚠️ Der Bot lief vorher und läuft jetzt nicht`** (die Kontrolle am Ende sagt, mit welchem Befehl man ihn startet), oder du willst selbst nachsehen:
+  ```bash
+  ssh quizmaster-vps
+  sudo docker ps -a --filter label=com.docker.compose.service=bot   # Status
+  sudo docker rm -f qbhost-login                                     # Login-Container, falls noch da
+  sudo docker start quizmaster-bot-1                                 # Bot starten (Name aus der ersten Zeile)
+  ```
+- **`Nicht angemeldet`:** Die Anmeldung wurde nicht erkannt, z. B. wegen eines falschen Passworts oder weil die Zeit um war. Einfach noch einmal starten.
 
 ## Kleine Server
 

@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import { runHost } from './app.ts';
 import { BOARD_CLI_OPTIONS, runBoardCreate, runBoardDelete, runLogin } from './board-cli.ts';
 import { runDiscordBot } from './discord/index.ts';
+import { DEFAULT_LOCAL_PORT, LOGIN_CLI_OPTIONS, profileDir, runRemoteLoginStdio, runServerLogin } from './server-login.ts';
 import { setupVoice, voiceProblems, voiceWarnings } from './voice/index.ts';
 import { deepgramReachable } from './voice/stt-deepgram.ts';
 import { createDriver } from './browser/index.ts';
@@ -27,6 +28,8 @@ Befehle:
   boards   Öffentliche Tafelquiz-Boards auflisten (qbhost boards [suche])
   voice-setup  Sprachsteuerung einrichten (whisper.cpp, Modelle, Piper) – einmalig
   login    Bei quiz-base anmelden (sichtbarer Browser, du meldest dich selbst an) – für eigene Boards
+           login --server <ssh-host> [--port 9223] [--yes]: den Bot auf dem Server anmelden (docs/DEPLOY.md)
+           login --server <ssh-host> --logout: Anmeldung auf dem Server löschen
   board-create  Tafelquiz-Board per KI erzeugen und auf quiz-base anlegen (qbhost board-create --help)
   board-delete  Eigenes Board auf quiz-base löschen: qbhost board-delete "<Name>" [--yes]
   probe    Aktuellen Seitenzustand als JSON ausgeben (Debug)
@@ -64,6 +67,7 @@ const { values, positionals } = parseArgs({
     verbose: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
     ...BOARD_CLI_OPTIONS,
+    ...LOGIN_CLI_OPTIONS,
   },
 });
 
@@ -125,7 +129,29 @@ switch (command) {
   }
 
   case 'login':
-    await runLogin(config);
+    if (values['print-profile-dir']) {
+      // Read by tools/server-login.sh on the server: which folder of data/ the login container may write.
+      console.log(profileDir(config));
+    } else if (values['remote-stdio']) {
+      // Inside the login container on the server (started by `login --server` – not meant to be typed).
+      process.exit(await runRemoteLoginStdio(config));
+    } else if (values.server) {
+      try {
+        process.exit(
+          await runServerLogin({
+            host: values.server,
+            port: values.port ? Number(values.port) : DEFAULT_LOCAL_PORT,
+            logout: !!values.logout,
+            yes: !!values.yes,
+          }),
+        );
+      } catch (e) {
+        console.error(`❌ ${(e as Error).message}`);
+        process.exit(1);
+      }
+    } else {
+      await runLogin(config);
+    }
     break;
 
   case 'board-create':

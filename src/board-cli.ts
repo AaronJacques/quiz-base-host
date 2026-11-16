@@ -9,7 +9,7 @@ import type { Config } from './config.ts';
 import { sleep } from './core/logger.ts';
 import { BoardEditorPage } from './site/editor/page.ts';
 
-const LOGIN_TIMEOUT_MS = 15 * 60_000;
+export const LOGIN_TIMEOUT_MS = 15 * 60_000;
 
 /**
  * `qbhost login`: opens a visible Chromium with the persistent profile so the user can sign in to
@@ -39,13 +39,25 @@ export async function runLogin(config: Config): Promise<void> {
     ].join('\n'),
   );
 
-  const end = Date.now() + LOGIN_TIMEOUT_MS;
-  let detected = false;
+  const detected = await watchLogin(page, Date.now() + LOGIN_TIMEOUT_MS);
+  await driver.close().catch(() => {});
+  const ok = detected || (await checkLogin(config));
+  console.log(ok ? '✅ Angemeldet. Das Profil bleibt gespeichert; eigene Boards gehen jetzt.' : '❌ Nicht angemeldet. Bitte "npx qbhost login" noch einmal ausführen.');
+  if (!ok) process.exitCode = 1;
+}
+
+/**
+ * Waits until the user has logged in themselves (or `until` passes, the browser closes, `stop()` says so).
+ * Only reads the user menu's labels via the probe – never a form field.
+ */
+export async function watchLogin(page: BoardEditorPage, until: number, stop: () => boolean = () => false): Promise<boolean> {
   let formSeen = false;
-  while (Date.now() < end) {
+  while (Date.now() < until && !stop()) {
     await sleep(2000);
+    if (stop()) break;
     const acc = await page.accountSnapshot().catch(() => 'closed' as const);
     if (acc === 'closed') break;
+    let detected = false;
     if (acc.loggedIn) {
       detected = true;
     } else if (acc.menuOpen) {
@@ -58,13 +70,10 @@ export async function runLogin(config: Config): Promise<void> {
     }
     if (detected) {
       await sleep(1500);
-      break;
+      return true;
     }
   }
-  await driver.close().catch(() => {});
-  const ok = detected || (await checkLogin(config));
-  console.log(ok ? '✅ Angemeldet. Das Profil bleibt gespeichert; eigene Boards gehen jetzt.' : '❌ Nicht angemeldet. Bitte "npx qbhost login" noch einmal ausführen.');
-  if (!ok) process.exitCode = 1;
+  return false;
 }
 
 /** Headless check whether the persistent profile is logged in to quiz-base. */
