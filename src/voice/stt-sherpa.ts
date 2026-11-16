@@ -63,7 +63,7 @@ export async function readIntoPageCache(files: string[], o: CacheReadOptions = {
         const { bytesRead } = await fh.read(buf, 0, buf.length, null);
         if (!bytesRead) break;
         total += bytesRead;
-        if (pause) await new Promise((r) => setTimeout(r, pause).unref?.());
+        if (pause) await pauseFor(pause, o.signal);
       }
     } finally {
       await fh.close();
@@ -71,6 +71,27 @@ export async function readIntoPageCache(files: string[], o: CacheReadOptions = {
   }
   return total;
 }
+
+/**
+ * Waits `ms` – or less, if `signal` aborts: `close()` never depends on another handle keeping the process
+ * alive (the timer itself is unref'd, so it does not keep a finished process running either).
+ */
+function pauseFor(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const t = setTimeout(done, ms);
+    t.unref?.();
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+/** Pauses between start attempts after failures in the mixed mode: 5 s, 15 s, 60 s, then every 5 min. */
+export const RETRY_DELAYS_MS = [5_000, 15_000, 60_000, 300_000];
 
 /** Threads for the worker: the configured number, or the cores (at most 4, like whisper.cpp). */
 export function parakeetThreads(n: number, cores = os.availableParallelism()): number {
@@ -116,6 +137,9 @@ export interface ParakeetOptions {
   /** Deadline per recognition from hand-over to the ready worker. Default from `voice.parakeet`. */
   deadlineMs?: (audioSec: number) => number;
   startTimeoutMs?: number;
+  /** Pauses between start attempts after failures (mixed mode); default `RETRY_DELAYS_MS`. */
+  retryDelaysMs?: number[];
+  now?: () => number;
 }
 
 /**
@@ -150,6 +174,13 @@ export class ParakeetStt implements SpeechToText {
   /** The worker that said "ready" – `readyNow()` while it is the running one. */
   private upProc: ChildProcess | null = null;
   private warnedWaiting = false;
+  /**
+   * Mixed mode: failed starts and crashes in a row without one successful recognition since; each makes the
+   * pause before the next start attempt longer (`retryDelaysMs`). A successful recognition resets it.
+   */
+  private failures = 0;
+  /** No new start attempt before this time (epoch ms); whisper hears meanwhile. */
+  private retryAt = 0;
 
   constructor(
     private cfg: Config['voice'],
@@ -216,7 +247,8 @@ export class ParakeetStt implements SpeechToText {
         this.proc = null;
         this.ready = null;
         this.upProc = null;
-        if (up) log.warn(`Parakeet-Worker beendet (${code ?? signal}) – starte ihn neu`);
+        if (up && this.failFast) this.backOff(`Parakeet-Worker beendet (${code ?? signal})`);
+        else if (up) log.warn(`Parakeet-Worker beendet (${code ?? signal}) – starte ihn neu`);
         if (up) this.failed('abgestürzt');
       });
       createInterface({ input: proc.stdout! }).on('line', (line) => {
@@ -230,6 +262,7 @@ export class ParakeetStt implements SpeechToText {
           up = true;
           if (this.proc === proc) this.upProc = proc;
           this.warnedWaiting = false;
+          this.retryAt = 0;
           clearTimeout(startTimer);
           this.coldStartMs = Date.now() - t0;
           this.loadMs = typeof msg.loadMs === 'number' ? msg.loadMs : null;
@@ -242,14 +275,19 @@ export class ParakeetStt implements SpeechToText {
         clearTimeout(cur.job.timer);
         if (msg.error) cur.job.reject(new Error(`Parakeet: ${msg.error}`));
         else if (cur.job.kind === 'stats') cur.job.resolve(Number(msg.peakMb ?? NaN));
-        else cur.job.resolve(normalizeParakeet(String(msg.text ?? '')));
+        else {
+          this.failures = 0; // it works: the next failure starts with the shortest pause again
+          cur.job.resolve(normalizeParakeet(String(msg.text ?? '')));
+        }
         this.pump();
       });
     });
     this.ready = ready;
     // Only forget the start that failed – a restart may have begun a new one meanwhile.
-    ready.catch(() => {
+    ready.catch((e) => {
       if (this.ready === ready) this.ready = null;
+      // Mixed mode: a failed start pauses further attempts (closing on purpose is no failure).
+      if (this.failFast && !this.closed) this.backOff(`Parakeet startet nicht: ${(e as Error).message.split('\n')[0]}`);
     });
     return ready;
   }
@@ -268,17 +306,38 @@ export class ParakeetStt implements SpeechToText {
     return !this.closed && !!this.proc && this.upProc === this.proc;
   }
 
-  /** Starts the worker in the background if it is not running or starting; a failure is only logged. */
+  /**
+   * Starts the worker in the background if it is not running or starting, and not pausing after failures
+   * (then whisper keeps hearing, without a new attempt – each start costs CPU and ~0.9 GB on a small server).
+   */
   private startInBackground(): void {
-    if (this.closed || this.ready) return;
-    this.start().catch((e) => log.warn(`Parakeet startet nicht: ${(e as Error).message.split('\n')[0]} – whisper hört die Antworten`));
+    if (this.closed || this.ready || this.now() < this.retryAt) return;
+    this.start().catch(() => {}); // logged and paused by `start` itself
+  }
+
+  /**
+   * A failed start or a crash in the mixed mode: the next attempt waits (5 s, 15 s, 60 s, then 5 min). One
+   * warning at the first failure and whenever the pause gets longer – not one per answer.
+   */
+  private backOff(why: string): void {
+    const delays = this.o.retryDelaysMs ?? RETRY_DELAYS_MS;
+    const step = Math.min(this.failures, delays.length - 1);
+    this.failures++;
+    const ms = delays[step]!;
+    this.retryAt = this.now() + ms;
+    if (step < delays.length - 1 || this.failures === delays.length) log.warn(`${why} – whisper hört die Antworten, nächster Versuch frühestens in ${Math.round(ms / 1000)} s`);
+  }
+
+  private now(): number {
+    return (this.o.now ?? Date.now)();
   }
 
   transcribe(pcm: Pcm, _prompt = '', opts: SttOptions = {}): Promise<string> {
     if (!this.readyNow()) {
       if (this.failFast) {
         this.startInBackground();
-        return Promise.reject(new SttNotReady('Parakeet ist noch nicht bereit (lädt das Modell)'));
+        const paused = !this.ready && this.now() < this.retryAt;
+        return Promise.reject(new SttNotReady(paused ? `Parakeet pausiert nach Fehlern (nächster Versuch in ${Math.ceil((this.retryAt - this.now()) / 1000)} s)` : 'Parakeet ist noch nicht bereit (lädt das Modell)'));
       }
       if (!this.warnedWaiting && !this.closed) {
         this.warnedWaiting = true;
@@ -348,7 +407,8 @@ export class ParakeetStt implements SpeechToText {
         const ms = this.deadline(job.audioSec);
         job.timer = setTimeout(() => {
           if (this.current !== cur) return;
-          log.warn(`Parakeet lieferte nach ${(ms / 1000).toFixed(1)} s kein Ergebnis – starte den Worker neu`);
+          if (this.failFast) this.backOff(`Parakeet lieferte nach ${(ms / 1000).toFixed(1)} s kein Ergebnis`);
+          else log.warn(`Parakeet lieferte nach ${(ms / 1000).toFixed(1)} s kein Ergebnis – starte den Worker neu`);
           this.kill();
           this.failed(`keine Antwort nach ${(ms / 1000).toFixed(1)} s`);
         }, ms);
@@ -381,7 +441,7 @@ export class ParakeetStt implements SpeechToText {
       const err = new SttNotReady(`Parakeet startet neu (${why})`);
       if (cur) clearTimeout(cur.job.timer);
       cur?.job.reject(err);
-      for (const j of this.queue.splice(0)) if (j.kind === 'stt') j.reject(err);
+      for (const j of this.queue.splice(0)) j.reject(err); // every waiting job, `stats()` too
       return this.pump();
     }
     if (cur && !cur.job.settled) {

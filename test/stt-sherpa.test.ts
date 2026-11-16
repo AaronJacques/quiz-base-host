@@ -1144,7 +1144,7 @@ describe('slow Parakeet start: answers never wait in the mixed mode', () => {
    * The real ParakeetStt on the fake worker (it answers "Text <samples>"), whisper a fake that repeats the
    * spoken text; the real routes and the real voice host. `env` steers the worker (FAKE_READY_MS …).
    */
-  function rig(over: Record<string, unknown>, env: Record<string, string>, o: { deadlineMs?: number } = {}) {
+  function rig(over: Record<string, unknown>, env: Record<string, string>, o: { deadlineMs?: number; retryDelaysMs?: number[] } = {}) {
     const v = voiceCfg({ latencyLog: true, ...over });
     const texts = new Map<number, string>();
     const used: string[] = [];
@@ -1154,7 +1154,7 @@ describe('slow Parakeet start: answers never wait in the mixed mode', () => {
     const routes = createSttRoutes(v, {
       local: (e) => {
         if (e.engine === 'parakeet') {
-          parakeet = new ParakeetStt(v, { command: process.execPath, args: [FAKE], env: { ...process.env, FAKE_STATE: state, FAKE_TEXT: 'Meine Antwort ist Parakeet', ...env }, deadlineMs: () => o.deadlineMs ?? 5000, startTimeoutMs: 5000 });
+          parakeet = new ParakeetStt(v, { command: process.execPath, args: [FAKE], env: { ...process.env, FAKE_STATE: state, FAKE_TEXT: 'Meine Antwort ist Parakeet', ...env }, deadlineMs: () => o.deadlineMs ?? 5000, startTimeoutMs: 5000, retryDelaysMs: o.retryDelaysMs ?? [150, 300] });
           open.push(parakeet);
           return parakeet;
         }
@@ -1225,6 +1225,9 @@ describe('slow Parakeet start: answers never wait in the mixed mode', () => {
     const during = await r.say('Meine Antwort ist Paris');
     expect(during.used).toEqual(['whisper: Meine Antwort ist Paris']);
     expect(during.ms).toBeLessThan(250);
+    expect(r.stt().starts).toBe(1); // pausing after the crash (150 ms here, 5 s by default): no new start yet
+    await new Promise((res) => setTimeout(res, 200));
+    await r.say('Meine Antwort ist Rom'); // whisper again – and now it starts a new helper
     await until(() => r.stt().readyNow(), 5000);
     expect(r.starts()).toHaveLength(2);
     expect((await r.say('Meine Antwort ist Bern')).bot).toBe('Meine Antwort ist Parakeet');
@@ -1238,9 +1241,75 @@ describe('slow Parakeet start: answers never wait in the mixed mode', () => {
     expect(res.bot).toBe('Meine Antwort ist Paris');
     expect(res.ms).toBeLessThan(500); // deadline 200 ms, not deadline + 600 ms restart
     expect(r.stt().starts).toBe(1); // no restart loop by itself …
+    await new Promise((res) => setTimeout(res, 200)); // (the pause after the hang)
     await r.say('Meine Antwort ist Rom'); // … the next answer (whisper again) starts it
     await until(() => r.stt().readyNow(), 5000);
     expect((await r.say('Meine Antwort ist Bern')).bot).toBe('Meine Antwort ist Parakeet');
+  });
+
+  it('K1: a helper that never starts – growing pauses, no start per answer, one warning per longer pause, whisper hears all', async () => {
+    let now = 0;
+    const v = voiceCfg({ ...hybrid });
+    const state = tmp('qbsherpa-k1-');
+    const p = new ParakeetStt(v, { command: process.execPath, args: [FAKE], env: { ...process.env, FAKE_STATE: state, FAKE_DIE: '1' }, startTimeoutMs: 5000, retryDelaysMs: [5_000, 15_000, 60_000, 300_000], now: () => now });
+    open.push(p);
+    p.failFast = true;
+    const { out } = await captureLog(async () => {
+      // 20 answers, 30 s apart (fake clock, 9.5 min) – each is rejected at once, so whisper hears it.
+      for (let i = 0; i < 20; i++) {
+        await expect(p.transcribe(pcm(1600))).rejects.toBeInstanceOf(SttNotReady);
+        await until(() => !(p as unknown as { ready: unknown }).ready, 3000); // a running start has failed
+        now += 30_000;
+      }
+    });
+    // Starts at 0 s, 30 s (after 5 s), 60 s (after 15 s), 120 s (after 60 s), 420 s (after 5 min) – not 20.
+    expect(p.starts).toBe(5);
+    const warns = out.split('\n').filter((l) => /Parakeet startet nicht/.test(l));
+    // One warning per longer pause; the 5-min pause repeats without a new one.
+    expect(warns.map((l) => l.match(/in (\d+) s/)![1])).toEqual(['5', '15', '60', '300']);
+    expect(out).toMatch(/whisper hört die Antworten, nächster Versuch frühestens in 5 s/);
+  });
+
+  it('K1: after a successful recognition the pauses start short again', async () => {
+    const r = rig(hybrid, { FAKE_READY_MS: '100' }, { retryDelaysMs: [100, 5000] });
+    await r.stt().warmup();
+    expect((await r.say('Meine Antwort ist Rom')).bot).toBe('Meine Antwort ist Parakeet'); // resets the count
+    process.kill(r.starts()[0]!, 'SIGKILL');
+    await until(() => !r.stt().readyNow());
+    await new Promise((res) => setTimeout(res, 150)); // first pause (100 ms) – not the 5 s one
+    await r.say('Meine Antwort ist Paris');
+    await until(() => r.stt().readyNow(), 3000);
+    expect(r.starts()).toHaveLength(2);
+  });
+
+  it('K3: a stats() request waiting behind a crashed recognition is rejected, not left open', async () => {
+    const r = rig(hybrid, { FAKE_READY_MS: '50', FAKE_DELAY: '2000' });
+    await r.stt().warmup();
+    const job = r.stt().transcribe(pcm(1600)).catch((e) => e);
+    const stats = r.stt().stats().catch((e) => e);
+    await new Promise((res) => setTimeout(res, 100));
+    process.kill(r.starts()[0]!, 'SIGKILL');
+    expect(await job).toBeInstanceOf(SttNotReady);
+    expect(await stats).toBeInstanceOf(SttNotReady);
+  });
+
+  it('K2: closing while Parakeet loads is no failure – no warning', async () => {
+    const state = tmp('qbsherpa-k2-');
+    const config = ConfigSchema.parse({ voice: { ...hybrid, parakeet: { preload: 'start' } } });
+    const { out } = await captureLog(async () => {
+      const kit = createVoiceKit(config, {
+        tts: silentTts,
+        local: (e) =>
+          e.engine === 'parakeet'
+            ? new ParakeetStt(config.voice, { command: process.execPath, args: [FAKE], env: { ...process.env, FAKE_STATE: state, FAKE_READY_MS: '3000' }, startTimeoutMs: 5000 })
+            : { engine: 'whisper:fast', warmup: async () => {}, transcribe: async () => '', close: async () => {} },
+      });
+      await kit.warmup();
+      await new Promise((res) => setTimeout(res, 100));
+      await kit.close();
+      await new Promise((res) => setTimeout(res, 100));
+    });
+    expect(out).not.toMatch(/startet nicht|whisper hört die Antworten/);
   });
 
   it('Parakeet alone (all four phases, no whisper): the answer waits for the helper, with one clear warning', async () => {
@@ -1366,5 +1435,13 @@ describe('preload at bot start (voice.parakeet.preload)', () => {
     const ac = new AbortController();
     ac.abort();
     expect(await readIntoPageCache([path.join(dir, 'a')], { signal: ac.signal })).toBe(0);
+    // K2: an abort ends a pause at once – close() never waits for (or depends on) the pause timer.
+    const mid = new AbortController();
+    const t0 = Date.now();
+    const reading = readIntoPageCache([path.join(dir, 'a')], { signal: mid.signal, chunkBytes: 1_000_000, pauseMs: 60_000 });
+    await new Promise((r) => setTimeout(r, 50));
+    mid.abort();
+    expect(await reading).toBe(1_000_000);
+    expect(Date.now() - t0).toBeLessThan(1000);
   });
 });

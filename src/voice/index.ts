@@ -68,9 +68,13 @@ export function createVoiceKit(config: Config, deps: VoiceKitDeps = {}): VoiceKi
   // Parakeet next to whisper (answers-only) never holds up joining: it starts in the background, whisper
   // hears the answers until it is ready. Alone (no whisper) it is waited for, as any engine.
   const background = (s: SpeechToText) => isAnswersOnly(s);
-  const startLater = (s: SpeechToText) =>
-    void Promise.resolve(s.warmup?.()).catch((e) => log.warn(`Parakeet startet nicht: ${(e as Error).message.split('\n')[0]} – whisper hört die Antworten`));
   const stop = new AbortController();
+  // A start cut short by `close()` (shutting down while Parakeet loads) is no failure – no warning then. In
+  // the mixed mode Parakeet warns (once per longer pause) itself.
+  const startLater = (s: SpeechToText) =>
+    void Promise.resolve(s.warmup?.()).catch((e) => {
+      if (!stop.signal.aborted && !isAnswersOnly(s)) log.warn(`Parakeet startet nicht: ${(e as Error).message.split('\n')[0]}`);
+    });
   const parakeets = routes.all.filter((s) => s.engine?.startsWith('parakeet:'));
   let preloading: Promise<number> | undefined;
   if (v.localStt === 'parakeet' && parakeets.length) {
