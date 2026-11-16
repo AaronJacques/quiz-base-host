@@ -656,6 +656,8 @@ export class QuizBot {
       }
       game.pending = { player: name, answer: answer.slice(0, 200) };
       void this.speak(`${answer}?`, 'confirm', true);
+      // Judging may start now – "Ja" then takes the result. Only the controller listens (nothing public, rule 5).
+      game.session.bus.emit('player:answer-pending', { player: name, answer: game.pending.answer.slice(0, 200) });
       return;
     }
     const reply = game.pending?.player === name ? confirmReply(text) : null;

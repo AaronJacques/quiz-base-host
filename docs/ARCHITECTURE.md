@@ -104,8 +104,10 @@ page.openCell(col,row) ──► quiz-base öffnet Frage für alle
 controller.onQuestion  host:question ───────────► Pult zeigt Frage
                        resolveReference() läuft parallel: Notiz → MC-Option → Cache → Vision-LLM
 page.startTimer(45)    host:await-answer ───────► Pult zeigt Eingabefeld + Countdown
-                       ◄─────────────── player:answer "luigi mario"
-judge.judge()          Fuzzy ─(unsicher)─► Cache ─(Miss)─► Haiku ─(Fehler)─► Operator (Lösung nur per host:notice.detail)
+                       ◄─────────────── player:answer-pending "luigi mario" (nur Sprache, Rückfrage „Luigi Mario?“)
+judge.prejudge()       Fuzzy → Cache → Haiku im Hintergrund, ohne Operator, nichts öffentlich
+                       ◄─────────────── player:answer "luigi mario" (getippt, oder „Ja“)
+judge.judge()          Ergebnis von prejudge (gleiche Frage, Person, Antwort), sonst: Fuzzy ─(unsicher)─► Cache ─(Miss)─► Haiku ─(Fehler)─► Operator (Lösung nur per host:notice.detail)
 page.award(±)          quick buttons (+Wert/+½/−½) oder manueller Punkte-Dialog
 page.animate()         "Richtig"/"Falsch"-Animation für alle
 (falsch) buzzerRound   releaseBuzzer → warten auf "X hat gebuzzert" (feste Fensterlänge, skip beendet) → erneut fragen/bewerten

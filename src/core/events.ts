@@ -30,6 +30,12 @@ export interface HostEvents {
   'player:pick': { player: string; col: number; row: number };
   /** `spoken` = transcribed from speech, so it may contain recognition errors. */
   'player:answer': { player: string; answer: string; spoken?: boolean };
+  /**
+   * A spoken answer the bot asked back ("Paris?") and that waits for "Ja" – `answer` exactly as `player:answer`
+   * will carry it. Only the game controller listens: it starts judging early (never the operator stage). Private
+   * until the "Ja": no channel may show it or anything derived from it (rule 5).
+   */
+  'player:answer-pending': { player: string; answer: string };
   /** A buzz claimed outside quiz-base (e.g. someone shouts "Buzzer!" in voice chat). */
   'player:buzz': { player: string };
   'operator:command': { command: string; args: string[] };

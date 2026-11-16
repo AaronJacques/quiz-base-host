@@ -41,14 +41,14 @@ export class LlmJudge implements AnswerJudge {
     private meter: UsageMeter,
   ) {}
 
-  async judge({ question, reference, answer, hints, spoken, options }: JudgeInput): Promise<JudgeResult> {
+  async judge({ question, reference, answer, hints, spoken, options, prefetch }: JudgeInput): Promise<JudgeResult> {
     const lines = [`Frage: ${question}`, `Lösung laut Host: ${reference ?? '(keine hinterlegt – nutze dein Wissen)'}`];
     if (options?.length) lines.push(`Antwortmöglichkeiten: ${options.map((o) => `${o.letter}) ${o.label}${o.correct ? ' (richtig)' : ''}`).join(' | ')}`);
     if (hints?.length) lines.push(`Hinweise: ${hints.join(' | ')}`);
     if (spoken) lines.push('Die Antwort wurde GESPROCHEN und automatisch transkribiert: Werte nach dem Klang, nicht nach der Schreibweise. Klingt sie eindeutig wie die Lösung (z.B. „Preaking Bat“ für „Breaking Bad“, „Tschingis Kan“ für „Dschingis Khan“), ist sie richtig.');
     lines.push(`Antwort des Spielers: ${answer}`);
     const res = await this.llm.completeJson({ system: JUDGE_SYSTEM, prompt: lines.join('\n'), schema: VerdictSchema, purpose: 'judge' });
-    this.meter.record('judge', res.costUsd);
+    this.meter.record(prefetch ? 'prejudge' : 'judge', res.costUsd);
     return { verdict: res.data.correct ? 'correct' : 'wrong', method: 'llm', confidence: 0.9, reason: res.data.reason };
   }
 

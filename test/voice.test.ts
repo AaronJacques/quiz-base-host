@@ -1,3 +1,4 @@
+import type { z } from 'zod';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { chromium } from 'playwright';
 import { PlaywrightDriver } from '../src/browser/playwright-driver.ts';
@@ -14,7 +15,7 @@ import { cleanSpokenAnswer, QuizBot, type SessionLike, type VoiceKit } from '../
 import type { ChatGateway, ChatMessage } from '../src/discord/gateway.ts';
 import { GuildStore } from '../src/discord/store.ts';
 import { createJudge } from '../src/judge/index.ts';
-import { UsageMeter } from '../src/llm/client.ts';
+import { UsageMeter, type JsonRequest, type JsonResponse, type LlmClient } from '../src/llm/client.ts';
 import { TafelquizController } from '../src/modes/tafelquiz/controller.ts';
 import { decodeWav, durationMs, encodeWav, resample, rms, toChannels, type Pcm } from '../src/voice/audio.ts';
 import { confirmReply, endAskReply, extractAnswer, isBuzz, isEcho, mentionsCard, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
@@ -225,6 +226,9 @@ function voiceKit(texts: Map<number, string>, calls: string[] = [], prompts: str
   return { stt, tts, warmup: async () => {} };
 }
 
+/** An LLM for the judge of FakeSession games (null = fuzzy only, as before). */
+let judgeLlm: LlmClient | null = null;
+
 class FakeSession implements SessionLike {
   bus = new EventBus();
   meter = new UsageMeter();
@@ -250,7 +254,7 @@ class FakeSession implements SessionLike {
     return { code: 'ABC123', joinUrl: 'https://www.quiz-base.de/join?code=ABC123' };
   }
   async run() {
-    const judge = createJudge(this.config, this.bus, null, this.meter);
+    const judge = createJudge(this.config, this.bus, judgeLlm, this.meter);
     await new TafelquizController({ page: this.page, bus: this.bus, judge, game: this.rules, pollMs: 20 }).run(this.ac.signal);
   }
   async endGame() {
@@ -388,7 +392,7 @@ function voiceSetup(game: Record<string, unknown> = {}, voice: Record<string, un
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbvoice-'));
   const config = ConfigSchema.parse({
     game: { revealPauseSec: 0, answerTimeoutSec: 10, buzzWindowSec: 2, buzzAnswerTimeoutSec: 2, minPlayers: 2, ...game },
-    judge: { cacheFile: path.join(tmp, 'cache.json'), strategy: 'fuzzy' },
+    judge: { cacheFile: path.join(tmp, 'cache.json'), strategy: judgeLlm ? 'cascade' : 'fuzzy' },
     llm: { provider: 'none' },
     discord: { dataDir: tmp, ...discord },
     voice: { ignoreWhileSpeaking: false, ...voice },
@@ -554,6 +558,58 @@ describe('QuizBot voice (review fixes)', () => {
     await t.write(annaS, '!quiz ende');
     await until(() => t.bot.activeGame === null);
     await t.bot.shutdown();
+  }, 20000);
+
+  it('judges the asked-back answer early, shows nothing of it before "Ja", and "Ja" takes it (latency-logic 3)', async () => {
+    const calls: { answer: string; done: boolean }[] = [];
+    judgeLlm = {
+      name: 'gate',
+      completeJson: async <S extends z.ZodType>(req: JsonRequest<S>): Promise<JsonResponse<z.infer<S>>> => {
+        const call = { answer: req.prompt.match(/Antwort des Spielers: (.*)/)?.[1] ?? '?', done: false };
+        calls.push(call);
+        await new Promise((r) => setTimeout(r, 80));
+        call.done = true;
+        return { data: { correct: false, reason: 'GEHEIMER-GRUND Pins' } as z.infer<S>, costUsd: 0.0001, ms: 80 };
+      },
+    };
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => (lines.push(String(chunk)), true));
+    setLogLevel('info');
+    try {
+      const t = voiceSetup();
+      await voiceGame(t);
+      const bus = t.session().bus;
+      const events: { ev: string; payload: unknown }[] = [];
+      const emit = bus.emit.bind(bus);
+      (bus as { emit: typeof bus.emit }).emit = (ev, payload) => {
+        events.push({ ev, payload });
+        emit(ev, payload);
+      };
+      t.room().speak(annaS, 'Sport für hundert');
+      await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+      await new Promise((r) => setTimeout(r, 800)); // earlier chat messages are out (bundled for 600 ms)
+      const mark = { events: events.length, chat: t.sent.length, played: t.room().played.length, log: lines.length };
+      t.room().speak(annaS, 'Meine Antwort ist Kegel');
+      await until(() => t.room().played.includes('Kegel?'));
+      await until(() => calls.length === 1 && calls[0]!.done); // judged before "Ja"
+      await new Promise((r) => setTimeout(r, 800)); // the chat bundles messages for 600 ms
+      // Before "Ja": only the private pending event on the bus, only the transcript in the chat, only "Kegel?" spoken.
+      expect(events.slice(mark.events).map((e) => e.ev)).toEqual(['player:answer-pending']);
+      expect(t.sent.slice(mark.chat).map((m) => m.text).join('\n')).toBe('-# 🎙️ Anna: „Meine Antwort ist Kegel“');
+      expect(t.room().played.slice(mark.played)).toEqual(['Kegel?']);
+      const logBefore = lines.slice(mark.log).join('');
+      expect(logBefore).not.toContain('GEHEIM');
+      expect(logBefore).not.toMatch(/llm:|→ (wrong|correct)|Pins/);
+      t.room().speak(annaS, 'Ja');
+      await until(() => t.room().all().includes('Leider falsch'));
+      expect(calls).toHaveLength(1); // "Ja" took the early result
+      expect(t.session().meter.byPurpose).toEqual({ prejudge: 1 });
+      await t.bot.shutdown();
+    } finally {
+      spy.mockRestore();
+      setLogLevel('error');
+      judgeLlm = null;
+    }
   }, 20000);
 
   it('takes the new answer when a confirmation word comes with the keyword (F14)', async () => {

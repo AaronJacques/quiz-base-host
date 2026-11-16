@@ -16,6 +16,9 @@ const NO_TIMEOUT_MS = 2 ** 31 - 1;
 
 const log = createLogger('tafelquiz');
 
+/** Numbers every question this process hosts – the scope of early judgements never repeats, not even in a new game. */
+let questionSeq = 0;
+
 type AnswerOutcome = { kind: 'answer'; answer: string; spoken?: boolean } | { kind: 'override'; correct: boolean } | { kind: 'skip' } | { kind: 'timeout' };
 
 export interface TafelquizDeps {
@@ -47,6 +50,9 @@ export class TafelquizController implements GameMode {
   private signal!: AbortSignal;
   /** Reminders sent in the current turn (player, board, open cards): the first comes late, later ones rarely. */
   private reminded = { turn: '', count: 0, since: 0 };
+  /** The open question's id (scope of early judgements) and its gate: at most one early judgement at a time. */
+  private questionId = '';
+  private early: { running: boolean; next: (() => void) | null } = { running: false, next: null };
 
   constructor(private d: TafelquizDeps) {
     d.bus.on('operator:command', (c) => {
@@ -218,6 +224,8 @@ export class TafelquizController implements GameMode {
   // ───────────────────────────── Question ─────────────────────────────
   private async onQuestion(s: TafelquizState): Promise<void> {
     let q = s.question!;
+    this.questionId = `q${++questionSeq}`;
+    this.early = { running: false, next: null };
     // The answer options may appear a moment after the question text. Without them a letter answer ("D")
     // cannot be judged and the correct option is no reference – give the page a moment.
     if (!q.note && !q.options.length) {
@@ -300,7 +308,15 @@ export class TafelquizController implements GameMode {
     this.status('question', `${player}, deine Antwort? (${timeoutSec}s)`);
     await this.d.page.startTimer(timeoutSec);
 
-    const outcome = await this.collectAnswer(player, timeoutSec * 1000 + 3000);
+    // A spoken answer waiting for "Ja" is judged already (no operator stage, nothing public) – "Ja" then takes the result.
+    const scope = `${this.questionId}|${player}`;
+    const prejudging = this.judgeEarly(player, scope, q, referencePromise, hints, media);
+    let outcome: AnswerOutcome;
+    try {
+      outcome = await this.collectAnswer(player, timeoutSec * 1000 + 3000);
+    } finally {
+      prejudging.stop(); // before judging: no early judgement may start after this
+    }
     if (this.signal.aborted) return false; // game ended: no verdict, no points, no clicks
     // Operator skipped or the question was closed in the browser – no points (the reveal stops the timer).
     if (outcome.kind === 'skip') return true;
@@ -320,7 +336,7 @@ export class TafelquizController implements GameMode {
       case 'answer': {
         answerText = outcome.answer;
         const reference = await referencePromise;
-        result = await this.d.judge.judge.judge({ question: q.text, reference, answer: outcome.answer, hints, spoken: outcome.spoken, media, options: q.options });
+        result = await this.d.judge.judge.judge({ question: q.text, reference, answer: outcome.answer, hints, spoken: outcome.spoken, media, options: q.options, scope });
       }
     }
     if (this.signal.aborted) return false; // ended while the judge was thinking
@@ -492,6 +508,46 @@ export class TafelquizController implements GameMode {
       this.signal.removeEventListener('abort', onAbort);
       await watcher;
     }
+  }
+
+  /**
+   * While `player` is asked back about a spoken answer ("Paris?"), judge it in the background: fuzzy → cache → LLM,
+   * never the operator, nothing on the bus. At most one at a time per question; an answer that comes while one runs
+   * waits, and only the newest one is judged after it. Nothing for typed answers (no `player:answer-pending`) or
+   * answers without a letter or digit. Stops listening with `stop()`; a running judgement may still fill the cache.
+   */
+  private judgeEarly(player: string, scope: string, q: QuestionState, referencePromise: Promise<string | null>, hints: string[], media: string | null): { stop(): void } {
+    const judge = this.d.judge.judge;
+    if (!judge.prejudge) return { stop() {} };
+    const gate = this.early;
+    let stopped = false;
+    const start = (answer: string) => {
+      if (stopped || this.signal.aborted) return;
+      gate.running = true;
+      void (async () => {
+        const reference = await referencePromise;
+        if (stopped || this.signal.aborted) return;
+        await judge.prejudge!({ question: q.text, reference, answer, hints, spoken: true, media, options: q.options, scope });
+      })()
+        .catch(() => {})
+        .finally(() => {
+          gate.running = false;
+          const next = gate.next;
+          gate.next = null;
+          next?.();
+        });
+    };
+    const off = this.d.bus.on('player:answer-pending', (p) => {
+      if (stopped || p.player !== player || !/[\p{L}\p{N}]/u.test(p.answer)) return;
+      if (gate.running) gate.next = () => start(p.answer);
+      else start(p.answer);
+    });
+    return {
+      stop: () => {
+        stopped = true;
+        off();
+      },
+    };
   }
 
   /** Wait for the answer of `player`, or an operator decision; aborts if the question gets closed in the browser. */
