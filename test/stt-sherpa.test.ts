@@ -362,6 +362,8 @@ describe('createVoiceKit with Parakeet: the real engines, counted processes', ()
       expect(kit.stt).toBeInstanceOf(ParakeetStt);
       expect(kit.fastStt).toBeInstanceOf(WhisperServerStt);
       await kit.warmup().catch(() => {}); // the fake whisper-server exits at once
+      // warmup rejects with the first failure – the sherpa worker may still be starting (seen on slow CI runners)
+      await until(() => existsSync(path.join(k.state, 'starts')));
       expect(readFileSync(path.join(k.state, 'starts'), 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
       expect(k.whisperStarts()).toHaveLength(1);
       expect(k.whisperStarts()[0]).toContain('fast.bin');
