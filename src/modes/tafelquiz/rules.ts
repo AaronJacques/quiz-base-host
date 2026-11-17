@@ -24,6 +24,11 @@ export interface RuleSpec {
   label: string;
   /** `seconds` only: 0 / "aus" switches it off. */
   off?: boolean;
+  /** `seconds` only: allowed range (default 5–600). */
+  min?: number;
+  max?: number;
+  /** `seconds` only: allow one decimal place ("1,5" / "1.5"). */
+  decimal?: boolean;
 }
 
 /** Rules that players may change at runtime (e.g. via Discord). */
@@ -39,6 +44,7 @@ export const RULES: RuleSpec[] = [
   { key: 'pickReminderSec', names: ['erinnerung'], kind: 'seconds', off: true, label: 'Erste Erinnerung bei der Kartenwahl' },
   { key: 'pickReminderRepeatSec', names: ['erinnerungstakt', 'nacherinnerung'], kind: 'seconds', off: true, label: 'Weitere Erinnerungen (nur im Chat)' },
   { key: 'pickHint', names: ['kartenhinweis', 'hinweis'], kind: 'bool', label: 'Hinweis „Welche Karte?“ (Sprache)' },
+  { key: 'revealPauseSolvedSec', names: ['pause', 'richtigpause'], kind: 'seconds', min: 0, max: 30, decimal: true, label: 'Pause nach richtiger Antwort' },
 ];
 
 export function findRule(name: string): RuleSpec | undefined {
@@ -88,8 +94,12 @@ export function applyRule(rules: GameRules, spec: RuleSpec, raw: string): string
       (rules as any)[spec.key] = 0;
       return null;
     }
-    const n = parseInt(raw, 10);
-    if (!Number.isFinite(n) || n < 5 || n > 600) return `"${raw}": bitte Sekunden zwischen 5 und 600${spec.off ? ' oder "aus"' : ''}.`;
+    const min = spec.min ?? 5;
+    const max = spec.max ?? 600;
+    const n = spec.decimal ? parseDecimalSeconds(raw) : parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < min || n > max) {
+      return `"${raw}": bitte Sekunden zwischen ${min} und ${max}${spec.decimal ? ' (z.B. 1,5)' : ''}${spec.off ? ' oder "aus"' : ''}.`;
+    }
     (rules as any)[spec.key] = n;
   }
   return null;
@@ -103,7 +113,13 @@ export function formatRuleValue(rules: GameRules, spec: RuleSpec): string {
   }
   if (spec.kind === 'bool') return v ? 'an' : 'aus';
   if (spec.off && !v) return 'aus';
-  return `${v} s`;
+  return spec.decimal ? `${String(v).replace('.', ',')} s` : `${v} s`;
+}
+
+/** "1,5" / "1.5" / "2" / "2 s" → seconds rounded to one decimal place; NaN if invalid. */
+function parseDecimalSeconds(raw: string): number {
+  const m = raw.trim().toLowerCase().replace(',', '.').match(/^(\d+(?:\.\d+)?)\s*(?:s|sek|sekunden)?$/);
+  return m ? Math.round(parseFloat(m[1]!) * 10) / 10 : NaN;
 }
 
 /** Snapshot of the adjustable rules (for persisting). */

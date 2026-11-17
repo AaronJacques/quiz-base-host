@@ -57,6 +57,46 @@ describe('rule parsing', () => {
     // Answer times cannot be switched off.
     expect(applyRule(g, findRule('zeit')!, 'aus')).toMatch(/Sekunden/);
   });
+
+  it('pause after a correct answer: 0 to 30 s with one decimal, German format', () => {
+    const g = base();
+    expect([g.revealPauseSolvedSec, g.revealPauseSec]).toEqual([1.5, 4]);
+    const spec = findRule('pause')!;
+    expect(findRule('richtigpause')).toBe(spec);
+    expect(spec.key).toBe('revealPauseSolvedSec');
+    expect(formatRuleValue(g, spec)).toBe('1,5 s');
+    for (const [input, value] of [['2,5', 2.5], ['1.5', 1.5], ['2', 2], ['0', 0], ['30', 30], ['0,25', 0.3], ['3 s', 3]] as const) {
+      expect(applyRule(g, spec, input), input).toBeNull();
+      expect(g.revealPauseSolvedSec, input).toBe(value);
+    }
+    expect(formatRuleValue(g, spec)).toBe('3 s');
+    expect(applyRule(g, spec, '0,5')).toBeNull();
+    expect(formatRuleValue(g, spec)).toBe('0,5 s');
+    for (const bad of ['31', '30,1', '-1', 'aus', 'lang', '1,5,5']) {
+      expect(applyRule(g, spec, bad), bad).toBe(`"${bad}": bitte Sekunden zwischen 0 und 30 (z.B. 1,5).`);
+    }
+    expect(g.revealPauseSolvedSec).toBe(0.5); // invalid input changes nothing
+  });
+
+  it('the older seconds rules keep 5–600, whole seconds and "aus" where they had it', () => {
+    const g = base();
+    for (const name of ['zeit', 'buzzerzeit', 'buzzerantwortzeit']) {
+      const spec = findRule(name)!;
+      expect([spec.min, spec.max, spec.decimal, spec.off], name).toEqual([undefined, undefined, undefined, undefined]);
+      expect(applyRule(g, spec, '4'), name).toBe('"4": bitte Sekunden zwischen 5 und 600.');
+      expect(applyRule(g, spec, '601'), name).toBe('"601": bitte Sekunden zwischen 5 und 600.');
+      expect(applyRule(g, spec, '0'), name).toMatch(/zwischen 5 und 600\.$/);
+      expect(applyRule(g, spec, '7,5'), name).toBeNull();
+      expect(g[spec.key], name).toBe(7); // whole seconds, as before
+      expect(formatRuleValue(g, spec), name).toBe('7 s');
+    }
+    for (const name of ['erinnerung', 'erinnerungstakt']) {
+      const spec = findRule(name)!;
+      expect(applyRule(g, spec, '4'), name).toBe('"4": bitte Sekunden zwischen 5 und 600 oder "aus".');
+      expect(applyRule(g, spec, 'aus'), name).toBeNull();
+      expect(formatRuleValue(g, spec), name).toBe('aus');
+    }
+  });
 });
 
 describe('config', () => {

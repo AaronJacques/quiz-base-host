@@ -1301,7 +1301,7 @@ async function closedUrl(): Promise<string> {
 function botRig(voice: Record<string, unknown>, deps: Omit<SttRouteDeps, 'local' | 'env'> = {}) {
   const dir = tmp('qbprovbot-');
   const config = ConfigSchema.parse({
-    game: { revealPauseSec: 0, answerTimeoutSec: 5, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2 },
+    game: { revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 5, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2 },
     judge: { cacheFile: path.join(dir, 'cache.json'), strategy: 'fuzzy' },
     llm: { provider: 'none' },
     discord: { dataDir: dir },

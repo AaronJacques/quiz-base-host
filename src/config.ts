@@ -61,6 +61,8 @@ export const ConfigSchema = z.object({
       autoplayAudio: z.boolean().default(true),
       /** Pause zwischen Auflösung und Schließen der Frage, damit alle die Lösung lesen. */
       revealPauseSec: z.number().default(4),
+      /** Kürzere Pause, wenn jemand die Frage richtig gelöst hat (Dezimalwerte erlaubt, z.B. 1.5). */
+      revealPauseSolvedSec: z.number().min(0).max(30).default(1.5),
       /** Am Ende das Spiel auf der Seite automatisch beenden. */
       autoEnd: z.boolean().default(true),
     })

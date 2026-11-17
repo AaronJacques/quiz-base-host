@@ -59,7 +59,8 @@ Ablauf und Punkte des Tafelquiz. Die Punkteregeln sind **pro Server zur Laufzeit
 | `buzzerCorrectFactor` | `1` | Wie `correctFactor`, aber für Buzzer-Antworten. |
 | `buzzerWrongFactor` | `0.5` | Wie `wrongFactor`, aber für Buzzer-Antworten. |
 | `autoplayAudio` | `true` | YouTube- und Audio-Fragen automatisch abspielen. |
-| `revealPauseSec` | `4` | Pause zwischen Auflösung und Schließen der Frage, damit alle die Lösung lesen. |
+| `revealPauseSec` | `4` | Pause zwischen Auflösung und Schließen der Frage, damit alle die Lösung lesen. Gilt, wenn niemand die Frage gelöst hat. |
+| `revealPauseSolvedSec` | `1.5` | Kürzere Pause, wenn jemand die Frage richtig gelöst hat (am Zug oder per Buzzer). 0 bis 30, Dezimalwerte erlaubt. |
 | `autoEnd` | `true` | Am Ende das Spiel auf der Seite automatisch beenden. |
 
 Faktoren sind Multiplikatoren. Bei einem Fragewert von 200 ergibt `correctFactor: 1` +200, `wrongFactor: 0.5` −100.
@@ -207,6 +208,7 @@ Diese Regeln kannst du im Discord-Chat ändern (`!quiz regel …`). Sie werden p
 | `erinnerung` | `pickReminderSec` | Erste Erinnerung bei der Kartenwahl in Sekunden (5 bis 600, `aus` = keine) |
 | `erinnerungstakt`, `nacherinnerung` | `pickReminderRepeatSec` | Weitere Erinnerungen im selben Zug, nur im Chat (5 bis 600, `aus` = keine) |
 | `kartenhinweis`, `hinweis` | `pickHint` | Hinweis „Welche Karte?“ bei gesprochener Kartenwahl (`an` / `aus`) |
+| `pause`, `richtigpause` | `revealPauseSolvedSec` | Pause nach richtiger Antwort, bevor die Karte schließt, in Sekunden (0 bis 30, eine Nachkommastelle, z.B. `1,5`) |
 
 Faktoren akzeptieren `100%`, `50%`, `0.5`, `1/2`, `halb`, `2x`, `nichts`. Beispiel: `!quiz regel minus 0` = kein Abzug.
 

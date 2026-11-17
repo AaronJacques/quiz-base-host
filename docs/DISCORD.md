@@ -102,6 +102,7 @@ Wenn der Bot dich fragt („✍️ @Anna, deine Antwort?“), ist deine **nächs
 !quiz regel erinnerung 120        → erste Erinnerung „du bist dran“ nach 120 s (Standard 90, „aus“ = keine)
 !quiz regel erinnerungstakt aus   → nur eine Erinnerung pro Zug (Standard: weitere alle 300 s, nur im Chat)
 !quiz regel kartenhinweis aus     → kein „Welche Karte?“ bei gesprochener Kartenwahl
+!quiz regel pause 2               → 2 s Pause nach richtiger Antwort, bis die Karte schließt (Standard 1,5; 0 bis 30, auch `1,5`)
 !quiz regeln reset                → Standard (quiz-base-Klassik: +100 % / −50 %)
 ```
 

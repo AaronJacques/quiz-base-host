@@ -276,7 +276,9 @@ export class TafelquizController implements GameMode {
     if (shown) this.say(`💡 Lösung: ${shown}`);
     await this.d.page.stopTimer();
     await this.d.page.stopAudio();
-    await sleep(this.d.game.revealPauseSec * 1000);
+    // A solved question needs less reading time than an unsolved one (the answer was just said).
+    const pauseSec = solved ? this.d.game.revealPauseSolvedSec : this.d.game.revealPauseSec;
+    await sleep(pauseSec * 1000, this.signal); // resolves early on abort
     if (this.signal.aborted) return;
     const before = await this.d.page.state();
     const prevTurn = before.players.find((p) => p.isTurn)?.name;

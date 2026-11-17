@@ -99,7 +99,7 @@ class Room implements VoiceTransport {
 function rig(players: string[]) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'qbprivacy-'));
   const config = ConfigSchema.parse({
-    game: { revealPauseSec: 0, answerTimeoutSec: 30, buzzWindowSec: 6, buzzAnswerTimeoutSec: 5, minPlayers: 2 },
+    game: { revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 30, buzzWindowSec: 6, buzzAnswerTimeoutSec: 5, minPlayers: 2 },
     judge: { cacheFile: path.join(dir, 'cache.json'), strategy: 'fuzzy' },
     llm: { provider: 'none' },
     discord: { dataDir: dir, autoStart: false },

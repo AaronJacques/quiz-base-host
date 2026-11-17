@@ -161,7 +161,7 @@ describe('TafelquizController: judging starts while "Paris?" waits for "Ja"', ()
   function setup(opts: { kit?: JudgeKit; buzzer?: boolean } = {}) {
     const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbpre-'));
     const config = ConfigSchema.parse({
-      game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, answerTimeoutSec: 30, buzzWindowSec: 1, buzzAnswerTimeoutSec: 30, buzzerOnWrong: !!opts.buzzer },
+      game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 30, buzzWindowSec: 1, buzzAnswerTimeoutSec: 30, buzzerOnWrong: !!opts.buzzer },
       judge: { cacheFile: path.join(tmp, 'cache.json') },
       llm: { provider: 'none' },
     });

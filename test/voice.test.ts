@@ -137,7 +137,7 @@ describe('voice: controller', () => {
   it('accepts a buzz by voice (player:buzz) instead of the quiz-base buzzer', async () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbv-'));
     const config = ConfigSchema.parse({
-      game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, answerTimeoutSec: 1, buzzWindowSec: 2, buzzAnswerTimeoutSec: 1 },
+      game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 1, buzzWindowSec: 2, buzzAnswerTimeoutSec: 1 },
       judge: { cacheFile: path.join(tmp, 'c.json') },
       llm: { provider: 'none' },
     });
@@ -279,7 +279,7 @@ describe('QuizBot voice', () => {
   it('plays a whole game by voice: board choice, auto-link, picks, answers, voice buzzer', async () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbvoice-'));
     const config = ConfigSchema.parse({
-      game: { revealPauseSec: 0, answerTimeoutSec: 3, buzzWindowSec: 2, buzzAnswerTimeoutSec: 2, minPlayers: 2 },
+      game: { revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 3, buzzWindowSec: 2, buzzAnswerTimeoutSec: 2, minPlayers: 2 },
       judge: { cacheFile: path.join(tmp, 'cache.json'), strategy: 'fuzzy' },
       llm: { provider: 'none' },
       discord: { dataDir: tmp },
@@ -391,7 +391,7 @@ describe('voice: reveal & rules', () => {
 function voiceSetup(game: Record<string, unknown> = {}, voice: Record<string, unknown> = {}, members: Speaker[] = [annaS, benS], discord: Record<string, unknown> = {}, fast = false) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbvoice-'));
   const config = ConfigSchema.parse({
-    game: { revealPauseSec: 0, answerTimeoutSec: 10, buzzWindowSec: 2, buzzAnswerTimeoutSec: 2, minPlayers: 2, ...game },
+    game: { revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 10, buzzWindowSec: 2, buzzAnswerTimeoutSec: 2, minPlayers: 2, ...game },
     judge: { cacheFile: path.join(tmp, 'cache.json'), strategy: judgeLlm ? 'cascade' : 'fuzzy' },
     llm: { provider: 'none' },
     discord: { dataDir: tmp, ...discord },
@@ -1011,7 +1011,7 @@ describe('QuizBot voice (live test)', () => {
   }, 25000);
 
   it('gives the pick hint only after the turn was announced – not between verdict and next turn – and once', async () => {
-    const t = voiceSetup({ revealPauseSec: 1 });
+    const t = voiceSetup({ revealPauseSec: 1, revealPauseSolvedSec: 1 });
     await voiceGame(t);
     t.room().speak(annaS, 'Sport für hundert');
     await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');

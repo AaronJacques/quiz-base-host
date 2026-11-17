@@ -689,7 +689,7 @@ describe('hybrid in the bot: the leader on turn answers "Soll ich das Spiel been
   function rig(parakeet: (t: string) => string = parakeetSays) {
     const dir = tmp('qbsherpa-bot-');
     const config = ConfigSchema.parse({
-      game: { revealPauseSec: 0, answerTimeoutSec: 30, buzzWindowSec: 6, buzzAnswerTimeoutSec: 5, minPlayers: 2 },
+      game: { revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 30, buzzWindowSec: 6, buzzAnswerTimeoutSec: 5, minPlayers: 2 },
       judge: { cacheFile: path.join(dir, 'cache.json'), strategy: 'fuzzy' },
       llm: { provider: 'none' },
       discord: { dataDir: dir, autoStart: false },

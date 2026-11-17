@@ -107,7 +107,7 @@ async function until(fn: () => boolean, ms = 5000) {
 function setup(discord: Record<string, unknown> = {}, game: Record<string, unknown> = {}, players?: string[], extra: Partial<BotDeps> = {}) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbbot-'));
   const config = ConfigSchema.parse({
-    game: { revealPauseSec: 0, answerTimeoutSec: 2, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2, ...game },
+    game: { revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 2, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2, ...game },
     judge: { cacheFile: path.join(tmp, 'cache.json') },
     llm: { provider: 'none' },
     discord: { dataDir: tmp, ...discord },
@@ -204,6 +204,21 @@ describe('QuizBot', () => {
     await until(() => bot.activeGame === null);
     expect(gw.all().match(/Spiel vorbei|Spiel beendet/g)).toHaveLength(1);
   }, 20000);
+
+  it('sets the pause after a correct answer via chat (decimal seconds, German format)', async () => {
+    const { gw, bot } = setup({}, { revealPauseSolvedSec: 1.5 });
+    await gw.write(anna, '!quiz regeln');
+    expect(gw.all()).toContain('Pause nach richtiger Antwort: **1,5 s**  `pause`');
+    await gw.write(anna, '!quiz regel pause 2');
+    expect(gw.all()).toContain('📏 Pause nach richtiger Antwort: **2 s**');
+    await gw.write(anna, '!quiz regel richtigpause 0,5');
+    expect(gw.all()).toContain('📏 Pause nach richtiger Antwort: **0,5 s**');
+    await gw.write(anna, '!quiz regel pause 45');
+    expect(gw.all()).toContain('⚠️ "45": bitte Sekunden zwischen 0 und 30 (z.B. 1,5).');
+    await gw.write(anna, '!quiz regeln');
+    expect(gw.all()).toContain('Pause nach richtiger Antwort: **0,5 s**');
+    expect(bot.activeGame).toBeNull();
+  });
 
   it('lets players change the scoring rules via chat and applies them', async () => {
     const { gw, bot, session } = setup();
@@ -700,7 +715,7 @@ describe('QuizBot voice: ⏱ latency lines follow what the bot acts on (T1 revie
   it('answers and picks get a line and a reaction (the pick → the question read out); thinking aloud only counts; one summary per game', async () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbvoicelat-'));
     const config = ConfigSchema.parse({
-      game: { revealPauseSec: 0, answerTimeoutSec: 5, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2 },
+      game: { revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 5, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, minPlayers: 2 },
       judge: { cacheFile: path.join(tmp, 'cache.json'), strategy: 'fuzzy' },
       llm: { provider: 'none' },
       discord: { dataDir: tmp },

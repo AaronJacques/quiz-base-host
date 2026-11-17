@@ -24,6 +24,7 @@
     "buzzerWrongFactor": 0.5,
     "autoplayAudio": true,
     "revealPauseSec": 4,
+    "revealPauseSolvedSec": 1.5,
     "autoEnd": true
   },
   "judge": {

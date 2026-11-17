@@ -17,7 +17,7 @@ setLogLevel('error');
 function setup(overrides: Record<string, unknown> = {}) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbhost-'));
   const config = ConfigSchema.parse({
-    game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, answerTimeoutSec: 1, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, ...overrides },
+    game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 1, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, ...overrides },
     judge: { cacheFile: path.join(tmp, 'cache.json') },
     browser: { pollMs: 100 },
     llm: { provider: 'none' },
@@ -110,6 +110,54 @@ describe('TafelquizController', () => {
   }, 10000);
 });
 
+// Independent games with real timers: concurrent, so this file (the suite's longest) does not get slower.
+describe.concurrent('TafelquizController: pause between reveal and closing the card', () => {
+  /** Plays one question and returns the ms between `host:reveal` and the close click. */
+  async function pauseAfterReveal(answer: string, opts: { game?: Record<string, unknown>; abortOnReveal?: boolean } = {}) {
+    const { bus, page, controller } = setup({ buzzerOnWrong: false, revealPauseSec: 0.8, revealPauseSolvedSec: 0.1, ...opts.game });
+    const ac = new AbortController();
+    let first = true;
+    let revealedAt = 0;
+    let closedAt = 0;
+    bus.on('host:turn', ({ player }) => {
+      if (!first) return void page.endGame();
+      first = false;
+      setTimeout(() => bus.emit('player:pick', { player, col: 0, row: 0 }), 5);
+    });
+    bus.on('host:await-answer', ({ player }) => setTimeout(() => bus.emit('player:answer', { player, answer }), 5));
+    bus.on('host:reveal', () => {
+      revealedAt = Date.now();
+      if (opts.abortOnReveal) setTimeout(() => ac.abort(), 50);
+    });
+    const close = page.closeQuestion;
+    page.closeQuestion = () => {
+      closedAt = Date.now();
+      return close();
+    };
+    await controller.run(ac.signal);
+    return { ms: closedAt - revealedAt, revealedAt, closedAt, page };
+  }
+
+  it('solved: short pause (revealPauseSolvedSec)', async () => {
+    const { ms } = await pauseAfterReveal('zehn');
+    expect(ms).toBeGreaterThanOrEqual(90);
+    expect(ms).toBeLessThan(600);
+  }, 10000);
+
+  it('not solved: long pause (revealPauseSec)', async () => {
+    const { ms } = await pauseAfterReveal('5');
+    expect(ms).toBeGreaterThanOrEqual(780);
+  }, 10000);
+
+  it('stopping the game during the pause ends it at once and clicks nothing', async () => {
+    const { revealedAt, closedAt, page } = await pauseAfterReveal('zehn', { game: { revealPauseSolvedSec: 20 }, abortOnReveal: true });
+    expect(revealedAt).toBeGreaterThan(0);
+    expect(closedAt).toBe(0);
+    expect(page.log).not.toContain('close');
+    expect(Date.now() - revealedAt).toBeLessThan(2000); // not the 20 s pause
+  }, 10000);
+});
+
 describe('TafelquizController – stale turn marker', () => {
   it('announces the next player by rotation when quiz-base still shows the previous one', async () => {
     const { bus, page, controller } = setup({ buzzerOnWrong: false });
@@ -178,7 +226,7 @@ describe('TafelquizController – game ended mid-question (F6)', () => {
     const ac = new AbortController();
     const base = createJudge(ConfigSchema.parse({ llm: { provider: 'none' }, judge: { cacheFile: path.join(mkdtempSync(path.join(os.tmpdir(), 'qbhost-')), 'c.json') } }), bus, null, new UsageMeter());
     const slow: JudgeKit = { ...base, judge: { judge: async () => (await new Promise((r) => setTimeout(r, 300)), { verdict: 'correct', method: 'llm', confidence: 1 }) } };
-    const game = ConfigSchema.parse({ game: { revealPauseSec: 0, answerTimeoutSec: 5 } }).game;
+    const game = ConfigSchema.parse({ game: { revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 5 } }).game;
     const controller = new TafelquizController({ page, bus, judge: slow, game, pollMs: 20 });
     page.phase = 'board';
     const events: string[] = [];
@@ -262,7 +310,7 @@ function mediaSetup(questions: FakeQuestion[], cacheFile: string) {
     },
   };
   const judge: JudgeKit = { judge: new CascadeJudge([{ name: 'fuzzy', judge: new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: true }) }], cache), solver: solver as never, cache };
-  const game = ConfigSchema.parse({ game: { buzzerOnWrong: false, revealPauseSec: 0, answerTimeoutSec: 2, autoplayAudio: false } }).game;
+  const game = ConfigSchema.parse({ game: { buzzerOnWrong: false, revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 2, autoplayAudio: false } }).game;
   const answers = questions.map((q) => (q.audio ? q.audio.split(' - ')[1]! : 'Mario'));
   bus.on('host:turn', (t) => (t.open.length ? setTimeout(() => bus.emit('player:pick', { player: t.player, col: t.open[0]!.col, row: t.open[0]!.row }), 5) : void page.endGame()));
   bus.on('host:await-answer', (a) => setTimeout(() => bus.emit('player:answer', { player: a.player, answer: answers[page.open!.col]! }), 5));
@@ -347,7 +395,7 @@ describe('TafelquizController – multiple choice (Schulwissen board)', () => {
   it('shows the options without the solution, judges letters without LLM and reveals letter + text', async () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbhost-'));
     const config = ConfigSchema.parse({
-      game: { autoStart: true, revealPauseSec: 0, answerTimeoutSec: 2, buzzerOnWrong: false },
+      game: { autoStart: true, revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 2, buzzerOnWrong: false },
       judge: { cacheFile: path.join(tmp, 'cache.json') },
       llm: { provider: 'none' },
     });
@@ -407,7 +455,7 @@ describe('TafelquizController – letter answer on the last multiple-choice ques
       solver: null,
       cache,
     };
-    const game = ConfigSchema.parse({ game: { revealPauseSec: 0, answerTimeoutSec: 2 } }).game;
+    const game = ConfigSchema.parse({ game: { revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 2 } }).game;
     const controller = new TafelquizController({ page, bus, judge, game, pollMs: 20 });
     const out = { verdicts: [] as { answer: string; correct: boolean; delta: number }[], reveals: [] as (string | null)[], over: null as null | { name: string; score: number }[], shown: [] as string[][] };
     bus.on('host:turn', (t) => t.open.length && setTimeout(() => bus.emit('player:pick', { player: t.player, col: t.open[0]!.col, row: t.open[0]!.row }), 5));
@@ -455,7 +503,7 @@ describe('TafelquizController: pick reminders', () => {
     try {
       const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbhost-'));
       const config = ConfigSchema.parse({
-        game: { autoStart: true, minPlayers: 1, revealPauseSec: 0, answerTimeoutSec: 1, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, ...game },
+        game: { autoStart: true, minPlayers: 1, revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 1, buzzWindowSec: 1, buzzAnswerTimeoutSec: 1, ...game },
         judge: { cacheFile: path.join(tmp, 'cache.json') },
         llm: { provider: 'none' },
       });
@@ -538,7 +586,7 @@ describe('TafelquizController: no pick is lost during a turn (review F12)', () =
     try {
       const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbgap-'));
       const config = ConfigSchema.parse({
-        game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, answerTimeoutSec: 5, ...opts.game },
+        game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 5, ...opts.game },
         judge: { cacheFile: path.join(tmp, 'c.json') },
         llm: { provider: 'none' },
       });
@@ -904,7 +952,7 @@ describe('TafelquizController: the page watchdog does not delay the work (latenc
     try {
       const { bus, page } = setup({ buzzerOnWrong: false, answerTimeoutSec: 30 });
       const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbwd-'));
-      const config = ConfigSchema.parse({ game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, answerTimeoutSec: 30, buzzerOnWrong: false }, judge: { cacheFile: path.join(tmp, 'c.json') }, llm: { provider: 'none' } });
+      const config = ConfigSchema.parse({ game: { autoStart: true, minPlayers: 2, revealPauseSec: 0, revealPauseSolvedSec: 0, answerTimeoutSec: 30, buzzerOnWrong: false }, judge: { cacheFile: path.join(tmp, 'c.json') }, llm: { provider: 'none' } });
       const controller = new TafelquizController({ page, bus, judge: createJudge(config, bus, null, new UsageMeter()), game: config.game, pollMs: 500 });
       let turn: HostEvents['host:turn'] | null = null;
       let asked: string | null = null;
