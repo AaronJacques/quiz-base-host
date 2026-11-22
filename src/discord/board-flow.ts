@@ -31,6 +31,8 @@ export interface BoardFlowDeps {
   blockedBy: (guildId: string) => string | null;
   /** A board starts being generated or created (the account keeper gives the browser profile back). Must not throw. */
   onBusy?: () => void;
+  /** Why nothing new may start (the bot is shutting down), or null. */
+  closing?: () => string | null;
 }
 
 /**
@@ -74,6 +76,8 @@ export class BoardCreateFlow {
   async command(msg: ChatMessage, args: string[]): Promise<void> {
     if (!msg.guildId) return;
     if (!this.allowed(msg)) return this.d.say(msg.channelId, '🔒 Boards erstellen dürfen nur Server-Admins („Server verwalten“) oder freigeschaltete Nutzer (`boardgen.creatorIds`).');
+    const closing = this.d.closing?.();
+    if (closing) return this.d.say(msg.channelId, closing);
     const why = this.d.studio.unavailable();
     if (why) return this.d.say(msg.channelId, `🔇 ${why}`);
     const text = args.join(' ').trim();
@@ -165,6 +169,8 @@ export class BoardCreateFlow {
   }
 
   private async generate(p: Pending): Promise<void> {
+    const closing = this.d.closing?.();
+    if (closing) return this.d.say(p.channelId, closing);
     if (this.busy) return this.d.say(p.channelId, '⏳ Ich bin gerade mit einem anderen Board beschäftigt. Gleich noch einmal versuchen.');
     p.stage = 'generating';
     this.markBusy(p);
@@ -204,6 +210,8 @@ export class BoardCreateFlow {
 
   private async create(p: Pending): Promise<void> {
     if (!p.recordId) return;
+    const closing = this.d.closing?.();
+    if (closing) return this.d.say(p.channelId, closing);
     const blocked = this.d.blockedBy(p.guildId);
     if (blocked) return this.d.say(p.channelId, blocked);
     if (this.busy) return this.d.say(p.channelId, '⏳ Ich bin gerade mit einem anderen Board beschäftigt. Gleich noch einmal `anlegen`.');
