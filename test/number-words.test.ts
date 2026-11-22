@@ -212,3 +212,35 @@ describe('numberTokens: flags', () => {
     expect(normalize('1,5')).toBe('1.5');
   });
 });
+
+describe('review fixes (B-F4, B-F7, B-F2)', () => {
+  it.each([
+    ['eine Million fünfhunderttausend', [1_500_000]],
+    ['zwei Millionen dreihunderttausend fünfhundert', [2_300_500]],
+    ['drei Millionen vier Millionen', [3_000_000, 4_000_000]],
+    ['Neunzehn hunderteinundsechzig', [1961]],
+    ['zwei tausendvierzehn', [2014]],
+    ['Neunzehnneunundsiebzig', [1979]],
+    ['Neunzehnsiebenundsiebzig', [1977]],
+    ['zwanzigzwanzig', [2020]],
+    ['zwanzigeins', []], // "…eins" < 10: no year form
+    ['12 000', [12000]],
+    ['1 500 000', [1_500_000]],
+    ['19 77', [19, 77]],
+    ['1977 1978', [1977, 1978]],
+  ])('%s → %j', (text, expected) => {
+    expect(numbers(text)).toEqual(expected);
+  });
+
+  it('digit groups with spaces and "1.500" are ambiguous and carry every reading', () => {
+    const tok = (s: string) => numberTokens(foldForNumbers(s));
+    expect(tok('12 000')[0]).toMatchObject({ value: 12000, ambiguous: true, readings: [[12000], [12, 0]], from: 0, to: 1 });
+    expect(tok('1.500')[0]).toMatchObject({ value: 1.5, ambiguous: true, readings: [[1500], [1.5]] });
+    expect(tok('1.500.000')[0]!.readings).toBeUndefined();
+  });
+
+  it.each(['Elfmeter', 'Zwanzigeins', 'Neunzehnte', 'Elfzig'])('%s is no year form', (w) => {
+    const v = parseNumberWord(w.toLowerCase());
+    expect(v === null || v.value <= 999, `${w} → ${v?.value}`).toBe(true);
+  });
+});

@@ -9,6 +9,11 @@ export const STOPWORDS: ReadonlySet<string> = new Set([
   'ist', 'es', 'sind', 'war', 'is', 'it', 'auf', 'in', 'im', 'von', 'vom', 'of', 'und', 'and',
 ]);
 
+/** A dash plus space at the start ("- 1977", "– Paris"), as speech recognition writes dialogue – no minus sign ("-5" stays). */
+export function stripDialogueDash(s: string): string {
+  return s.replace(/^\s*[-–—]\s+/, '');
+}
+
 export function stripUrls(s: string): string {
   return s.replace(/https?:\/\/\S+/gi, ' ').replace(/www\.\S+/gi, ' ');
 }

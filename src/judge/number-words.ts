@@ -13,8 +13,10 @@ export interface NumberToken {
   decimal: boolean;
   /** "Millionen", "Mrd" */
   magnitude: boolean;
-  /** "1.500" / "42.195": German thousands or English decimal – unclear */
+  /** "1.500" / "42.195": German thousands or English decimal – unclear; "12 000": one number or two? */
   ambiguous: boolean;
+  /** For an ambiguous token: every way to read it ("1.500" → [[1500], [1.5]], "12 000" → [[12000], [12, 0]]). */
+  readings?: number[][];
   /** written as words (not digits) */
   words: boolean;
   /** A lone article ("ein", "eine", "einen" …) read as 1 – counts as a number only if nothing else is said. */
@@ -46,6 +48,8 @@ const ARTICLES = new Set(['ein', 'eine', 'einen', 'einem', 'einer', 'eines']);
 const MAGNITUDES: Record<string, number> = {
   million: 1e6, millionen: 1e6, mio: 1e6, milliarde: 1e9, milliarden: 1e9, mrd: 1e9, billion: 1e12, billionen: 1e12,
 };
+/** First half of a year said in two parts ("neunzehn|siebenundsiebzig"): 11–20. */
+const YEAR_HEADS: [string, number][] = [...Object.entries(TEENS).filter(([, v]) => v >= 11), ['zwanzig', 20]];
 const ORDINAL_ENDINGS = ['e', 'er', 'en', 'es', 'em'];
 /** Irregular ordinal stems: "erste", "dritte", "siebte"/"siebente", "achte". */
 const ORDINAL_STEMS: [string, number][] = [['erst', 1], ['dritt', 3], ['siebent', 7], ['siebt', 7], ['acht', 8]];
@@ -130,6 +134,12 @@ export function parseNumberWord(token: string): { value: number; ordinal: boolea
   if (ARTICLES.has(t)) return { value: 1, ordinal: false, decimal: false };
   const c = cardinal(t);
   if (c !== null) return { value: c, ordinal: false, decimal: false };
+  // Year in one word without "hundert": "neunzehnneunundsiebzig" = 1979, "zwanzigzwanzig" = 2020 (like rule 5).
+  for (const [head, x] of YEAR_HEADS) {
+    if (!t.startsWith(head) || t.length === head.length) continue;
+    const y = below100(t.slice(head.length));
+    if (y !== null && y >= 10) return { value: x * 100 + y, ordinal: false, decimal: false };
+  }
   // "viermal", "zweimal" = "4 Mal" (the word "mal" alone is a unit).
   if (t.endsWith('mal') && t.length > 3) {
     const v = cardinal(t.slice(0, -3));
@@ -146,7 +156,7 @@ export function parseNumberWord(token: string): { value: number; ordinal: boolea
 
 /** Number words, digits and the words that glue them ("und", "komma", "minus", "Millionen") – one entry per token. */
 type Atom =
-  | { kind: 'num'; value: number; ordinal: boolean; decimal: boolean; ambiguous: boolean; words: boolean; article: boolean; text: string }
+  | { kind: 'num'; value: number; ordinal: boolean; decimal: boolean; ambiguous: boolean; words: boolean; article: boolean; text: string; readings?: number[][] }
   | { kind: 'partial'; values: number[] }
   | { kind: 'word'; text: string };
 
@@ -162,7 +172,10 @@ function atom(raw: string, next: string | undefined): Atom {
   }
   if (/^\d+,\d+$/.test(word)) return num(parseFloat(word.replace(',', '.')), { decimal: true });
   if (/^\d{1,3}(?:\.\d{3}){2,}$/.test(word)) return num(parseInt(word.replace(/\./g, ''), 10));
-  if (/^\d{1,3}\.\d{3}$/.test(word)) return num(parseFloat(word), { decimal: true, ambiguous: true });
+  if (/^\d{1,3}\.\d{3}$/.test(word)) {
+    const thousands = parseInt(word.replace('.', ''), 10);
+    return num(parseFloat(word), { decimal: true, ambiguous: true, readings: [[thousands], [parseFloat(word)]] });
+  }
   if (/^\d+\.\d+$/.test(word)) return num(parseFloat(word), { decimal: true });
   if (/\d/.test(word)) return { kind: 'partial', values: [...word.matchAll(/\d+(?:[.,]\d+)?/g)].map((m) => parseFloat(m[0].replace(',', '.'))) };
   const w = parseNumberWord(word);
@@ -215,6 +228,16 @@ export function numberTokens(text: string): NumberToken[] {
         out.push({ value, ordinal: false, decimal: !Number.isInteger(value), magnitude: false, ambiguous: false, words: false, article: false, partial: true, from: i, to: i });
       continue;
     }
+    // "12 000", "1 500 000": digit groups with spaces (DIN 5008) – or several numbers. Unclear, so ambiguous.
+    if (a.kind === 'num' && !a.words && /^\d{1,3}$/.test(raw[i]!) && /^\d{3}$/.test(raw[i + 1] ?? '')) {
+      let j = i + 1;
+      while (/^\d{3}$/.test(raw[j + 1] ?? '')) j++;
+      const parts = raw.slice(i, j + 1);
+      const value = parseInt(parts.join(''), 10);
+      out.push({ value, ordinal: false, decimal: false, magnitude: false, ambiguous: true, words: false, article: false, partial: false, from: i, to: j, readings: [[value], parts.map((p) => parseInt(p, 10))] });
+      i = j;
+      continue;
+    }
     const from = i;
     const negative = a.kind === 'word' && a.text === 'minus' && isNum(atoms[i + 1]);
     if (negative) i++;
@@ -222,7 +245,10 @@ export function numberTokens(text: string): NumberToken[] {
     if (!isNum(first)) continue;
 
     let { value, ordinal, decimal, ambiguous, words, article } = first;
+    let readings = first.readings;
     let magnitude = false;
+    /** After "Millionen": a smaller number may still be added (rule 7b). */
+    let magFactor = 0;
     let last = first.text;
     const lead = wordNumberAt(atoms, i);
     if (lead && lead.end > i) {
@@ -244,21 +270,25 @@ export function numberTokens(text: string): NumberToken[] {
       if (ordinal) break;
       const n1 = atoms[i + 1];
       const whole = !decimal && Number.isInteger(value);
-      // 4. "neunzehn hundert", "3 tausend": a number times a lone "hundert" / "tausend".
-      const factor = textOf(n1) === 'hundert' ? 100 : textOf(n1) === 'tausend' ? 1000 : 0;
-      if (whole && factor && value >= 1 && value < (factor === 100 ? 100 : 1000)) {
-        value *= factor;
+      // 4. "neunzehn hundert", "3 tausend": a number times a lone "hundert" / "tausend" – also when the rest is
+      // written on to it: "neunzehn hunderteinundsechzig" = 1961, "zwei tausendvierzehn" = 2014.
+      const n1Text = textOf(n1);
+      const factor = n1Text.startsWith('hundert') ? 100 : n1Text.startsWith('tausend') ? 1000 : 0;
+      const rest = factor && isWordNum(n1) && plain(n1) && n1.value >= factor && n1.value < 2 * factor ? n1.value - factor : null;
+      if (whole && rest !== null && value >= 1 && value < (factor === 100 ? 100 : 1000)) {
+        value = value * factor + rest;
         words = true;
-        take(i + 1, textOf(n1));
+        take(i + 1, n1Text);
         continue;
       }
-      // 2./3. "neunzehnhundert [und] siebenundsiebzig", "zweitausend [und] fünf", "zweitausend neunhundert".
+      // 2./3. "neunzehnhundert [und] siebenundsiebzig", "zweitausend [und] fünf", "zweitausend neunhundert" – also
+      // digits after the word ("neunzehnhundert 77", "2 tausend 14"), but never after digits alone ("1900 77").
       const unit = whole && words ? endUnit(last, value) : null;
       if (unit) {
         const k = textOf(n1) === 'und' ? i + 2 : i + 1;
-        const add = wordNumberAt(atoms, k);
-        const addAtom = atoms[k] as NumAtom | undefined;
-        if (add && !add.article && !addAtom?.decimal && add.value >= 1 && add.value < unit) {
+        const addAtom = atoms[k];
+        const add = wordNumberAt(atoms, k) ?? (isNum(addAtom) && plain(addAtom) && /^\d+$/.test(raw[k]!) ? { value: addAtom.value, ordinal: false, article: false, end: k, text: addAtom.text } : null);
+        if (add && !add.article && !(isNum(addAtom) && addAtom.decimal) && add.value >= 1 && add.value < unit) {
           value += add.value;
           ordinal = add.ordinal;
           take(add.end, add.text);
@@ -297,13 +327,30 @@ export function numberTokens(text: string): NumberToken[] {
       if (mag && !magnitude) {
         value *= mag;
         magnitude = true;
+        magFactor = mag;
         ambiguous = false;
+        readings = undefined;
         take(i + 1, textOf(n1));
         continue;
       }
+      // 7b. A smaller number after it is added: "eine Million fünfhunderttausend" = 1 500 000 (not "drei Millionen vier Millionen").
+      if (magFactor && Number.isInteger(value)) {
+        const add = wordNumberAt(atoms, i + 1);
+        const after = atoms[(add?.end ?? i) + 1];
+        if (add && !add.article && !add.ordinal && plain(atoms[i + 1] as NumAtom) && add.value >= 1 && add.value < magFactor && !(after?.kind === 'word' && after.text in MAGNITUDES)) {
+          value += add.value;
+          magFactor = add.value;
+          take(add.end, add.text);
+          continue;
+        }
+      }
       break;
     }
-    out.push({ value: negative ? -value : value, ordinal, decimal, magnitude, ambiguous, words, article, partial: false, from, to: i });
+    const sign = negative ? -1 : 1;
+    out.push({
+      value: sign * value, ordinal, decimal, magnitude, ambiguous, words, article, partial: false, from, to: i,
+      ...(ambiguous && readings ? { readings: readings.map((r) => r.map((x) => sign * x)) } : {}),
+    });
   }
   return out;
 }

@@ -433,3 +433,174 @@ describe('FuzzyJudge – numbers and years', () => {
     expect((await j.judge({ question: 'Wann?', reference: '1977 / 1978', answer: '1979' })).verdict).toBe('wrong');
   });
 });
+
+// Review V1 of the number rules: a right answer is never wrong by these rules – in doubt the LLM decides.
+describe('FuzzyJudge – numbers, review fixes', () => {
+  const year = 'In welchem Jahr kam Star Wars ins Kino?';
+  const verdicts = async (question: string, reference: string, answer: string, spoken?: boolean) => {
+    const out: string[] = [];
+    for (const rejectDissimilar of [false, true]) {
+      for (const sp of spoken === undefined ? [false, true] : [spoken]) {
+        const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar });
+        const r = await j.judge({ question, reference, answer, spoken: sp });
+        out.push(`${rejectDissimilar ? 'strict' : 'cascade'}${sp ? '/spoken' : ''}: ${r.verdict} ${r.reason ?? ''}`);
+      }
+    }
+    return out;
+  };
+  /** Never wrong by a number rule (strategy "fuzzy" may still reject a dissimilar answer, as before). */
+  const notWrongByNumber = async (question: string, reference: string, answer: string, spoken?: boolean) => {
+    for (const line of await verdicts(question, reference, answer, spoken)) {
+      expect(line, `${reference} ← ${answer}`).not.toMatch(/wrong (?:falsche|falsches)/);
+      if (line.startsWith('cascade')) expect(line, `${reference} ← ${answer}`).not.toMatch(/wrong/);
+    }
+  };
+  const all = async (question: string, reference: string, answer: string, expected: 'correct' | 'wrong', spoken?: boolean) => {
+    for (const line of await verdicts(question, reference, answer, spoken)) expect(line, `${reference} ← ${answer}`).toMatch(new RegExp(`: ${expected} `));
+  };
+
+  it('the live case still holds: 1977 ← „neunzehnhundertneunundsiebzig“ wrong, „…siebenundsiebzig“ right', async () => {
+    await all(year, '1977', 'neunzehnhundertneunundsiebzig', 'wrong', true);
+    await all(year, '1977', 'neunzehnhundertsiebenundsiebzig', 'correct', true);
+  });
+
+  // B-F1: a second number of the note is no wrong answer.
+  it.each([
+    ['1977 (1978 in Deutschland)', '1978'],
+    ['1977; in DE erst 1978', '1978'],
+    ['Mai 1977 (Deutschland Februar 1978)', '1978'],
+    ['Apollo 11 (1969)', 'Apollo 1969'],
+  ])('B-F1: %s ← %s goes to the LLM, never wrong', async (reference, answer) => {
+    await notWrongByNumber(year, reference, answer);
+  });
+
+  it('B-F1: a number the note does not name is still wrong', async () => {
+    await all(year, '1977 (1978 in Deutschland)', '1979', 'wrong');
+    await all(year, 'Mai 1977 (Deutschland Februar 1978)', '1979', 'wrong');
+  });
+
+  // B-F3: units have to agree when both sides name one.
+  it.each([
+    ['Wie lange?', '6 Tage', '6 Wochen'],
+    ['Wie lange?', '90 Minuten', '90 Stunden'],
+    ['Wie alt wurde sie?', '116 Jahre', '116 Tage'],
+    ['Wie hoch?', '8848 m', '8848 km'],
+  ])('B-F3: %s %s ← %s is not correct (other unit)', async (question, reference, answer) => {
+    for (const line of await verdicts(question, reference, answer)) expect(line).not.toMatch(/correct/);
+  });
+
+  it.each([
+    ['Wie lange dauert ein Fußballspiel?', '90 Minuten', '1,5 Stunden'],
+    ['Wie lange dauert ein Fußballspiel?', '90 Minuten', 'Anderthalb Stunden'],
+    ['Wie lang ist ein Marathon?', '42,195 km', '42195 Meter'],
+  ])('B-F3: %s %s ← %s (conversion) is never wrong by a number rule', async (question, reference, answer) => {
+    await notWrongByNumber(question, reference, answer);
+  });
+
+  it('B-F3: a unit on one side only still counts', async () => {
+    await all('Wie lang ist ein Marathon?', '42,195 km', 'zweiundvierzig komma eins neun fünf', 'correct');
+    await all('Wie lange?', '6 Tage', '6', 'correct');
+    await all('Wie lange?', '6 Tage', '7', 'wrong');
+    await all('Wie lange?', '6', '6 Tage', 'correct');
+    await all('Wie lange?', '6 Tage', 'sechs Tage', 'correct');
+  });
+
+  // B-F4: one number said in several parts.
+  it.each([
+    ['Wie viele Einwohner?', '1,5 Millionen', 'eine Million fünfhunderttausend', true],
+    ['Wann wurde die Mauer gebaut?', '1961', 'Neunzehn hunderteinundsechzig', true],
+    ['Wie viele Zuschauer?', '12000', '12 000', undefined],
+    ['Wie viele Einwohner?', '1500000', '1 500 000', undefined],
+    [year, '1977', '19 77', undefined],
+    [year, '1977', '19-77', undefined],
+    [year, '1977', '1900 77', undefined],
+    [year, '1977', 'neunzehnhundert 77', undefined],
+    [year, '1977', '19 hundert 77', undefined],
+    ['Wann?', '2014', '2 tausend 14', undefined],
+  ])('B-F4: %s %s ← %s is never wrong by a number rule', async (question, reference, answer, spoken) => {
+    await notWrongByNumber(question, reference, answer, spoken);
+  });
+
+  it('B-F4: merged forms are read as one number and decided', async () => {
+    await all('Wie viele Einwohner?', '1,5 Millionen', 'eine Million fünfhunderttausend', 'correct', true);
+    await all('Wann wurde die Mauer gebaut?', '1961', 'Neunzehn hunderteinundsechzig', 'correct', true);
+    await all('Wann wurde die Mauer gebaut?', '1961', 'Neunzehn hundertzweiundsechzig', 'wrong', true);
+    await all('Wann?', '2014', 'zwei tausendvierzehn', 'correct');
+    // Several numbers that are no reading of the solution stay wrong.
+    await all('Wann fiel die Mauer?', '1989', '1985 1986', 'wrong');
+  });
+
+  // B-F5: roundings to fewer decimal places go to the LLM, both ways.
+  it.each([
+    ['Wie lautet die Kreiszahl?', '3,14159', '3,14'],
+    ['Wie lautet die Kreiszahl?', '3,14159', 'drei komma eins vier'],
+    ['Wie lautet die Kreiszahl?', '3,14', '3,1416'],
+    ['Wie lang ist ein Marathon?', '42,195 km', '42,2 km'],
+    ['Wie lang ist ein Marathon?', '42,195 km', '42'],
+  ])('B-F5: %s %s ← %s is unsure „gerundet“', async (question, reference, answer) => {
+    for (const line of await verdicts(question, reference, answer)) expect(line).toMatch(/unsure gerundet/);
+  });
+
+  it('B-F5: a different value with fewer places is still wrong', async () => {
+    await all('Wie lautet die Kreiszahl?', '3,14159', '3,2', 'wrong');
+    await all('Wie lang ist ein Marathon?', '42,195 km', '43', 'wrong');
+  });
+
+  // B-F6: a word of the question next to the number says only the number.
+  it.each([
+    ['Wie viele Beine hat eine Spinne?', '8', 'Acht Beine'],
+    ['Wie viele Ringe hat die olympische Flagge?', '5', 'fünf Ringe'],
+    ['Wie viele Saiten hat eine Gitarre?', '6', 'sechs Saiten'],
+    ['Wie viele Bundesländer hat Deutschland?', '16', 'Sechzehn Bundesländer'],
+    ['Wie viele Bundesländer hat Deutschland?', '16', 'Ich sage sechzehn'],
+  ])('B-F6: %s %s ← %s is right without LLM', async (question, reference, answer) => {
+    await all(question, reference, answer, 'correct');
+  });
+
+  it('B-F6: a question word tells candidates apart unless the solution uses it', async () => {
+    const q = 'Welcher Film kam zuerst: Rocky 4 oder Rambo 2?';
+    for (const line of await verdicts(q, 'Rambo 2', 'Rocky 2')) expect(line).not.toMatch(/correct/);
+    await all(q, 'Rambo 2', 'Rambo 4', 'wrong');
+    await all('Wie viele Beine hat eine Spinne?', '8', 'sechs Beine', 'wrong');
+  });
+
+  // B-F7: the year in one word without "hundert".
+  it('B-F7: „Neunzehnneunundsiebzig“ is 1979, „Neunzehnsiebenundsiebzig“ 1977', async () => {
+    await all(year, '1977', 'Neunzehnneunundsiebzig', 'wrong', true);
+    await all(year, '1977', 'Neunzehnsiebenundsiebzig', 'correct', true);
+    await all('Wann wurde die Mauer gebaut?', '1961', 'Neunzehneinundsechzig', 'correct', true);
+  });
+
+  // B-F9: a dialogue dash from speech recognition is no minus.
+  it('B-F9: spoken „- 1977“ is 1977; typed or without space it stays a minus', async () => {
+    await all(year, '1977', '- 1977', 'correct', true);
+    await all(year, '1977', '– 1977', 'correct', true);
+    await all('Gefrierpunkt?', '-5', '-5', 'correct', true);
+    const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
+    expect((await j.judge({ question: 'Gefrierpunkt?', reference: '5', answer: '-5', spoken: true })).verdict).toBe('wrong');
+  });
+});
+
+describe('FuzzyJudge – numbers, review fixes (open cases of the review closed)', () => {
+  const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
+  const v = async (question: string, reference: string, answer: string) => (await j.judge({ question, reference, answer, spoken: true })).verdict;
+
+  it('digits after a word hundred/thousand: „2 tausend 14“, „neunzehnhundert 77“ (not „1900 77“)', async () => {
+    expect(await v('Wann?', '2014', '2 tausend 14')).toBe('correct');
+    expect(await v('In welchem Jahr?', '1977', 'neunzehnhundert 77')).toBe('correct');
+    expect(await v('In welchem Jahr?', '1977', 'neunzehnhundert 79')).toBe('wrong');
+    expect(await v('In welchem Jahr?', '1977', '1900 77')).toBe('unsure');
+  });
+
+  it('a month next to the year answers a question for the year – unless the solution names a month itself', async () => {
+    expect(await v('In welchem Jahr kam der Film?', '1977', 'Mai 1977')).toBe('correct');
+    expect(await v('In welchem Jahr kam der Film?', '1977', 'Mai 1979')).toBe('wrong');
+    expect(await v('Wann kam der Film?', 'Mai 1977', 'Juni 1977')).not.toBe('correct');
+    expect(await v('Wie viele Filme gab es?', '1977', 'Mai 1977')).not.toBe('correct'); // no question for the year
+  });
+
+  it('singular and plural of a question word: „ein Tor“ for „Wie viele Tore?“', async () => {
+    expect(await v('Wie viele Tore fielen?', '1', 'ein Tor')).toBe('correct');
+    expect(await v('Wie viele Tore fielen?', '2', 'ein Tor')).toBe('wrong');
+  });
+});
