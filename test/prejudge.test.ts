@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -7,7 +7,8 @@ import { ConfigSchema } from '../src/config.ts';
 import { EventBus, type HostEvents } from '../src/core/events.ts';
 import { setLogLevel } from '../src/core/logger.ts';
 import { CascadeJudge, type CascadeStage } from '../src/judge/cascade-judge.ts';
-import { createJudge, LlmJudge, type JudgeInput, type JudgeKit, type JudgeResult } from '../src/judge/index.ts';
+import { createJudge, JudgeCache, LlmJudge, type JudgeInput, type JudgeKit, type JudgeResult } from '../src/judge/index.ts';
+import { JUDGE_RULES_VERSION } from '../src/judge/llm-judge.ts';
 import { UsageMeter, type JsonRequest, type JsonResponse, type LlmClient } from '../src/llm/client.ts';
 import { TafelquizController } from '../src/modes/tafelquiz/controller.ts';
 import { FakeTafelquizPage } from './fake-page.ts';
@@ -386,6 +387,20 @@ describe('TafelquizController: judging starts while "Paris?" waits for "Ja"', ()
     await run2;
   });
 
+  it('a wrong number word is wrong without the LLM, already at the ask-back ("neun" for 10)', async () => {
+    const t = setup();
+    const run = t.start();
+    await t.waitAsked();
+    t.pending('neun');
+    await tick(30);
+    t.answer('neun');
+    await until(() => t.verdicts.length === 1);
+    expect(t.verdicts[0]!.correct).toBe(false);
+    expect(t.llm.calls).toHaveLength(0);
+    expect(t.meter.byPurpose).toEqual({});
+    await run;
+  });
+
   it('only the controller listens to player:answer-pending', async () => {
     const t = setup();
     const count = () => (t.bus as unknown as { emitter: { listenerCount(e: string): number } }).emitter.listenerCount('player:answer-pending');
@@ -396,5 +411,87 @@ describe('TafelquizController: judging starts while "Paris?" waits for "Ja"', ()
     await until(() => t.verdicts.length === 1);
     expect(count()).toBe(0);
     await run;
+  });
+});
+
+// Numbers decide without the LLM; the LLM gets the parsed values for the cases left to it (rules R0–R3, cache v4).
+describe('judging numbers in the cascade', () => {
+  const year = 'In welchem Jahr kam der erste Star-Wars-Film, Eine neue Hoffnung, in die US-Kinos?';
+  function kit(cacheContent?: object) {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbnum-'));
+    const cacheFile = path.join(tmp, 'cache.json');
+    if (cacheContent) writeFileSync(cacheFile, JSON.stringify(cacheContent));
+    const config = ConfigSchema.parse({ judge: { cacheFile }, llm: { provider: 'none' } });
+    const llm = new GateLlm();
+    const meter = new UsageMeter();
+    return { kit: createJudge(config, new EventBus(), llm, meter), llm, meter, cacheFile };
+  }
+
+  it('1977 ← "neunzehnhundertneunundsiebzig" (live case 2026-11-20) is wrong by fuzzy – the LLM is never asked, not even early', async () => {
+    const { kit: k, llm, meter } = kit();
+    const input: JudgeInput = { question: year, reference: '1977', answer: 'neunzehnhundertneunundsiebzig', spoken: true, scope: 'q1|Marvin' };
+    await k.judge.prejudge!(input);
+    const r = await k.judge.judge(input);
+    expect(r).toMatchObject({ verdict: 'wrong', method: 'fuzzy', reason: 'falsche Zahl' });
+    expect((await k.judge.judge({ ...input, answer: 'neunzehnhundertsiebenundsiebzig' })).verdict).toBe('correct');
+    expect(llm.calls).toHaveLength(0);
+    expect(meter.byPurpose).toEqual({});
+  });
+
+  it('"42" for 42,195 km goes to the LLM with the parsed values', async () => {
+    const { kit: k, llm } = kit();
+    const p = k.judge.judge({ question: 'Wie lang ist ein Marathon?', reference: '42,195 km', answer: '42' });
+    await until(() => llm.calls.length === 1);
+    expect(llm.calls[0]!.prompt).toContain('Zahlenwerte (automatisch gelesen): Antwort 42 | Lösung 42,195');
+    llm.calls[0]!.resolve(true);
+    expect((await p).verdict).toBe('correct');
+  });
+
+  it('the number hint names no lone articles and keeps years without grouping', async () => {
+    const { numberHint } = await import('../src/judge/llm-judge.ts');
+    expect(numberHint('neunzehnhundertneunundsiebzig', '1977')).toBe('Zahlenwerte (automatisch gelesen): Antwort 1979 | Lösung 1977');
+    expect(numberHint('Eine neue Hoffnung', 'Episode IV')).toBeNull();
+    expect(numberHint('anderthalb Millionen', '1.500.000')).toBe('Zahlenwerte (automatisch gelesen): Antwort 1.500.000 | Lösung 1.500.000');
+    expect(numberHint('Paris', 'Paris')).toBeNull();
+  });
+
+  it('verdict keys carry rule version 4; createJudge removes older verdicts once and keeps the solutions', async () => {
+    expect(JUDGE_RULES_VERSION).toBe(4);
+    const old = {
+      verdicts: {
+        'v3s␟in welchem jahr␟1977␟neunzehnhundertneunundsiebzig': { verdict: 'correct', method: 'llm', confidence: 0.9 },
+        'v3␟frage␟paris␟paris': { verdict: 'correct', method: 'llm', confidence: 0.9 },
+        'v4␟frage␟paris␟pariss': { verdict: 'correct', method: 'llm', confidence: 0.9 },
+        'v4s␟frage␟paris␟parie': { verdict: 'correct', method: 'llm', confidence: 0.9 },
+      },
+      solutions: { 's2␟bildfrage␟img:https://x/y.png': { answer: 'Paris', confidence: 0.9 } },
+    };
+    const { kit: k, llm, cacheFile } = kit(old);
+    const saved = JSON.parse(readFileSync(cacheFile, 'utf8'));
+    expect(Object.keys(saved.verdicts)).toEqual(['v4␟frage␟paris␟pariss', 'v4s␟frage␟paris␟parie']);
+    expect(saved.solutions).toEqual(old.solutions);
+    // A new verdict is stored under v4.
+    const p = k.judge.judge({ question: 'Hauptstadt?', reference: 'Paris', answer: 'Lutetia' });
+    await until(() => llm.calls.length === 1);
+    llm.calls[0]!.resolve(true);
+    await p;
+    const keys = Object.keys(JSON.parse(readFileSync(cacheFile, 'utf8')).verdicts);
+    expect(keys.filter((key) => key.includes('lutetia'))).toEqual(['v4␟hauptstadt␟paris␟lutetia']);
+  });
+
+  it('JudgeCache.prune: removes other versions only, writes only if something was removed', () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbprune-'));
+    const file = path.join(tmp, 'cache.json');
+    const cache = new JudgeCache(file);
+    expect(cache.prune(4)).toBe(0);
+    expect(() => readFileSync(file)).toThrow(); // nothing removed → nothing written
+    cache.setVerdict('v3s␟q␟1977␟neunzehnhundertneunundsiebzig', { verdict: 'correct', method: 'llm', confidence: 0.9 });
+    cache.setVerdict('v4s␟q␟1977␟neunzehnhundertneunundsiebzig', { verdict: 'wrong', method: 'llm', confidence: 0.9 });
+    cache.setVerdict('v40␟q␟a␟b', { verdict: 'wrong', method: 'llm', confidence: 0.9 }); // "v40" is not "v4"
+    cache.setSolution('s2␟q␟img:x', { answer: 'A', confidence: 1 });
+    expect(cache.prune(4)).toBe(2);
+    expect(cache.getVerdict('v4s␟q␟1977␟neunzehnhundertneunundsiebzig')?.verdict).toBe('wrong');
+    expect(cache.getVerdict('v3s␟q␟1977␟neunzehnhundertneunundsiebzig')).toBeUndefined();
+    expect(new JudgeCache(file).getSolution('s2␟q␟img:x')).toEqual({ answer: 'A', confidence: 1 });
   });
 });

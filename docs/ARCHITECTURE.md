@@ -45,7 +45,8 @@ src/
 │
 ├── judge/                 "Ist die Antwort richtig?"
 │   ├── normalize.ts       Normalisierung, Levenshtein, Zahlen, Lösungsvarianten
-│   ├── fuzzy-judge.ts     kostenlos, konservativ ("unsure" statt raten); nie "richtig" für Absicherungen ("A oder B", "nicht A", Listen)
+│   ├── number-words.ts    deutsche Zahlwörter → Werte ("neunzehnhundertsiebenundsiebzig" = 1977, "vierte", "eins komma fünf")
+│   ├── fuzzy-judge.ts     kostenlos, konservativ ("unsure" statt raten); nie "richtig" für Absicherungen ("A oder B", "nicht A", Listen); Zahlenregeln
 │   ├── llm-judge.ts       Bewertung + Lösen von Bildfragen per LLM
 │   ├── operator-judge.ts  Mensch im Terminal
 │   ├── cascade-judge.ts   Chain of Responsibility mit Cache vor teuren Stufen
@@ -117,6 +118,8 @@ page.closeQuestion()   quiz-base gibt den Zug weiter → nächster onBoard-Durch
 Jeder Warteschritt läuft über `whilePage()`: Ändert ein Mensch im Browser den Zustand (Frage manuell geöffnet/geschlossen, Spiel beendet), bricht das Warten ab und die Hauptschleife liest den neuen Zustand. Die Phasen-Handler sind idempotent, daher kann qbhost auch in ein laufendes Spiel einsteigen.
 
 **Spielende mitten in der Frage:** `GameSession.endGame()` stoppt zuerst den Controller (AbortSignal) und klickt erst dann „Spiel beenden“. Der Controller prüft das Signal nach jedem Warten und nach der Bewertung: Eine abgeschnittene Frage bekommt kein Verdict, keine Punkte, keine Auflösung und keine weiteren Klicks. `close()` wartet, bis „Spiel beenden“ durch ist, bevor der Browser zugeht.
+
+**Zahlen und Jahre** entscheidet der Fuzzy-Stage selbst, ohne LLM (`judgeNumbers` in `fuzzy-judge.ts`). `number-words.ts` liest Ziffern und deutsche Zahlwörter als Werte, auch zusammengesetzt und über mehrere Wörter („neunzehnhundertneunundsiebzig“ = 1979, „neunzehn siebenundsiebzig“ = 1977, „zweitausend fünf“, „der vierte“, „eins komma fünf“, „1,5 Millionen“). Ist die Lösung nur eine Zahl, ist eine andere Zahl falsch und dieselbe richtig, Einheiten und Füllwörter („im Jahr 1977“, „4 Mal“, „1979 glaube ich“) zählen nicht (R1). Fragt die Frage nach dem Jahr, gilt die Kurzform „77“ für 1977. Sonst gilt: gleiche Wörter und eine andere Zahl sind falsch („Apollo 13“ für „Apollo 11“, „Rot Vier“ für „Rot 2“, R2), und bei einer Jahresfrage zählt das eine Jahr einer längeren Lösung („1979“ für „25. Mai 1977“, R3). Diese Fälle gehen weiter an den LLM (R0): Schätzungen und Grenzen („ca.“, „über“, „mindestens“), Bereiche („1939–1945“), römische Zahlen, „1.500“ (Tausenderpunkt oder Dezimalpunkt?) und „Millionen“ nur auf einer Seite. An den LLM gehen auch gerundete Werte („42“ für 42,195 km) und Antworten mit anderen Wörtern („Eine neue Hoffnung“ für 4). Der LLM bekommt dann die gelesenen Werte mit (`Zahlenwerte (automatisch gelesen): Antwort 42 | Lösung 42,195`), und die Klangregel für gesprochene Antworten gilt nicht für Zahlen. Mit neuen Bewertungsregeln steigt `JUDGE_RULES_VERSION`. `createJudge` löscht dann einmal je Prozess die Urteile älterer Versionen aus dem Cache (`JudgeCache.prune`).
 
 **Geheimhaltung:** Was die Lösung enthalten kann (Notiz, LLM-Lösung, LLM-Begründung), geht vor `host:reveal` nur in `host:notice.detail` (DM an die Spielleitung, Operator-Konsole). Für erzeugte Boards gilt dasselbe: Fragen, Lösungen, Prüfbefunde und Warnungen gehen nur per DM an die anfragende Person bzw. ins Terminal, nie in einen Channel oder ins `info`-Log. `host:say` ist öffentlich (Web-Pult). Das Web-Pult bekommt `verdict.reason` nie, Discord hält Begründungen bis zur Auflösung zurück, und das `info`-Log zeigt weder LLM-Lösung noch LLM-Begründung (nur `debug`).
 

@@ -89,14 +89,24 @@ describe('spoken answers', () => {
 
   // F2: sounding alike is not enough – digits, vowels and the rough spelling must match too.
   it.each([
-    ['Apollo 11', 'Apollo 13'],
-    ['Rocky 2', 'Rocky 4'],
     ['Kenia', 'Guinea'],
     ['Hamburg', 'Homburg'],
   ])('does not accept %s ← spoken %s by sound alone', async (reference, answer) => {
     for (const rejectDissimilar of [false, true]) {
       const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar });
       expect((await j.judge({ question: 'q', reference, answer, spoken: true })).verdict).toBe('unsure');
+    }
+  });
+
+  // Same words, another number: no longer left to the LLM, the number rules (R2) say wrong.
+  it.each([
+    ['Apollo 11', 'Apollo 13'],
+    ['Rocky 2', 'Rocky 4'],
+  ])('does not accept %s ← spoken %s by sound alone: wrong number', async (reference, answer) => {
+    for (const rejectDissimilar of [false, true]) {
+      const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar });
+      const r = await j.judge({ question: 'q', reference, answer, spoken: true });
+      expect(r).toMatchObject({ verdict: 'wrong', method: 'fuzzy', reason: 'falsche Zahl' });
     }
   });
 
@@ -328,5 +338,98 @@ describe('multiple choice', () => {
   it('without a marked option nothing is decided here', async () => {
     const unmarked = options.map((o) => ({ ...o, correct: false }));
     expect(judgeChoice('D', unmarked, false)).toBeNull();
+  });
+});
+
+// Numbers and years decide without the LLM (rules R0–R3, live case 2026-11-20: 1977 ← „neunzehnhundertneunundsiebzig“ was taken as right).
+describe('FuzzyJudge – numbers and years', () => {
+  const year = 'In welchem Jahr kam der erste Star-Wars-Film, Eine neue Hoffnung, in die US-Kinos?';
+  type Expect = 'correct' | 'wrong' | 'unsure' | 'not wrong' | 'not correct';
+  const cases: [reference: string, answer: string, question: string, expected: Expect, spoken?: boolean][] = [
+    ['1977', 'neunzehnhundertneunundsiebzig', year, 'wrong', true],
+    ['1977', 'neunzehnhundertsiebenundsiebzig', year, 'correct', true],
+    ['1977', 'neunzehn siebenundsiebzig', year, 'correct', true],
+    ['1977', 'neunzehnhundert-siebenundsiebzig', year, 'correct'],
+    ['1977', 'Im Jahr 1977.', year, 'correct'],
+    ['1977', '1979 glaube ich', year, 'wrong'],
+    ['1977', 'siebenundsiebzig', year, 'correct'],
+    ['1977', '1977 oder 1978', year, 'unsure'],
+    ['2005', 'zweitausendundfünf', 'Wann kam das Spiel heraus?', 'correct'],
+    ['2005', 'zweitausend fünf', 'Wann kam das Spiel heraus?', 'correct'],
+    ['4', 'vier', 'Wie viele Titel gewann Deutschland?', 'correct'],
+    ['4', 'der vierte', 'Wie viele Titel gewann Deutschland?', 'correct'],
+    ['4', '4 Mal', 'Wie viele Titel gewann Deutschland?', 'correct'],
+    ['4', 'Eine neue Hoffnung', 'Welche Episode ist der erste Film?', 'not wrong'],
+    ['2187', '603', 'Welche Nummer hatte Leias Zelle?', 'wrong'],
+    ['42,195 km', '42', 'Wie lang ist ein Marathon?', 'unsure'],
+    ['42,195 km', 'zweiundvierzig komma eins neun fünf', 'Wie lang ist ein Marathon?', 'correct'],
+    ['ca. 8000', '7500', 'Wie viele Gene ungefähr?', 'unsure'],
+    ['1939–1945', '1945', 'Wann war der Zweite Weltkrieg?', 'unsure'],
+    ['1,5 Millionen', '1.500.000', 'Wie viele Einwohner?', 'unsure'],
+    ['1,5 Millionen', 'eineinhalb Millionen', 'Wie viele Einwohner?', 'correct'],
+    ['Episode IV', 'vier', 'Welche Episode ist der erste Film?', 'unsure'],
+    ['Episode IV (1977)', 'vier', 'Welche Episode ist der erste Film?', 'unsure'],
+    ['1977 (USA), 1978 (Deutschland)', '1978', 'Wann kam der Film ins Kino?', 'unsure'],
+    ['25. Mai 1977', '1979', 'In welchem Jahr kam der Film ins Kino?', 'wrong'],
+    ['25. Mai 1977', '1977', 'In welchem Jahr kam der Film ins Kino?', 'correct'],
+    ['25. Mai 1977', '1977', 'An welchem Tag kam der Film ins Kino?', 'not correct'],
+    ['Rot 2', 'Rot Vier', 'Welches Rufzeichen hatte Wedge?', 'wrong', true],
+    ['Apollo 11', 'Apollo elf', 'Welche Mission landete zuerst?', 'correct'],
+    ['Apollo 11', 'Apollo 13', 'Welche Mission landete zuerst?', 'wrong'],
+    ['Formel 1', 'Formel eins', 'Welche Rennserie?', 'correct'],
+    ['1. Weltkrieg', 'Erster Weltkrieg', 'Welcher Krieg?', 'correct'],
+    ['0', 'null', 'Wie viele Tore fielen?', 'correct'],
+    ['Die drei Musketiere', 'Die 3 Musketiere', 'Welcher Roman?', 'correct'],
+  ];
+  /**
+   * The table is for the cascade (rejectDissimilar false). With rejectDissimilar true (strategy "fuzzy") an answer the
+   * number rules leave open may still be rejected as dissimilar, as before – there "unsure" only means "not correct"
+   * and "not wrong" means "not wrong by a number rule".
+   */
+  it.each(cases)('%s ← %s (%s) → %s', async (reference, answer, question, expected, spoken) => {
+    for (const rejectDissimilar of [false, true]) {
+      for (const sp of spoken === undefined ? [false, true] : [spoken]) {
+        const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar });
+        const r = await j.judge({ question, reference, answer, spoken: sp });
+        const label = `${reference} ← ${answer} (rejectDissimilar ${rejectDissimilar}, spoken ${sp}): ${r.verdict} ${r.reason ?? ''}`;
+        // Strategy "fuzzy" still rejects a dissimilar answer – but never by the number rules.
+        if (expected === 'not wrong' && rejectDissimilar) expect(r.reason, label).toMatch(/^unähnlich/);
+        else if (expected === 'not wrong') expect(r.verdict, label).not.toBe('wrong');
+        else if (expected === 'not correct' || (expected === 'unsure' && rejectDissimilar)) expect(r.verdict, label).not.toBe('correct');
+        else expect(r.verdict, label).toBe(expected);
+        if (expected === 'wrong' || expected === 'correct') expect(r.method, label).toBe('fuzzy');
+      }
+    }
+  });
+
+  it('gives the reasons the number rules stand for', async () => {
+    const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
+    const reason = async (reference: string, answer: string, question = year) => (await j.judge({ question, reference, answer, spoken: true })).reason;
+    expect(await reason('1977', 'neunzehnhundertneunundsiebzig')).toBe('falsche Zahl');
+    expect(await reason('1977', 'siebenundsiebzig')).toBe('Kurzform des Jahres');
+    expect(await reason('42,195 km', '42', 'Wie lang ist ein Marathon?')).toBe('gerundet');
+    expect(await reason('25. Mai 1977', '1979')).toBe('falsches Jahr');
+    expect(await reason('25. Mai 1977', '1977')).toBe('Jahr stimmt');
+    expect(await reason('1989', '1987 1988 1989')).toBe('mehrere Zahlen');
+    expect(await reason('1989', '1985 1986', 'Wann fiel die Mauer?')).toBe('falsche Zahlen');
+  });
+
+  it('the short form of a year counts only when the question asks for the year', async () => {
+    const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
+    expect((await j.judge({ question: 'Wie viele Zuschauer (in Tausend)?', reference: '1977', answer: '77' })).verdict).toBe('wrong');
+    expect((await j.judge({ question: 'Wann fiel die Mauer?', reference: '1989', answer: '89' })).verdict).toBe('correct');
+  });
+
+  it('a lone article is a number only if nothing else is said', async () => {
+    const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
+    expect((await j.judge({ question: 'Wie viele Monde hat die Erde?', reference: '1', answer: 'einen' })).verdict).toBe('correct');
+    expect((await j.judge({ question: 'Wie viele Monde hat die Erde?', reference: '2', answer: 'einen' })).verdict).toBe('wrong');
+    expect((await j.judge({ question: 'Welche Episode?', reference: '4', answer: 'Eine neue Hoffnung' })).verdict).not.toBe('wrong');
+  });
+
+  it('a solution with several numbers alternatives: any of them is right, none of them wrong', async () => {
+    const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
+    expect((await j.judge({ question: 'Wann?', reference: '1977 / 1978', answer: '1978' })).verdict).toBe('correct');
+    expect((await j.judge({ question: 'Wann?', reference: '1977 / 1978', answer: '1979' })).verdict).toBe('wrong');
   });
 });

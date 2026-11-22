@@ -104,6 +104,22 @@ export class JudgeCache {
     this.flush();
   }
 
+  /**
+   * Removes the verdicts of other rule versions (key not starting with `v${version}` + "s" or "␟") – they never match
+   * again, and some may be wrong under the new rules. Solutions stay (own version). Writes only if something was removed.
+   */
+  prune(version: number): number {
+    const prefixes = [`v${version}s␟`, `v${version}␟`];
+    let removed = 0;
+    for (const key of Object.keys(this.data.verdicts)) {
+      if (prefixes.some((p) => key.startsWith(p))) continue;
+      delete this.data.verdicts[key];
+      removed++;
+    }
+    if (removed) this.flush();
+    return removed;
+  }
+
   private flush(): void {
     mkdirSync(path.dirname(this.file), { recursive: true });
     writeFileSync(this.file, JSON.stringify(this.data, null, 1));
