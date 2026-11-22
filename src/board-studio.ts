@@ -12,6 +12,7 @@ import {
   type GeneratedBoard,
 } from './boardgen/index.ts';
 import { createDriver, type ResponseWatch } from './browser/index.ts';
+import { PROFILE_WAIT_MS } from './browser/profile-lock.ts';
 import type { Config } from './config.ts';
 import { createLogger } from './core/logger.ts';
 import { UsageMeter } from './llm/client.ts';
@@ -101,7 +102,7 @@ export class QuizBaseBoardStudio implements BoardStudio {
     if (this.store.get(id)?.status === 'created') throw new Error('Dieses Board ist schon auf quiz-base angelegt.');
     this.creating = true;
     const board = this.store.load(id);
-    const driver = createDriver(this.config, { owner: 'board', watch: this.opts.auth });
+    const driver = createDriver(this.config, { owner: 'board', watch: this.opts.auth, lockWaitMs: PROFILE_WAIT_MS });
     try {
       await driver.open(this.config.baseUrl);
       let res;

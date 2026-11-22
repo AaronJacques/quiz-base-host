@@ -1,6 +1,7 @@
 import type { BrowserDriver } from '../browser/driver.ts';
 import { createLogger, sleep } from '../core/logger.ts';
-import { NotLoggedInError } from './errors.ts';
+import { BoardEditorPage } from './editor/page.ts';
+import { NotLoggedInError, OwnBoardsUnavailableError } from './errors.ts';
 
 const log = createLogger('lobby');
 
@@ -78,9 +79,19 @@ export async function createLobbyWithPublicBoard(
 export async function createLobbyWithOwnBoard(driver: BrowserDriver, baseUrl: string, boardTitle: string): Promise<void> {
   log.info(`Erstelle Lobby: Tafelquiz / eigenes Board "${boardTitle}"`);
   await openFormat(driver, baseUrl, 'Tafelquiz');
-  // The button appears only when logged in – give a slow page a few seconds before calling it a lost login.
+  // The button appears only when logged in. A missing button alone is no proof (slow page, changed wizard, a
+  // failing evaluate) – the user menu decides, with the same robust check as everywhere else.
   const own = await until(driver, `clickButton('Eigenes Board verwenden').ok`, 5000);
-  if (!own) throw new NotLoggedInError('„Eigenes Board verwenden“ fehlt – nicht bei quiz-base angemeldet.');
+  if (!own) {
+    const loggedIn = await new BoardEditorPage(driver, baseUrl).loginState().catch(() => null);
+    if (loggedIn === false) throw new NotLoggedInError('„Eigenes Board verwenden“ fehlt – nicht bei quiz-base angemeldet.');
+    throw new OwnBoardsUnavailableError(
+      loggedIn
+        ? '„Eigenes Board verwenden“ fehlt, obwohl der Bot bei quiz-base angemeldet ist – hat sich die Seite geändert? Gleich noch einmal versuchen.'
+        : '„Eigenes Board verwenden“ fehlt, und die Anmeldung ist gerade nicht sicher erkennbar. Gleich noch einmal versuchen.',
+      loggedIn,
+    );
+  }
   await sleep(400);
   const listed = await until(
     driver,

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { closeOpenBrowsers, openBrowserCount, PlaywrightDriver } from '../src/browser/playwright-driver.ts';
-import { ProfileBusyError, profileLock, ProfileLock } from '../src/browser/profile-lock.ts';
+import { ProfileBusyError, profileLock, ProfileLock, ProfileWaitAbortedError } from '../src/browser/profile-lock.ts';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -128,18 +128,60 @@ describe('PlaywrightDriver and the profile lock (without Chromium)', () => {
     game.release();
   });
 
-  it('close() while open() still waits for the profile cancels the open', async () => {
+  it('close() while open() still waits for the profile stops the wait at once (A1-F6)', async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'qblock-'));
     const profileDir = path.join(dir, 'profile');
     const game = await profileLock(profileDir).acquire('game');
     const d = new PlaywrightDriver({ profileDir, headless: true, owner: 'board' });
     const opening = d.open().catch((e) => e);
-    await d.close();
-    game.release();
+    await Promise.resolve();
+    expect(openBrowserCount()).toBe(1); // visible to closeOpenBrowsers while it waits
+    const t0 = Date.now();
+    await d.close(); // returns without the game giving the profile back
+    expect(Date.now() - t0).toBeLessThan(1000);
     const err = await opening;
-    expect(err).toBeInstanceOf(Error);
-    expect(err.message).toMatch(/beim Öffnen geschlossen/);
+    expect(err).toBeInstanceOf(ProfileWaitAbortedError);
+    expect(openBrowserCount()).toBe(0);
+    expect(profileLock(profileDir).holder).toBe('game');
+    game.release();
     expect(profileLock(profileDir).holder).toBeNull();
+  });
+
+  it('closeOpenBrowsers sees a browser that is still opening, and gives up on a hanging close (A1-F6, A1-F7f)', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'qblock-'));
+    const profileDir = path.join(dir, 'profile');
+    const game = await profileLock(profileDir).acquire('game');
+    const waiting = new PlaywrightDriver({ profileDir, headless: true, owner: 'board' });
+    const opening = waiting.open().catch((e) => e);
+    await Promise.resolve();
+    expect(await closeOpenBrowsers(1000)).toBe(1);
+    expect(await opening).toBeInstanceOf(ProfileWaitAbortedError);
+    // A close that never ends: the time limit holds.
+    const hanging = new PlaywrightDriver({ profileDir, headless: true, owner: 'other' });
+    const opening2 = hanging.open().catch((e) => e);
+    await Promise.resolve();
+    const realClose = hanging.close.bind(hanging);
+    hanging.close = () => new Promise<void>(() => {});
+    const t0 = Date.now();
+    expect(await closeOpenBrowsers(200)).toBe(1);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    await realClose();
+    await opening2;
+    game.release();
+    expect(openBrowserCount()).toBe(0);
+  });
+
+  it('ProfileLock: an aborted wait leaves the queue, the next waiter still gets the profile', async () => {
+    const lock = new ProfileLock();
+    const a = await lock.acquire('game');
+    const ac = new AbortController();
+    const b = lock.acquire('board', { signal: ac.signal }).catch((e) => e);
+    const c = lock.acquire('other');
+    ac.abort();
+    expect(await b).toBeInstanceOf(ProfileWaitAbortedError);
+    a.release();
+    expect((await c).owner).toBe('other');
+    await expect(lock.acquire('x' as any, { signal: ac.signal })).rejects.toBeInstanceOf(ProfileWaitAbortedError);
   });
 
   it('closeOpenBrowsers with nothing open returns 0 at once', async () => {

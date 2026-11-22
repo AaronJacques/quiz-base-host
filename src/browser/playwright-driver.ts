@@ -29,6 +29,10 @@ export interface PlaywrightDriverOptions {
   lockWaitMs?: number;
   /** Passively follows the page's own requests (status, error code) – see ResponseWatch. */
   watch?: ResponseWatch;
+  /** Time limit of `goto` (default: Playwright's 30 s). */
+  navTimeoutMs?: number;
+  /** How long `close()` waits for Chromium itself before it frees the profile anyway (default 15 000). */
+  closeTimeoutMs?: number;
 }
 
 /** Chromium arguments for the given options. */
@@ -38,7 +42,7 @@ export function launchArgs(opts: Pick<PlaywrightDriverOptions, 'remoteDebuggingP
   return args;
 }
 
-/** Every PlaywrightDriver with an open browser (for the last safety net on shutdown). */
+/** Every PlaywrightDriver that is opening or open (for the last safety net on shutdown). */
 const OPEN = new Set<PlaywrightDriver>();
 
 /**
@@ -54,9 +58,10 @@ export class PlaywrightDriver implements BrowserDriver {
   private inflight = new Set<Request>();
   private lastWatchedAt = 0;
   private closeMs: number | null = null;
-  /** open() is waiting for the profile or launching; a close() meanwhile cancels it. */
-  private opening = false;
+  /** The running launch (waiting for the profile, starting Chromium); a close() meanwhile cancels it and waits for it. */
+  private launching: Promise<void> | null = null;
   private cancelOpen = false;
+  private openAc: AbortController | null = null;
 
   constructor(private opts: PlaywrightDriverOptions) {}
 
@@ -70,17 +75,25 @@ export class PlaywrightDriver implements BrowserDriver {
       if (url) await this.goto(url);
       return;
     }
-    this.opening = true;
+    if (this.launching) throw new Error('Browser wird schon geöffnet');
     this.cancelOpen = false;
+    this.openAc = new AbortController();
+    // Visible to closeOpenBrowsers from the start: a browser still starting is closed on shutdown too.
+    OPEN.add(this);
+    this.launching = this.launch(this.openAc.signal);
     try {
-      await this.launch();
+      await this.launching;
+    } catch (e) {
+      if (!this.context) OPEN.delete(this);
+      throw e;
     } finally {
-      this.opening = false;
+      this.launching = null;
     }
     try {
       if (this.cancelOpen) throw new Error('Browser wurde beim Öffnen geschlossen');
       if (this.opts.watch) this.follow(this.context!, this.opts.watch);
       this.page = this.context!.pages()[0] ?? (await this.context!.newPage());
+      if (this.opts.navTimeoutMs) this.page.setDefaultNavigationTimeout(this.opts.navTimeoutMs);
       if (url) await this.goto(url);
     } catch (e) {
       // Nobody may hold an open browser they do not know about – close it, free the profile.
@@ -89,11 +102,12 @@ export class PlaywrightDriver implements BrowserDriver {
     }
   }
 
-  private async launch(): Promise<void> {
+  private async launch(signal: AbortSignal): Promise<void> {
     const lease = await profileLock(this.opts.profileDir).acquire(this.opts.owner ?? 'other', {
       preemptible: this.opts.preemptible,
       onPreempt: this.opts.onPreempt,
       waitMs: this.opts.lockWaitMs,
+      signal,
     });
     try {
       if (this.cancelOpen) throw new Error('Browser wurde beim Öffnen geschlossen');
@@ -112,7 +126,6 @@ export class PlaywrightDriver implements BrowserDriver {
       throw e;
     }
     this.lease = lease;
-    OPEN.add(this);
   }
 
   /** Counts watched requests while they run and reports their responses (status, error code only). */
@@ -166,8 +179,15 @@ export class PlaywrightDriver implements BrowserDriver {
    * token), closes the browser and always frees the profile. Concurrent calls share one close.
    */
   close(): Promise<void> {
-    if (this.opening) this.cancelOpen = true;
-    this.closing ??= this.doClose().finally(() => {
+    if (this.launching) {
+      // Cancel the open: stop waiting for the profile; a Chromium that is starting is closed right after.
+      this.cancelOpen = true;
+      this.openAc?.abort();
+    }
+    this.closing ??= (async () => {
+      await this.launching?.catch(() => {});
+      await this.doClose();
+    })().finally(() => {
       this.closing = null;
     });
     return this.closing;
@@ -181,14 +201,16 @@ export class PlaywrightDriver implements BrowserDriver {
     try {
       if (ctx) {
         if (this.opts.watch) await this.settle(this.opts.watch.settleMs ?? 5000);
-        await ctx.close();
+        await withTimeout(ctx.close(), this.opts.closeTimeoutMs ?? 15_000, 'Browser schließt nicht');
       }
     } finally {
       if (ctx) this.closeMs = Date.now() - t0;
       this.inflight.clear();
-      OPEN.delete(this);
+      if (!this.launching) OPEN.delete(this);
       const lease = this.lease;
       this.lease = undefined;
+      // Also after a timeout: a Chromium that hangs must not block game and board creation for good. If it still
+      // runs, the next launch fails on Chromium's own SingletonLock (an error, never two browsers on one profile).
       lease?.release();
     }
   }
@@ -199,6 +221,21 @@ export class PlaywrightDriver implements BrowserDriver {
     // A finished refresh: give the page a moment to write the new session (cookie) before the browser goes.
     const quiet = 500 - (Date.now() - this.lastWatchedAt);
     if (this.lastWatchedAt && quiet > 0) await sleep(quiet);
+  }
+}
+
+/** Rejects after `ms` (and leaves `p` running). */
+async function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

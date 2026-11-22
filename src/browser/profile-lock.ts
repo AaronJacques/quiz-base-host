@@ -38,6 +38,15 @@ export interface AcquireOptions {
   onPreempt?: () => void;
   /** How long to wait for the profile; 0 = try once. Default 20 000. */
   waitMs?: number;
+  /** Stops waiting (rejects with ProfileWaitAbortedError); no effect once the profile is granted. */
+  signal?: AbortSignal;
+}
+
+export class ProfileWaitAbortedError extends Error {
+  constructor() {
+    super('Warten auf das Browser-Profil abgebrochen.');
+    this.name = 'ProfileWaitAbortedError';
+  }
 }
 
 interface Holder {
@@ -64,21 +73,31 @@ export class ProfileLock {
 
   /** Waits for the profile (FIFO). A preemptible holder is asked to stop first. Rejects with ProfileBusyError after waitMs. */
   acquire(owner: LockOwner, opts: AcquireOptions = {}): Promise<ProfileLease> {
+    if (opts.signal?.aborted) return Promise.reject(new ProfileWaitAbortedError());
     if (!this.current && !this.queue.length) return Promise.resolve(this.grant(owner, opts));
     const waitMs = opts.waitMs ?? 20_000;
     if (waitMs <= 0) return Promise.reject(new ProfileBusyError(this.holder ?? this.queue[0]?.owner ?? null));
     return new Promise<ProfileLease>((resolve, reject) => {
+      const leave = (e: Error) => {
+        const i = this.queue.indexOf(w);
+        if (i < 0) return;
+        this.queue.splice(i, 1);
+        clearTimeout(w.timer);
+        opts.signal?.removeEventListener('abort', onAbort);
+        reject(e);
+      };
+      const onAbort = () => leave(new ProfileWaitAbortedError());
       const w: Waiter = {
         owner,
         opts,
-        resolve,
-        timer: setTimeout(() => {
-          const i = this.queue.indexOf(w);
-          if (i >= 0) this.queue.splice(i, 1);
-          reject(new ProfileBusyError(this.holder));
-        }, waitMs),
+        resolve: (lease) => {
+          opts.signal?.removeEventListener('abort', onAbort);
+          resolve(lease);
+        },
+        timer: setTimeout(() => leave(new ProfileBusyError(this.holder)), waitMs),
       };
       this.queue.push(w);
+      opts.signal?.addEventListener('abort', onAbort, { once: true });
       this.preemptCurrent();
     });
   }
@@ -128,3 +147,6 @@ export function profileLock(profileDir: string): ProfileLock {
   if (!lock) LOCKS.set(key, (lock = new ProfileLock()));
   return lock;
 }
+
+/** How long a game or a board creation waits for the profile (the keep-alive gives it back within seconds). */
+export const PROFILE_WAIT_MS = 30_000;
