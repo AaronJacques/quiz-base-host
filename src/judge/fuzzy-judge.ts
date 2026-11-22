@@ -16,6 +16,8 @@ import {
   similarity,
   spellingSimilarity,
   STOPWORDS,
+  referenceCore,
+  DATE_WORDS,
   stripDialogueDash,
   stripUrls,
   tokens,
@@ -222,16 +224,15 @@ const UNIT_NAMES: Record<string, string> = {
 const NUMBER_FILLER = new Set([...FILLER, 'im', 'jahr', 'anno', 'denke', 'so', 'es', 'ist', 'das', 'war', 'sind', 'und', 'minus']);
 
 /** Months and seasons: "Mai 1977" answers a question for the year with the year (only then they are fillers). */
-const YEAR_FILLER = new Set([
-  'januar', 'jaenner', 'februar', 'maerz', 'april', 'mai', 'juni', 'juli', 'august', 'september', 'oktober', 'november', 'dezember',
-  'fruehling', 'fruehjahr', 'sommer', 'herbst', 'winter',
-]);
+const YEAR_FILLER = DATE_WORDS;
 
 /** Estimates and limits: then a close number may count – the LLM decides. */
 const ESTIMATE = /\b(?:ca|circa|zirka|etwa|ungefaehr|rund|mehr als|ueber|bis zu|mindestens|hoechstens|knapp)\b|schaetz/;
 const ROMAN = /^(?=[IVXLCDM]{1,6}$)M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/;
 /** The question asks for a year (a short list on purpose – "wann" is enough). */
 const YEAR_QUESTION = /in welchem jahr|welches jahr|\bwann\b|im jahr|jahreszahl|\berschien|\bkam\b.*\braus\b/;
+/** … unless it asks for the day or the exact date ("An welchem Tag", "Wann genau", "Datum") – then the year is not enough. */
+const DATE_QUESTION = /\b(?:datum|tag|tage|genau|genaue|genauen|genauer|monat|uhrzeit|uhr)\b/;
 
 /** A text seen as numbers: the values and the words that are left besides units and fillers. */
 interface NumberView {
@@ -321,31 +322,34 @@ function joinedReadings(view: NumberView): number[] {
 export function judgeNumbers(question: string, reference: string, variants: string[], answer: string): JudgeResult | null {
   if (hasMathValue(answer)) return null;
   const q = normalize(question);
-  const ref = normalize(reference);
-  const refRaw = stripUrls(reference);
+  // "<short solution> - <explanation>": the rules judge against the short solution. Numbers of the explanation can only
+  // keep an answer from being wrong (`named`), never make one right or wrong.
+  const core = referenceCore(reference);
+  const ref = normalize(core);
+  const refRaw = stripUrls(core);
   // R0 – special cases.
   if (ESTIMATE.test(q) || ESTIMATE.test(ref) || /[~±≈]/.test(refRaw + question)) return null;
   if (/\d\s*[–-]\s*\d/.test(refRaw) || /\b(?:bis|zwischen)\b/.test(ref)) return null;
   if (refRaw.split(/[^A-Za-z]+/).some((t) => ROMAN.test(t))) return null;
   const aFound = numberParts(answer).numbers;
-  const rFound = numberParts(reference).numbers;
+  const rFound = numberParts(core).numbers;
   if ([...aFound, ...rFound].some((t) => t.ambiguous)) return null;
   if (aFound.some((t) => t.magnitude) !== rFound.some((t) => t.magnitude)) return null;
   // Words of the question say nothing ("acht Beine" for "Wie viele Beine …?") – if the solution uses them as well or is
   // only a number. Otherwise they may tell candidates apart ("Rocky 4 oder Rambo 2?" – "Rocky 2" is not "Rambo 2").
-  const refWords = new Set(tokens(reference));
-  const refOnlyNumber = numberView(reference, new Set()).onlyNumber;
-  const yearQuestion = YEAR_QUESTION.test(q);
+  const refWords = new Set(tokens(core));
+  const refOnlyNumber = numberView(core, new Set()).onlyNumber;
+  const yearQuestion = YEAR_QUESTION.test(q) && !DATE_QUESTION.test(q);
   const asked = new Set(tokens(question).filter((w) => refOnlyNumber || refWords.has(w)));
   // "Mai 1977" for 1977 – but if the solution names a month itself ("Mai 1977"), "Juni 1977" is not the same.
   const answerAsked = yearQuestion && ![...refWords].some((w) => YEAR_FILLER.has(w)) ? new Set([...asked, ...YEAR_FILLER]) : asked;
   const a = numberView(answer, answerAsked);
-  const r = numberView(reference, asked);
+  const r = numberView(core, asked);
   // "6 Wochen" for "6 Tage", "1,5 Stunden" for "90 Minuten": units differ – maybe a conversion, the LLM decides.
   if (a.units.size && r.units.size && !sameSet(a.units, r.units)) return null;
   const plainVariants = variants.filter((v) => !isFormula(v) && !hasMathValue(v)).map((v) => numberView(v, asked));
-  /** Every number the solution names, in brackets as well – an answer with one of them is never wrong here. */
-  const named = rFound.filter((t) => !t.partial && !t.article).map((t) => t.value);
+  /** Every number the note names, in brackets and explanations as well – an answer with one of them is never wrong here. */
+  const named = numberParts(reference).numbers.filter((t) => !t.partial && !t.article).map((t) => t.value);
   const isNamed = (x: number) => named.some((v) => sameValue(x, v));
   // "Finale 2014 ein Tor" for "Wie viele Tore fielen im Finale 2014?" (1): the article may be the answer – never wrong.
   const wrong = (xs: number[], reason: string) => (xs.some(isNamed) || a.droppedArticle ? null : result('wrong', reason));
@@ -387,10 +391,49 @@ export function judgeNumbers(question: string, reference: string, variants: stri
     }
   }
 
-  // R3 – the year in a longer solution ("25. Mai 1977"), when the question asks for the year.
-  if (yearQuestion && a.onlyNumber && a.values.length === 1 && isYear(a.values[0]!)) {
-    const years = numberParts(refRaw.replace(/\([^)]*\)/g, ' ')).numbers.filter((t) => !t.partial && isYear(t) && !t.words);
-    if (years.length === 1) return sameValue(years[0]!.value, a.values[0]!.value) ? right(a.values[0]!.value, 'Jahr stimmt') : wrong([a.values[0]!.value], 'falsches Jahr');
+  // R3 – the year in a longer solution ("25. Mai 1977", "1. September 1939"), when the question asks for the year: one
+  // year value in the short solution (said once or twice) decides. The answer may name day and month as well – if they
+  // differ from the solution's, the LLM decides; a different year is wrong either way.
+  if (yearQuestion) {
+    const sol = dateView(refRaw.replace(/\([^)]*\)/g, ' '), asked, true);
+    const ans = dateView(answer, asked, false);
+    if (sol.years.length === 1 && ans.years.length === 1 && !ans.rest) {
+      const y = ans.years[0]!;
+      if (!sameValue(y, sol.years[0]!)) return wrong([y], 'falsches Jahr');
+      if (ans.days.length && !sameSet(new Set(ans.days.map(String)), new Set(sol.days.map(String)))) return null;
+      if (ans.months.size && sol.months.size && !sameSet(ans.months, sol.months)) return null;
+      return right(y, 'Jahr stimmt');
+    }
   }
   return null;
+}
+
+/**
+ * A text as a date: its year values (each value once), days ("1." before a month), months/seasons, and whether anything
+ * else is said (`rest`: other numbers or words – then it is no plain date). `solution`: only years written as digits
+ * count, other words are allowed.
+ */
+function dateView(s: string, asked: ReadonlySet<string>, solution: boolean): { years: number[]; days: number[]; months: Set<string>; rest: boolean } {
+  const { words, numbers: found } = numberParts(s);
+  const years: number[] = [];
+  const days: number[] = [];
+  const months = new Set<string>();
+  let rest = false;
+  const covered = new Set<number>();
+  for (const t of found) {
+    for (let i = t.from; i <= t.to; i++) covered.add(i);
+    if (t.partial || t.article) continue;
+    const next = words[t.to + 1]?.replace(/\.+$/, '') ?? '';
+    if (isYear(t) && (!solution || !t.words)) {
+      if (!years.some((y) => sameValue(y, t.value))) years.push(t.value);
+    } else if (t.ordinal && Number.isInteger(t.value) && t.value >= 1 && t.value <= 31 && DATE_WORDS.has(next)) days.push(t.value);
+    else rest = true;
+  }
+  words.forEach((w, i) => {
+    const t = w.replace(/^\.+|\.+$/g, '');
+    if (!t || covered.has(i)) return;
+    if (DATE_WORDS.has(t)) months.add(t);
+    else if (!STOPWORDS.has(t) && !NUMBER_FILLER.has(t) && !asked.has(t) && t !== 'am') rest = true;
+  });
+  return { years, days, months, rest };
 }

@@ -28,11 +28,12 @@ async function until(fn: () => boolean, ms = 3000) {
 /** LLM whose answers the test releases one by one (`release`), or that fails (`fail`). */
 class GateLlm implements LlmClient {
   readonly name = 'gate';
-  calls: { prompt: string; done: boolean; resolve: (correct: boolean, reason?: string) => void; reject: (e: Error) => void }[] = [];
+  calls: { prompt: string; system: string; done: boolean; resolve: (correct: boolean, reason?: string) => void; reject: (e: Error) => void }[] = [];
   completeJson<S extends z.ZodType>(req: JsonRequest<S>): Promise<JsonResponse<z.infer<S>>> {
     return new Promise((res, rej) => {
       const call = {
         prompt: req.prompt,
+        system: req.system ?? '',
         done: false,
         resolve: (correct: boolean, reason = 'GEHEIMER-GRUND') => ((call.done = true), res({ data: { correct, reason } as z.infer<S>, costUsd: 0.0001, ms: 1 })),
         reject: (e: Error) => ((call.done = true), rej(e)),
@@ -414,7 +415,7 @@ describe('TafelquizController: judging starts while "Paris?" waits for "Ja"', ()
   });
 });
 
-// Numbers decide without the LLM; the LLM gets the parsed values for the cases left to it (rules R0–R3, cache v4).
+// Numbers decide without the LLM; the LLM gets the parsed values for the cases left to it (rules R0–R3, cache v5).
 describe('judging numbers in the cascade', () => {
   const year = 'In welchem Jahr kam der erste Star-Wars-Film, Eine neue Hoffnung, in die US-Kinos?';
   function kit(cacheContent?: object) {
@@ -478,6 +479,28 @@ describe('judging numbers in the cascade', () => {
     await p;
   });
 
+  // L-F1: the hint made day and explanation numbers look required („Lösung 1, 1939, 2“).
+  it('L-F1: the hint names the year of a date, not the day, and no numbers of the explanation', async () => {
+    const { numberHint } = await import('../src/judge/llm-judge.ts');
+    const note = '1. September 1939 - In Europa begann der Zweite Weltkrieg am 1. September 1939 mit dem von Adolf Hitler befohlenen Überfall auf Polen.';
+    expect(numberHint('1939', note, true)).toBe('Zahlenwerte (automatisch gelesen): Antwort 1939 | Lösung 1939');
+    expect(numberHint('1. September 1939', '1939')).toBe('Zahlenwerte (automatisch gelesen): Antwort 1939 | Lösung 1939');
+    expect(numberHint('der 4. Platz', '4')).toBe('Zahlenwerte (automatisch gelesen): Antwort 4 | Lösung 4'); // an ordinal that is no day stays
+  });
+
+  it('L-F1: the prompt says the year is enough for "Wann"/"In welchem Jahr" – rules version 5', async () => {
+    expect(JUDGE_RULES_VERSION).toBe(5);
+    const { kit: k, llm } = kit();
+    // A note fuzzy leaves open (two years) – the LLM gets the rule with it.
+    const p = k.judge.judge({ question: 'Wann begann der Krieg?', reference: '1939 in Europa, 1937 in Asien', answer: '1939' });
+    await until(() => llm.calls.length === 1);
+    expect(llm.calls[0]!.prompt).toContain('Lösung 1939, 1937');
+    expect(llm.calls[0]!.system).toContain('Mehr Genauigkeit als gefragt ist nie nötig');
+    expect(llm.calls[0]!.system).toContain('genügt das richtige Jahr');
+    llm.calls[0]!.resolve(true);
+    await p;
+  });
+
   it('B-F10/B-F11: the hint names both readings of "eine Million zwei" and of spoken "- 5" for a negative solution', async () => {
     const { numberHint } = await import('../src/judge/llm-judge.ts');
     expect(numberHint('eine Million zwei', '1,2 Millionen', true)).toBe('Zahlenwerte (automatisch gelesen): Antwort 1000002 oder 1200000 | Lösung 1200000');
@@ -490,28 +513,30 @@ describe('judging numbers in the cascade', () => {
     expect(numberHint('-5', '5', true)).toBe('Zahlenwerte (automatisch gelesen): Antwort -5 | Lösung 5');
   });
 
-  it('verdict keys carry rule version 4; createJudge removes older verdicts once and keeps the solutions', async () => {
-    expect(JUDGE_RULES_VERSION).toBe(4);
+  it('verdict keys carry rule version 5; createJudge removes older verdicts once and keeps the solutions', async () => {
+    expect(JUDGE_RULES_VERSION).toBe(5);
     const old = {
       verdicts: {
         'v3s␟in welchem jahr␟1977␟neunzehnhundertneunundsiebzig': { verdict: 'correct', method: 'llm', confidence: 0.9 },
         'v3␟frage␟paris␟paris': { verdict: 'correct', method: 'llm', confidence: 0.9 },
-        'v4␟frage␟paris␟pariss': { verdict: 'correct', method: 'llm', confidence: 0.9 },
-        'v4s␟frage␟paris␟parie': { verdict: 'correct', method: 'llm', confidence: 0.9 },
+        // live 2026-11-22 (rules v4): "1939" for the WW2 note judged wrong by the LLM – removed with v5
+        'v4s␟wann begann der 2. weltkrieg␟1. september 1939␟1939': { verdict: 'wrong', method: 'llm', confidence: 0.9 },
+        'v5␟frage␟paris␟pariss': { verdict: 'correct', method: 'llm', confidence: 0.9 },
+        'v5s␟frage␟paris␟parie': { verdict: 'correct', method: 'llm', confidence: 0.9 },
       },
       solutions: { 's2␟bildfrage␟img:https://x/y.png': { answer: 'Paris', confidence: 0.9 } },
     };
     const { kit: k, llm, cacheFile } = kit(old);
     const saved = JSON.parse(readFileSync(cacheFile, 'utf8'));
-    expect(Object.keys(saved.verdicts)).toEqual(['v4␟frage␟paris␟pariss', 'v4s␟frage␟paris␟parie']);
+    expect(Object.keys(saved.verdicts)).toEqual(['v5␟frage␟paris␟pariss', 'v5s␟frage␟paris␟parie']);
     expect(saved.solutions).toEqual(old.solutions);
-    // A new verdict is stored under v4.
+    // A new verdict is stored under v5.
     const p = k.judge.judge({ question: 'Hauptstadt?', reference: 'Paris', answer: 'Lutetia' });
     await until(() => llm.calls.length === 1);
     llm.calls[0]!.resolve(true);
     await p;
     const keys = Object.keys(JSON.parse(readFileSync(cacheFile, 'utf8')).verdicts);
-    expect(keys.filter((key) => key.includes('lutetia'))).toEqual(['v4␟hauptstadt␟paris␟lutetia']);
+    expect(keys.filter((key) => key.includes('lutetia'))).toEqual(['v5␟hauptstadt␟paris␟lutetia']);
   });
 
   it('B-F8: prune keeps the verdicts of the game master (operator) – they do not depend on the judging rules', () => {
@@ -529,8 +554,8 @@ describe('judging numbers in the cascade', () => {
     const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => (lines.push(String(chunk)), true));
     setLogLevel('info');
     try {
-      kit({ verdicts: { 'v5␟q␟a␟b': { verdict: 'correct', method: 'llm', confidence: 0.9 } }, solutions: {} });
-      expect(lines.join('')).toContain('Bewertungs-Cache: 1 alte Urteile (andere Regelversion als 4) entfernt');
+      kit({ verdicts: { 'v6␟q␟a␟b': { verdict: 'correct', method: 'llm', confidence: 0.9 } }, solutions: {} });
+      expect(lines.join('')).toContain(`Bewertungs-Cache: 1 alte Urteile (andere Regelversion als ${JUDGE_RULES_VERSION}) entfernt`);
     } finally {
       spy.mockRestore();
       setLogLevel('error');
