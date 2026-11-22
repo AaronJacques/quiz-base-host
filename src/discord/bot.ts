@@ -13,7 +13,7 @@ import { mention, type ChatGateway, type ChatMessage } from './gateway.ts';
 import { formatBoard, parsePick, parsePickWithContext } from './pick-parser.ts';
 import type { GuildStore } from './store.ts';
 import { VoiceBridge } from './voice-bridge.ts';
-import { confirmReply, confirmWaits, endAskReply, extractAnswer, hasStrongKeyword, isBuzz, mentionsCard, speechNorm, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
+import { asksBack, confirmReply, confirmWaits, endAskReply, extractAnswer, hasStrongKeyword, isBuzz, mentionsCard, speechNorm, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
 import { ANSWER_KEYWORD_LINE, CONFIRM_AGAIN_LINE, END_ASK_LINE, END_KEEP_LINE, gameOverLine, GOODBYE_LINE, pickHintLine, START_LINE, startMissingLine, VOICE_HELP } from '../voice/narration.ts';
 import type { LocalStt, SpeechToText } from '../voice/stt.ts';
 import type { Speaker } from '../voice/transport.ts';
@@ -704,12 +704,17 @@ export class QuizBot {
    */
   private onSpokenAnswer(game: ActiveGame, name: string, text: string, used?: () => void): void {
     const waiting = game.pending?.player === name ? game.pending : null;
-    const open = game.openKeyword?.player === name && Date.now() <= game.openKeyword.until;
+    const opened = game.openKeyword?.player === name && Date.now() <= game.openKeyword.until ? game.openKeyword : null;
     game.openKeyword = null;
     let said = extractAnswer(text);
+    // A question to the others in between ("Ben, was meinst du?") is no answer: the keyword stays open, nothing is asked.
+    if (said === null && opened && asksBack(text)) {
+      game.openKeyword = opened;
+      return log.debug(`🎙 ${name}: Frage nach dem Schlüsselwort – keine Antwort, höre weiter`);
+    }
     // "Meine Antwort ist" + pause + "Paris": the cut-off keyword's answer comes as its own utterance – unless that is
     // a plain "Ja"/"Nein" to the answer still waiting.
-    if (said === null && open && !(waiting && confirmReply(text, waiting.answer))) said = extractAnswer(`Meine Antwort ist ${text}`);
+    if (said === null && opened && !(waiting && confirmReply(text, waiting.answer))) said = extractAnswer(`Meine Antwort ist ${text}`);
     // The bare keyword without verb while "Paris?" waits ("Ja, meine finale Antwort") is a reply to it, below.
     // With its verb ("Genau, meine Antwort ist …") the answer is still to come: keep listening, never a "Ja".
     if (said !== null && (said.trim() || !waiting || hasStrongKeyword(text))) {
@@ -748,9 +753,9 @@ export class QuizBot {
     }
     const words = speechNorm(text).split(' ').filter(Boolean).length;
     if (pending) {
-      // Neither yes nor no ("Hä", "Hä?", "Was?"): ask once – not after "Ja, Moment" (they want time) or a longer question.
-      const question = text.trim().endsWith('?') && words > 1;
-      if (!pending.reasked && words <= CONFIRM_AGAIN_MAX_WORDS && !question && !confirmWaits(text)) {
+      // Neither yes nor no ("Hä", "Was?", "Ja, war das richtig?"): ask once, never ignore it silently – not after
+      // "Ja, Moment" (they want time) or a long sentence (talk with the others).
+      if (!pending.reasked && words <= CONFIRM_AGAIN_MAX_WORDS && !confirmWaits(text)) {
         pending.reasked = true;
         used?.();
         log.info(`🎙 ${name}: Rückfrage unklar (${words} Wörter) – frage nach`);
