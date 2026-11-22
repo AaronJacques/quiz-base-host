@@ -821,7 +821,7 @@ describe('hybrid in the bot: the leader on turn answers "Soll ich das Spiel been
   }, 30000);
 
   it('F8: "Genau, meine Antwort ist neun" replaces the old answer although Parakeet loses the keyword; unclear talk confirms nothing', async () => {
-    const r = rig((t) => parakeetSays(t).replace('meine Antwort', 'mein Antwort'));
+    const r = rig((t) => parakeetSays(t).replace('meine Antwort', 'eine Antwort'));
     try {
       await r.toAnswer();
       r.room.speak(ANNA, 'Meine Antwort ist zehn'); // Parakeet loses the keyword here too → whisper hears it again
@@ -1020,8 +1020,8 @@ describe('F1/F3/F4: Parakeet first, whisper for everything that is no answer (vo
   });
 
   it('F8: in the confirmation Parakeet\'s text counts only with the keyword – whisper\'s text stays otherwise, at most two recognitions', async () => {
-    // The reviewer's case: Parakeet writes "mein Antwort ist" – that would be a "Genau" (yes to the old answer).
-    const lost = hostRig(hybrid, { parakeet: (t) => t.replace('meine Antwort', 'mein Antwort') });
+    // The reviewer's case: Parakeet loses the keyword ("eine Antwort ist" – "mein Antwort ist" counts as the keyword since package C).
+    const lost = hostRig(hybrid, { parakeet: (t) => t.replace('meine Antwort', 'eine Antwort') });
     expect(await lost.say('confirm', 'Genau, meine Antwort ist Rom')).toEqual({ used: ['fast: Genau, meine Antwort ist Rom', 'parakeet: Genau, meine Antwort ist Rom'], bot: 'Genau, meine Antwort ist Rom' });
     expect(await lost.say('confirm', 'Nein, meine Antwort ist London')).toEqual({ used: ['fast: Nein, meine Antwort ist London', 'parakeet: Nein, meine Antwort ist London'], bot: 'Nein, meine Antwort ist London' });
     const r = hostRig(hybrid, { parakeet: (t) => t.replace('zehn', '10') });
@@ -1052,8 +1052,8 @@ describe('F1/F3/F4: Parakeet first, whisper for everything that is no answer (vo
 
   it('F12: Deepgram for answers only, cloud down – Parakeet as its fallback counts in the confirmation only with the keyword', async () => {
     const dg = { ...hybrid, stt: 'deepgram', sttCloudFor: ['answer'] };
-    const lost = (t: string) => t.replace('meine Antwort', 'mein Antwort');
-    // Cloud fails → Parakeet stands in and loses the keyword ("Genau, mein Antwort ist" = a yes to the old answer): whisper's text counts.
+    const lost = (t: string) => t.replace('meine Antwort', 'eine Antwort');
+    // Cloud fails → Parakeet stands in and loses the keyword ("Genau, eine Antwort ist" has no keyword): whisper's text counts.
     // After 3 failures the cloud pauses: Parakeet hears without a cloud try – same rule.
     const r = hostRig(dg, { cloudAllowed: true, fail: ['cloud'], parakeet: lost });
     for (let i = 0; i < 4; i++) {

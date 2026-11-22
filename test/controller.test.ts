@@ -993,3 +993,59 @@ describe('TafelquizController: the page watchdog does not delay the work (latenc
     }, 20000);
   }
 });
+
+// Package C: the answer time grows once by `confirmGraceSec` when a spoken answer is asked back ("Paris?").
+// Real timers, concurrent: answer time 1 s plus the usual 3 s slack = 4 s without grace.
+describe.concurrent('TafelquizController: grace for the spoken "Ja" (confirmGraceSec)', () => {
+  /** One question; `pending` / `answerAt` in ms after `host:await-answer`. Returns the verdict's answer and when it came. */
+  async function graceRun(game: Record<string, unknown>, pending: { at: number; player?: string }[], answerAt: number) {
+    const { bus, page, controller } = setup({ buzzerOnWrong: false, ...game });
+    let first = true;
+    let askedAt = 0;
+    let verdict: { answer: string; ms: number } | null = null;
+    bus.on('host:turn', ({ player }) => {
+      if (!first) return void page.endGame();
+      first = false;
+      setTimeout(() => bus.emit('player:pick', { player, col: 0, row: 0 }), 5);
+    });
+    const timers: NodeJS.Timeout[] = [];
+    bus.on('host:await-answer', ({ player }) => {
+      askedAt = Date.now();
+      for (const p of pending) timers.push(setTimeout(() => bus.emit('player:answer-pending', { player: p.player ?? player, answer: 'zehn' }), p.at));
+      timers.push(setTimeout(() => bus.emit('player:answer', { player, answer: 'zehn', spoken: true }), answerAt));
+    });
+    bus.on('host:verdict', (v) => (verdict ??= { answer: v.answer, ms: Date.now() - askedAt }));
+    await controller.run(new AbortController().signal);
+    timers.forEach(clearTimeout);
+    return verdict!;
+  }
+
+  it('an answer asked back shortly before the end gets the grace: the answer 4 s after the answer time still counts', async () => {
+    const v = await graceRun({ confirmGraceSec: 2 }, [{ at: 800 }], 5000);
+    expect(v.answer).toBe('zehn');
+  }, 15000);
+
+  it('without an answer asked back there is no grace', async () => {
+    const v = await graceRun({ confirmGraceSec: 2 }, [], 5000);
+    expect(v.answer).toBe('(keine Antwort)');
+    expect(v.ms).toBeLessThan(4800);
+  }, 15000);
+
+  it('confirmGraceSec 0: no grace, as before', async () => {
+    const v = await graceRun({ confirmGraceSec: 0 }, [{ at: 800 }], 5000);
+    expect(v.answer).toBe('(keine Antwort)');
+    expect(v.ms).toBeLessThan(4800);
+  }, 15000);
+
+  it('a second answer asked back does not extend any further (at most once by confirmGraceSec)', async () => {
+    const v = await graceRun({ confirmGraceSec: 2 }, [{ at: 800 }, { at: 3900 }, { at: 5500 }], 6800);
+    expect(v.answer).toBe('(keine Antwort)');
+    expect(v.ms).toBeGreaterThanOrEqual(5900);
+    expect(v.ms).toBeLessThan(6700);
+  }, 15000);
+
+  it('someone else\'s pending answer gives the person asked no grace', async () => {
+    const v = await graceRun({ confirmGraceSec: 2 }, [{ at: 800, player: 'Ben' }], 5000);
+    expect(v.answer).toBe('(keine Antwort)');
+  }, 15000);
+});

@@ -12,8 +12,8 @@ import { mention, type ChatGateway, type ChatMessage } from './gateway.ts';
 import { formatBoard, parsePick, parsePickWithContext } from './pick-parser.ts';
 import type { GuildStore } from './store.ts';
 import { VoiceBridge } from './voice-bridge.ts';
-import { confirmReply, endAskReply, extractAnswer, isBuzz, mentionsCard, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
-import { ANSWER_KEYWORD_LINE, END_ASK_LINE, END_KEEP_LINE, gameOverLine, GOODBYE_LINE, pickHintLine, START_LINE, startMissingLine, VOICE_HELP } from '../voice/narration.ts';
+import { confirmReply, confirmWaits, endAskReply, extractAnswer, isBuzz, mentionsCard, speechNorm, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
+import { ANSWER_KEYWORD_LINE, CONFIRM_AGAIN_LINE, END_ASK_LINE, END_KEEP_LINE, gameOverLine, GOODBYE_LINE, pickHintLine, START_LINE, startMissingLine, VOICE_HELP } from '../voice/narration.ts';
 import type { LocalStt, SpeechToText } from '../voice/stt.ts';
 import type { Speaker } from '../voice/transport.ts';
 import type { TextToSpeech } from '../voice/tts.ts';
@@ -87,8 +87,12 @@ const VOICE_IDLE_MS = 20 * 60_000;
 const END_ASK_MS = 20_000;
 /** Leaving after the game waits for the last announcements – at most this long, if speech hangs. */
 const GOODBYE_MAX_MS = 30_000;
-/** A spoken answer still waiting for "Ja" this close to the end of the answer time is submitted as said. */
+/** A spoken answer still waiting for "Ja" this close to the end of the time for "Ja" is submitted as said. */
 const PENDING_SUBMIT_MS = 1500;
+/** An unclear reply to "Paris?" of at most this many words gets one "Ja oder nein?". */
+const CONFIRM_AGAIN_MAX_WORDS = 4;
+/** Without keyword and without an answer waiting, utterances up to this many words are logged (no text, rule 8). */
+const NO_KEYWORD_LOG_WORDS = 6;
 /** Answers that are really "wait a second". */
 const STALLING = /^(äh+m*|ähm|hm+|mh+|moment|einen moment|warte|wart mal|lass mich (kurz )?(überlegen|nachdenken)|ich überlege|gute frage|ok|okay|also)$/;
 
@@ -119,11 +123,16 @@ interface ActiveGame {
   lastTurnSig: string;
   questionOpen: boolean;
   awaiting: HostEvents['host:await-answer'] | null;
-  /** When the current answer time runs out (epoch ms). */
+  /** When the current answer time runs out (epoch ms, D0). */
   answerDeadline: number;
-  /** A spoken answer that was repeated back ("Paris?") and waits for "Ja". */
-  pending: { player: string; answer: string } | null;
-  /** Submits a pending answer unconfirmed just before the answer time runs out. */
+  /** The latest moment for the "Ja" to an asked-back answer: the answer time plus `game.confirmGraceSec` (epoch ms). */
+  confirmUntil: number;
+  /**
+   * A spoken answer that was repeated back ("Paris?") and waits for "Ja": said at `at` (epoch ms);
+   * `reasked` once "Ja oder nein?" followed an unclear reply.
+   */
+  pending: { player: string; answer: string; at: number; reasked: boolean } | null;
+  /** Submits a pending answer unconfirmed (or drops it, `confirmAtDeadline` off) just before the time for "Ja" runs out. */
   pendingTimer?: NodeJS.Timeout;
   /** An answer was handed in and the verdict is not there yet. */
   judging: boolean;
@@ -374,7 +383,7 @@ export class QuizBot {
     const g: ActiveGame = {
       guildId: msg.guildId!, channelId: msg.channelId, leaderId: msg.author.id, board, session, lobby: null, phase: 'creating',
       lobbyPlayers: [], canStart: false, startRequested: false, players: [], turn: null, lastTurnSig: '', questionOpen: false,
-      awaiting: null, answerDeadline: 0, pending: null, judging: false, operatorNeeded: false, lastQuestion: null, lastAsk: null, lastVerdict: null, buzzerOpen: false, answered: new Set(), closeBuzzer: false,
+      awaiting: null, answerDeadline: 0, confirmUntil: 0, pending: null, judging: false, operatorNeeded: false, lastQuestion: null, lastAsk: null, lastVerdict: null, buzzerOpen: false, answered: new Set(), closeBuzzer: false,
       seen: new Map([[msg.author.id, { username: msg.author.username, displayName: msg.author.displayName }]]),
       hinted: new Set(), endAsk: null, pickContext: null, reasons: [], lobbyStatusSig: '', offs: [],
     };
@@ -639,7 +648,9 @@ export class QuizBot {
   /**
    * Spoken answers: only "Meine Antwort ist …" counts – everything else the answerer says
    * is thinking aloud. The bot repeats the answer once ("Paris?"); "Ja" submits it,
-   * "Nein" discards it, a new "Meine Antwort ist …" replaces it.
+   * "Nein" discards it, a new "Meine Antwort ist …" replaces it. An unclear short reply gets one
+   * "Ja oder nein?". The "Ja" has at least `game.confirmGraceSec` (up to the answer time plus that);
+   * then the answer counts as said (`game.confirmAtDeadline`) or lapses.
    */
   private onSpokenAnswer(game: ActiveGame, name: string, text: string, used?: () => void): void {
     const said = extractAnswer(text);
@@ -649,31 +660,65 @@ export class QuizBot {
       game.endAsk = null; // a new answer: the game goes on
       used?.();
       this.transcript(name, text);
-      // Time is (nearly) up – no time left for "Ja": the answer counts as said.
-      if (Date.now() >= game.answerDeadline - PENDING_SUBMIT_MS) {
+      const now = Date.now();
+      // Time is (nearly) up, grace included – no time left for "Ja": the answer counts as said.
+      if (now >= game.confirmUntil - PENDING_SUBMIT_MS) {
         void this.speak(`${answer}.`, 'confirm');
         return this.submitAnswer(game, name, answer, true);
       }
-      game.pending = { player: name, answer: answer.slice(0, 200) };
+      const pending = { player: name, answer: answer.slice(0, 200), at: now, reasked: false };
+      game.pending = pending;
       void this.speak(`${answer}?`, 'confirm', true);
-      // Judging may start now – "Ja" then takes the result. Only the controller listens (nothing public, rule 5).
-      game.session.bus.emit('player:answer-pending', { player: name, answer: game.pending.answer.slice(0, 200) });
+      this.armPending(game, pending);
+      // Judging may start now – "Ja" then takes the result. Only the controller listens (nothing public, rule 5);
+      // it also gives the answer time its grace for "Ja".
+      game.session.bus.emit('player:answer-pending', { player: name, answer: pending.answer });
       return;
     }
-    const reply = game.pending?.player === name ? confirmReply(text) : null;
-    if (reply) {
+    const pending = game.pending?.player === name ? game.pending : null;
+    const reply = pending ? confirmReply(text, pending.answer) : null;
+    if (pending && reply) {
       used?.();
       this.transcript(name, text);
-      if (reply === 'yes') return this.submitAnswer(game, name, game.pending!.answer, true);
-      game.pending = null;
+      if (reply === 'yes') return this.submitAnswer(game, name, pending.answer, true);
+      this.dropPending(game);
       return void this.speak('Okay. Deine Antwort?', 'confirm', true);
     }
-    // Thinking aloud. Remind once per game, in case someone forgets the keyword.
+    const words = speechNorm(text).split(' ').filter(Boolean).length;
+    if (pending) {
+      // Neither yes nor no ("Hä", "Paris?"): ask once – not after "Moment" (they want time) or a question.
+      if (!pending.reasked && words <= CONFIRM_AGAIN_MAX_WORDS && !text.trim().endsWith('?') && !confirmWaits(text)) {
+        pending.reasked = true;
+        used?.();
+        log.info(`🎙 ${name}: Rückfrage unklar (${words} Wörter) – frage nach`);
+        void this.speak(CONFIRM_AGAIN_LINE, 'confirm', true);
+      } else log.debug(`🎙 ${name}: Rückfrage – weder Ja noch Nein (${words} Wörter)`);
+      return;
+    }
+    // Thinking aloud – no text in the log (rule 8). Remind once per game, in case someone forgets the keyword.
+    if (words && words <= NO_KEYWORD_LOG_WORDS) log.info(`🎙 ${name}: ohne Schlüsselwort (${words} Wörter)`);
     const hint = `answer-keyword:${name}`;
-    if (!game.pending && !game.hinted.has(hint) && text.split(/\s+/).length <= 5 && !text.trim().endsWith('?')) {
+    if (!game.hinted.has(hint) && text.split(/\s+/).length <= 5 && !text.trim().endsWith('?')) {
       game.hinted.add(hint);
       void this.speak(ANSWER_KEYWORD_LINE, 'confirm', true);
     }
+  }
+
+  /**
+   * The time for "Ja" to `p`: at least the grace after it was said, at least the answer time, never past
+   * `confirmUntil` – minus `PENDING_SUBMIT_MS`. With grace 0 that is the answer time, as before.
+   */
+  private armPending(g: ActiveGame, p: NonNullable<ActiveGame['pending']>): void {
+    clearTimeout(g.pendingTimer);
+    const a = g.awaiting;
+    const graceMs = g.confirmUntil - g.answerDeadline;
+    const due = Math.min(g.confirmUntil, Math.max(g.answerDeadline, p.at + graceMs)) - PENDING_SUBMIT_MS;
+    g.pendingTimer = setTimeout(() => {
+      if (g.pending !== p || g.awaiting !== a) return;
+      // Off: the answer lapses silently – the controller's timeout gives the verdict.
+      if (g.session.rules.confirmAtDeadline) this.submitAnswer(g, p.player, p.answer, true);
+      else this.dropPending(g);
+    }, Math.max(0, due - Date.now()));
   }
 
   private submitAnswer(game: ActiveGame, name: string, answer: string, spoken: boolean): void {
@@ -816,11 +861,9 @@ export class QuizBot {
       g.operatorNeeded = false;
       g.buzzerOpen = false;
       g.answerDeadline = Date.now() + a.timeoutSec * 1000;
-      this.dropPending(g);
-      // Time is nearly up and an answer is still waiting for "Ja" → take it as said.
-      g.pendingTimer = setTimeout(() => {
-        if (g.awaiting === a && g.pending?.player === a.player) this.submitAnswer(g, a.player, g.pending.answer, true);
-      }, Math.max(0, a.timeoutSec * 1000 - PENDING_SUBMIT_MS));
+      // Room for the "Ja" after the answer time – the controller waits as long once an answer is asked back.
+      g.confirmUntil = g.answerDeadline + g.session.rules.confirmGraceSec * 1000;
+      this.dropPending(g); // a spoken answer arms its own timer for "Ja" (armPending)
       const how = this.voice ? 'Schreib sie hier rein oder sag „Meine Antwort ist …“' : 'Schreib sie einfach hier rein';
       this.queue(ch, `✍️ ${this.who(g, a.player)}, deine Antwort? ${how} (${a.timeoutSec} s).`);
     });
@@ -1398,8 +1441,28 @@ export class QuizBot {
       }
     }
 
+    // "Quizmaster, meine Antwort ist Paris" / "Quizmaster, ja" from the person answering is the answer, not a command.
+    // A "no" only when it is no command as well: "Quizmaster, stopp" still asks "Spiel beenden?" (the answer stays open).
+    // Everybody else keeps the command ("Quizmaster, wiederhole die Frage" stays one: no keyword, no yes/no).
+    const answerer = g?.phase === 'running' && g.awaiting ? this.nameFor(g, speaker.id) : null;
+    let asAnswer = false;
+    if (rest !== null && g && answerer && answerer === g.awaiting?.player) {
+      const pend = g.pending?.player === answerer ? g.pending.answer : null;
+      const isCommand = voiceCommand(rest, { question, categories: g.turn?.categories }) !== null;
+      const answers = (t: string) => {
+        if (extractAnswer(t) !== null) return true;
+        const reply = pend === null ? null : confirmReply(t, pend);
+        return reply === 'yes' || (reply === 'no' && !isCommand);
+      };
+      if (answers(text)) asAnswer = true;
+      else if (answers(rest)) {
+        asAnswer = true;
+        msg.content = rest; // a custom wake word the answer patterns do not know
+      }
+    }
+
     // 1) "Quizmaster, …" commands.
-    if (rest !== null) {
+    if (rest !== null && !asAnswer) {
       transcript();
       const cmd = voiceCommand(rest, { question, categories: g?.turn?.categories });
       if (!cmd) return void this.speak('Das habe ich nicht verstanden. Sag: Quizmaster, Hilfe.');
@@ -1419,7 +1482,7 @@ export class QuizBot {
     }
 
     // 2) Buzzer by voice.
-    if (g?.phase === 'running' && v.bridge.buzzerOpen && isBuzz(text)) {
+    if (!asAnswer && g?.phase === 'running' && v.bridge.buzzerOpen && isBuzz(text)) {
       const name = this.nameFor(g, speaker.id);
       if (!name) return;
       transcript();
@@ -1464,7 +1527,7 @@ export class QuizBot {
 
 /** Strips spoken fillers ("Ähm, ich glaube das ist …"); '' if it was only stalling. */
 export function cleanSpokenAnswer(text: string): string {
-  const prefix = /^\s*(äh+m*|ähm|hm+|also|okay|ok|ja|na ja|naja|ich (glaube|denke|würde sagen|sage|tippe auf|tippe)|meine antwort ist|die antwort ist|das ist|das sind|das war|es ist|ist es)([,.!…:\s]+|$)/i;
+  const prefix = /^\s*(äh+m*|ähm|hm+|also|okay|ok|ja|na ja|naja|ich (glaube|denke|würde sagen|sage|tippe auf|tippe)|meine antwort ist|mein antwort ist|meiner antwort ist|die antwort ist|das ist|das sind|das war|es ist|ist es)([,.!…:\s]+|$)/i;
   let t = text.trim();
   for (let prev = ''; prev !== t && prefix.test(t) && t.replace(prefix, '').trim(); ) {
     prev = t;

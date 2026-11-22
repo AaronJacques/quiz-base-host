@@ -9,6 +9,9 @@ import type { TafelquizPort } from '../../site/tafelquiz/page.ts';
 import type { GameMode } from '../mode.ts';
 import { scoreFor } from './rules.ts';
 
+/** Lets a wait move its deadline: call `to(ms)` with the new total from the start; returns the unsubscribe. */
+type Extend = (to: (ms: number) => void) => () => void;
+
 /** While waiting for a pick, the reminder rules are read again this often – a change (also from "aus") counts within it. */
 const REMINDER_RECHECK_MS = 30_000;
 /** "No time limit" for the pick listener of a turn (the longest timer Node allows); the turn's end removes it. */
@@ -312,11 +315,26 @@ export class TafelquizController implements GameMode {
 
     // A spoken answer waiting for "Ja" is judged already (no operator stage, nothing public) – "Ja" then takes the result.
     const scope = `${this.questionId}|${player}`;
-    const prejudging = this.judgeEarly(player, scope, q, referencePromise, hints, media);
+    const prejudging = this.judgeEarly(scope, q, referencePromise, hints, media);
+    // Speech: an answer asked back ("Paris?") gets up to `confirmGraceSec` more for its "Ja" – once per ask, never more.
+    // The bot submits it before this deadline (`confirmAtDeadline`); the clock on quiz-base is already at 0 then.
+    const baseMs = timeoutSec * 1000 + 3000;
+    const graceMs = this.d.game.confirmGraceSec * 1000;
+    let extendTo: ((ms: number) => void) | null = null;
+    // One listener for both: early judging and the grace (only the controller listens to this event).
+    const offPending = this.d.bus.on('player:answer-pending', (p) => {
+      if (p.player !== player) return;
+      prejudging.pending(p.answer);
+      if (graceMs > 0) extendTo?.(baseMs + graceMs);
+    });
     let outcome: AnswerOutcome;
     try {
-      outcome = await this.collectAnswer(player, timeoutSec * 1000 + 3000);
+      outcome = await this.collectAnswer(player, baseMs, (to) => {
+        extendTo = to;
+        return () => void (extendTo = null);
+      });
     } finally {
+      offPending();
       prejudging.stop(); // before judging: no early judgement may start after this
     }
     if (this.signal.aborted) return false; // game ended: no verdict, no points, no clicks
@@ -516,11 +534,12 @@ export class TafelquizController implements GameMode {
    * While `player` is asked back about a spoken answer ("Paris?"), judge it in the background: fuzzy → cache → LLM,
    * never the operator, nothing on the bus. At most one at a time per question; an answer that comes while one runs
    * waits, and only the newest one is judged after it. Nothing for typed answers (no `player:answer-pending`) or
-   * answers without a letter or digit. Stops listening with `stop()`; a running judgement may still fill the cache.
+   * answers without a letter or digit. `pending(answer)` takes each `player:answer-pending` of `player` (the caller
+   * listens); after `stop()` nothing starts any more – a running judgement may still fill the cache.
    */
-  private judgeEarly(player: string, scope: string, q: QuestionState, referencePromise: Promise<string | null>, hints: string[], media: string | null): { stop(): void } {
+  private judgeEarly(scope: string, q: QuestionState, referencePromise: Promise<string | null>, hints: string[], media: string | null): { pending(answer: string): void; stop(): void } {
     const judge = this.d.judge.judge;
-    if (!judge.prejudge) return { stop() {} };
+    if (!judge.prejudge) return { pending() {}, stop() {} };
     const gate = this.early;
     let stopped = false;
     const start = (answer: string) => {
@@ -539,41 +558,66 @@ export class TafelquizController implements GameMode {
           next?.();
         });
     };
-    const off = this.d.bus.on('player:answer-pending', (p) => {
-      if (stopped || p.player !== player || !/[\p{L}\p{N}]/u.test(p.answer)) return;
-      if (gate.running) gate.next = () => start(p.answer);
-      else start(p.answer);
-    });
     return {
+      pending: (answer) => {
+        if (stopped || !/[\p{L}\p{N}]/u.test(answer)) return;
+        if (gate.running) gate.next = () => start(answer);
+        else start(answer);
+      },
       stop: () => {
         stopped = true;
-        off();
       },
     };
   }
 
-  /** Wait for the answer of `player`, or an operator decision; aborts if the question gets closed in the browser. */
-  private async collectAnswer(player: string, timeoutMs: number): Promise<AnswerOutcome> {
-    const res = await this.whilePage((x) => x.phase === 'question', (signal) => this.collectAnswerRaw(player, timeoutMs, signal));
+  /**
+   * Wait for the answer of `player`, or an operator decision; aborts if the question gets closed in the browser.
+   * `extend` may move the deadline (ms from now on) later – once; it returns its unsubscribe.
+   */
+  private async collectAnswer(player: string, timeoutMs: number, extend?: Extend): Promise<AnswerOutcome> {
+    const res = await this.whilePage((x) => x.phase === 'question', (signal) => this.collectAnswerRaw(player, timeoutMs, signal, extend));
     return res === 'page-changed' ? { kind: 'skip' } : res;
   }
 
-  private async collectAnswerRaw(player: string, timeoutMs: number, outer: AbortSignal): Promise<AnswerOutcome> {
+  private async collectAnswerRaw(player: string, timeoutMs: number, outer: AbortSignal, extend?: Extend): Promise<AnswerOutcome> {
     const ac = new AbortController();
     const onAbort = () => ac.abort();
     outer.addEventListener('abort', onAbort);
+    const start = Date.now();
+    let timer: NodeJS.Timeout | undefined;
+    let extended = false;
+    let offExtend = () => {};
+    const timeoutP = new Promise<null>((resolve) => {
+      const arm = (ms: number) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => resolve(null), Math.max(0, start + ms - Date.now()));
+      };
+      arm(timeoutMs);
+      offExtend = extend?.((ms) => {
+        if (extended || ms <= timeoutMs || ac.signal.aborted) return;
+        extended = true;
+        arm(ms);
+      }) ?? offExtend;
+      ac.signal.addEventListener('abort', () => resolve(null), { once: true });
+    });
+    // The deadline is the timer above; the waits only end on their event or the abort.
     const answerP = this.d.bus
-      .waitFor('player:answer', (a) => a.player === player || a.player === '@operator', timeoutMs, ac.signal)
+      .waitFor('player:answer', (a) => a.player === player || a.player === '@operator', NO_TIMEOUT_MS, ac.signal)
       .then((a): AnswerOutcome | null => (a ? { kind: 'answer', answer: a.answer, spoken: a.spoken } : null));
     const opP = this.d.bus
-      .waitFor('operator:command', (c) => ['richtig', 'falsch', 'r', 'f', 'skip'].includes(c.command), timeoutMs, ac.signal)
+      .waitFor('operator:command', (c) => ['richtig', 'falsch', 'r', 'f', 'skip'].includes(c.command), NO_TIMEOUT_MS, ac.signal)
       .then((c: HostEvents['operator:command'] | null): AnswerOutcome | null =>
         !c ? null : c.command === 'skip' ? { kind: 'skip' } : { kind: 'override', correct: c.command.startsWith('r') },
       );
-    const first = await Promise.race([answerP, opP]);
-    ac.abort();
-    outer.removeEventListener('abort', onAbort);
-    return first ?? { kind: 'timeout' };
+    try {
+      const first = await Promise.race([answerP, opP, timeoutP]);
+      return first ?? { kind: 'timeout' };
+    } finally {
+      clearTimeout(timer);
+      offExtend();
+      ac.abort();
+      outer.removeEventListener('abort', onAbort);
+    }
   }
 
   /** Host note → correct MC option → cached/vision-solved answer → null. */

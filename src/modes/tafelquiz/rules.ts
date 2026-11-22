@@ -45,6 +45,8 @@ export const RULES: RuleSpec[] = [
   { key: 'pickReminderRepeatSec', names: ['erinnerungstakt', 'nacherinnerung'], kind: 'seconds', off: true, label: 'Weitere Erinnerungen (nur im Chat)' },
   { key: 'pickHint', names: ['kartenhinweis', 'hinweis'], kind: 'bool', label: 'Hinweis „Welche Karte?“ (Sprache)' },
   { key: 'revealPauseSolvedSec', names: ['pause', 'richtigpause'], kind: 'seconds', min: 0, max: 30, decimal: true, label: 'Pause nach richtiger Antwort' },
+  { key: 'confirmGraceSec', names: ['nachfrist', 'jazeit'], kind: 'seconds', off: true, min: 1, max: 20, label: 'Nachfrist für das „Ja“ (Sprache)' },
+  { key: 'confirmAtDeadline', names: ['autoabgabe'], kind: 'bool', label: 'Unbestätigte Antwort bei Zeitende werten (Sprache)' },
 ];
 
 export function findRule(name: string): RuleSpec | undefined {

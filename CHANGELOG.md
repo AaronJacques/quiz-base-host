@@ -28,6 +28,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/de/1.1.0/), Versionierung:
   - Sprache funktioniert auch, wenn Voice in einem anderen Channel gestartet wurde
   - ein Browserfehler beendet den Prozess nicht mehr
 
+- **Sprache: keine verlorenen Antworten mehr bei Schlüsselwort und „Ja“ (aus dem Spiel vom 20.11.):**
+  - „Nein, mein Antwort ist Hans Zimmer“ in der Rückfrage ist jetzt die neue Antwort „Hans Zimmer“ (vorher ein „Nein“, und die Antwort war weg). Das Schlüsselwort gilt auch als „mein / meiner / Maine Antwort ist …“, „Meine Antwort es …“, nach „Ich korrigiere“, „Quatsch“, „Ach“ und nach dem Rufnamen: „Quizmaster, meine Antwort ist …“ und „Quizmaster, ja“ der antwortenden Person sind Antwort bzw. Bestätigung, kein „nicht verstanden“. Keine Antwort bleiben „Eine Antwort ist …“, „Meine Antwort war …“, „Die Antworten sind …“.
+  - Ja/Nein in der Rückfrage nach einer festen Liste: Ein „Ja“ zählt nur, wenn danach nichts anderes kommt („Ja, warte“ und „Ja, aber …“ sind kein Ja; „Ja, das ist meine Antwort“ und „Ja, Paris“ schon). „Warte“ und „Moment“ verwerfen die Antwort nicht mehr. Bei etwas Unklarem fragt der Bot einmal „Ja oder nein?“.
+  - Neue **Nachfrist für das „Ja“**: Nach „Paris?“ bleiben bis zu 8 s, auch über die Antwortzeit hinaus (Regel `nachfrist`, `game.confirmGraceSec`, `aus` = altes Verhalten). Ob eine unbestätigte Antwort danach zählt, ist jetzt einstellbar (Regel `autoabgabe`, `game.confirmAtDeadline`, Standard an wie bisher).
+  - Ein kurzes „Ja“ (ab 250 ms, `voice.minConfirmSpeechMs`) wird in der Rückfrage gehört. Was von der antwortenden Person verworfen wird (zu kurz, zu leise, nichts erkannt, ohne Schlüsselwort, unklare Rückfrage), steht ohne Text auf `info` im Log.
+
 ### Geändert
 - **Sprache: Bewertung schon bei der Rückfrage.** Fragt der Bot eine gesprochene Antwort zurück („Paris?“), bewertet er sie bereits (Fuzzy → Cache → LLM, nie die Spielleitung); das „Ja“ nimmt dieses Ergebnis, statt erst dann das LLM zu fragen (gemessen 1,2–3,0 s je LLM-Antwort). Vor dem „Ja“ wird nichts davon sichtbar (neues privates Bus-Ereignis `player:answer-pending`, Log nur auf `debug`). Höchstens eine Vorab-Bewertung gleichzeitig je Frage und höchstens zwei Vorab-LLM-Aufrufe je Frage und Person (danach erst beim „Ja“); eine ersetzte Antwort zählt nicht, kostet aber einen LLM-Aufruf (im Endstand als `prejudge`). Ein Fehler der Vorab-Bewertung führt beim „Ja“ zum normalen Versuch wie bisher. Getippte Antworten unverändert.
 - **Schnellere Reaktion nach der Erkennung** (gemessen, siehe Untersuchung „latency-logic“):

@@ -200,18 +200,32 @@ export function isBuzz(text: string): boolean {
 
 /**
  * Fillers that may come before the answer keyword ("Okay, äh, meine Antwort ist …"). Confirmation words
- * belong here too: "Genau, meine Antwort ist zehn" is a new answer, not the "Ja" to the old one.
+ * belong here too: "Genau, meine Antwort ist zehn" is a new answer, not the "Ja" to the old one. So do
+ * corrections ("Ich korrigiere, meine Antwort ist …", "Nein, mein Antwort ist …"; "ähm nein" and "nee warte"
+ * are covered word by word) and the default wake words ("Quizmaster, meine Antwort ist …" from the person
+ * answering). Custom wake words from `voice.wakeWords` are not stripped here – accepted, they are rare.
  */
-const ANSWER_LEAD = String.raw`(?:(?:äh+m*|ähm|hm+|okay|ok|also|gut|na gut|ja|jap|jep|jo|genau|richtig|korrekt|stimmt|exakt|klar|passt|nein|ne|nee|nö|doch|warte|moment|sorry|dann|so|und)[\s,.!…:–-]*)*`;
+const ANSWER_LEAD = String.raw`(?:(?:(?:hey\s+|hallo\s+)?quiz\s*(?:master|meister|host)|ich korrigiere(?:\s+mich)?|korrektur|quatsch|äh+m*|ähm|hm+|okay|ok|also|gut|na gut|ja|jap|jep|jo|genau|richtig|korrekt|stimmt|exakt|klar|passt|nein|ne|nee|nö|doch|warte|moment|sorry|dann|so|und|ach|oh|oder|halt)[\s,.!…:–-]*)*`;
+/**
+ * The possessive before "Antwort" as speech recognition writes it: "mein Antwort", "meiner Antwort", "Maine Antwort".
+ * Never "eine" – "Eine Antwort ist schwer" is no answer.
+ */
+const ANSWER_POSS = String.raw`(?:meine|meiner|meinen|meinem|mein|maine|unsere|unser)`;
+/**
+ * The verb after "Antwort". "es" ("Meine Antwort es Paris", a misheard "ist") only with something after it –
+ * at the very end it is swallowed, so "Meine Antwort es" waits for the answer instead of taking "es".
+ * Never "war": "Meine Antwort war falsch" is thinking aloud.
+ */
+const ANSWER_VERB = String.raw`(?:ist|is|isst|lautet|wäre|heißt|sei|es(?=[\s,.:;!…–-]+[\p{L}\p{N}]|[\s,.:;!?…–-]*$))`;
 /** "Meine Antwort ist", "Antwort:", "Die Antwort lautet", "Meine finale Antwort ist", "Ich antworte mit" … */
-const ANSWER_KEY = String.raw`(?:(?:meine|unsere|die)\s+)?(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort(?:\s+(?:ist|is|lautet|wäre|heißt|sei))?|ich antworte(?:\s+mit)?`;
+const ANSWER_KEY = String.raw`(?:(?:${ANSWER_POSS}|die)\s+)?(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort(?:\s+${ANSWER_VERB}|(?!\s+(?:war|waren)(?![\p{L}\p{N}])))|ich antworte(?:\s+mit)?`;
 const ANSWER_RE = new RegExp(String.raw`^\s*${ANSWER_LEAD}(?:${ANSWER_KEY})(?=[\s,.:;!?…–-]|$)[\s,.:;!…–-]*(.*)$`, 'isu');
 
 /**
  * Later keywords in the same utterance – stricter (possessive or article *and* verb), so "die Antwort auf
  * alles" stays part of an answer.
  */
-const ANSWER_KEY_AGAIN = String.raw`(?:meine|unsere)\s+(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort\s+(?:ist|is|lautet|wäre|heißt|sei)|die\s+(?:(?:end)?gültige\s+|finale\s+|richtige\s+)?antwort\s+(?:ist|lautet|wäre)|ich antworte mit`;
+const ANSWER_KEY_AGAIN = String.raw`${ANSWER_POSS}\s+(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort\s+(?:ist|is|isst|lautet|wäre|heißt|sei|es(?=[\s,.:;!…–-]+[\p{L}\p{N}]))|die\s+(?:(?:end)?gültige\s+|finale\s+|richtige\s+)?antwort\s+(?:ist|lautet|wäre)|ich antworte mit`;
 const ANSWER_AGAIN_RE = new RegExp(String.raw`(?:^|[\s,.;:!?…–-])(?:${ANSWER_KEY_AGAIN})(?=[\s,.:;!?…–-]|$)[\s,.:;!…–-]*`, 'giu');
 /**
  * A correction inside the answer: "Nabu, ach nein, Tatooine", "Nabu – nein, Tatooine", "ich meine Tatooine".
@@ -263,16 +277,54 @@ export function isEcho(heard: string, said: string): boolean {
   return hits / h.length >= 0.8 && hits / s.size >= 0.5;
 }
 
-/** The reply to "Paris?" – yes, no, or something else (null). */
-export function confirmReply(text: string): 'yes' | 'no' | null {
-  const s = speechNorm(text);
-  if (!s || s.split(' ').length > 6) return null;
+/** Fillers and the wake word in front of the reply to "Paris?" ("Äh, ja", "Quizmaster, ja"). */
+const CONFIRM_LEAD = /^(?:(?:äh+m*|ähm|hm+|also|(?:hey |hallo )?quiz ?(?:master|meister|host))(?: |$))+/u;
+const NO_FIRST = new Set(['nein', 'ne', 'nee', 'nö', 'nä', 'falsch', 'stopp', 'stop', 'halt', 'korrektur', 'anders', 'nicht', 'no', 'nope']);
+const NO_ANYWHERE = new Set(['nicht', 'nein', 'nee', 'nö', 'falsch']);
+/** "Warte", "Moment": the answer stays open – no "Ja", no "Nein", and no asking back. */
+const WAIT_FIRST = new Set(['warte', 'wart', 'moment', 'sekunde', 'augenblick']);
+const YES_FIRST = new Set(
+  ('ja jaa jaaa jaha jap japp jep jepp jo joa jup jupp jawohl jawoll genau richtig korrekt stimmt passt bestätigt bestätige ' +
+    'yes yeah yep yup klar sicher logo exakt absolut definitiv natürlich eingeloggt einloggen').split(' '),
+);
+const YES_PHRASES = ['so ist es', 'das ist es', 'das ist sie', 'das stimmt', 'das passt', 'auf jeden fall'];
+/** Words that may follow the "Ja" without making it something else ("Ja, das ist meine Antwort", "Ja, genau, bitte"). */
+const YES_REST = new Set(
+  ('ja genau bitte klar richtig korrekt stimmt so ist es das sie meine antwort die final endgültig absolut sicher danke gerne ' +
+    'doch logo exakt jawohl passt auf jeden fall natürlich bestätigt').split(' '),
+);
+
+/** The reply to "Paris?" as words, without fillers and wake word in front; [] if nothing is left. */
+function confirmWords(text: string): string[] {
+  return speechNorm(text).replace(CONFIRM_LEAD, '').split(' ').filter(Boolean);
+}
+
+/**
+ * The reply to "Paris?" – yes, no, or something else (null). `pending` is the answer waiting for "Ja":
+ * its words may come along ("Ja, Paris"). A "Ja" only counts with nothing else after it ("Ja, warte",
+ * "Ja, aber …", "Ja oder Rom" are null). A new answer with the keyword is null – it is handled as an answer.
+ * "Okay", "Mhm", "Doch" alone are no "Ja".
+ */
+export function confirmReply(text: string, pending = ''): 'yes' | 'no' | null {
+  const all = speechNorm(text);
+  if (!all || all.split(' ').length > 6) return null;
   if (extractAnswer(text) !== null) return null; // "Genau, meine Antwort ist …" brings a new answer
-  const end = String.raw`(?=\s|$)`;
-  if (new RegExp(`^(nein|ne|nee|nö|nä|falsch|stopp|stop|halt|warte|moment|doch nicht|nicht|korrektur|anders)${end}`, 'u').test(s)) return 'no';
-  if (/(^|\s)(nicht|nein)(\s|$)/.test(s)) return 'no';
-  if (new RegExp(`^(ja|jap|jep|jo|joa|jawohl|genau|richtig|korrekt|stimmt|passt|bestätigt|bestätige|yes|yep|klar|sicher|logo|exakt|eingeloggt|einloggen|so ist es|das ist es|das ist sie)${end}`, 'u').test(s)) return 'yes';
+  const words = confirmWords(text);
+  if (!words.length) return null;
+  const own = new Set(speechNorm(pending).split(' ').filter(Boolean));
+  if (NO_FIRST.has(words[0]!) || words.some((w) => NO_ANYWHERE.has(w) && !own.has(w))) return 'no';
+  if (WAIT_FIRST.has(words[0]!)) return null;
+  const s = words.join(' ');
+  const phrase = YES_PHRASES.find((p) => s === p || s.startsWith(`${p} `));
+  const rest = phrase ? words.slice(phrase.split(' ').length) : YES_FIRST.has(words[0]!) ? words.slice(1) : null;
+  if (rest && rest.every((w) => YES_REST.has(w) || own.has(w))) return 'yes';
   return null;
+}
+
+/** "Warte", "Moment", "Sekunde" in reply to "Paris?": the person wants time – the bot does not ask "Ja oder nein?". */
+export function confirmWaits(text: string): boolean {
+  const first = confirmWords(text)[0];
+  return !!first && WAIT_FIRST.has(first);
 }
 
 const ORDINALS: Record<string, number> = {

@@ -51,12 +51,19 @@ Wer im Voice-Channel ist und auf quiz-base **denselben Namen** wie in Discord be
 
 **Ohne Rufname** – nur von der Person, die gerade dran ist:
 - Karte: „Sport für 200“, „Geschichte dreihundert“, „die zweite Kategorie für 100“
-- **Antwort nur mit Schlüsselwort**, wenn er dich fragt: „Meine Antwort ist …“, „Die Antwort lautet …“, „Meine finale Antwort ist …“, „Antwort: …“, „Ich antworte mit …“ (Füllwörter davor wie „Okay, äh“ sind egal). Alles andere ist lautes Nachdenken und zählt nicht. Der Bot wiederholt die Antwort einmal kurz („42 Kilometer?“):
-  - „Ja“ / „Genau“ / „Richtig“ → abgegeben
-  - „Nein“ / „Warte“ → verworfen, neu antworten
+- **Antwort nur mit Schlüsselwort**, wenn er dich fragt: „Meine Antwort ist …“, „Die Antwort lautet …“, „Meine finale Antwort ist …“, „Antwort: …“, „Ich antworte mit …“ (Füllwörter davor wie „Okay, äh“ sind egal). Alles andere ist lautes Nachdenken und zählt nicht.
+  - So schreibt die Spracherkennung das Schlüsselwort oft, und es zählt auch: „mein / meiner / meinen / meinem / Maine Antwort ist …“, „Meine Antwort es Paris“ (verhörtes „ist“, nur wenn danach noch etwas kommt), „Meine Antwort ist: …“. Davor dürfen auch Korrekturen stehen („Nein, mein Antwort ist Hans Zimmer“, „Ich korrigiere, meine Antwort ist …“, „Ach, quatsch, …“) und der Rufname: Sagt die Person, die gerade antwortet, „Quizmaster, meine Antwort ist Paris“, ist das ihre Antwort und kein Befehl. Eigene Rufnamen aus `voice.wakeWords` kennt das Antwortmuster nicht; der Bot versucht es dann mit dem Text nach dem Rufnamen.
+  - **Keine** Antwort sind: „Eine Antwort ist schwer“, „Meine Antwort war falsch“, „Die Antworten sind schwer“, „Ich hab keine Antwort“.
+
+  Der Bot wiederholt die Antwort einmal kurz („42 Kilometer?“):
+  - **Ja** → abgegeben: „Ja“ (auch „Ja?“, „Jo“, „Jap“, „Jawohl“, „Yeah“, „Genau“, „Richtig“, „Korrekt“, „Stimmt“, „Passt“, „Klar“, „Exakt“, „Natürlich“ …), „Das stimmt“, „So ist es“, „Auf jeden Fall“, auch „Quizmaster, ja“. Danach dürfen nur noch Bestätigungswörter oder die Antwort selbst folgen: „Ja, das ist meine Antwort“, „Ja, genau“, „Ja, Paris“. **Kein** Ja sind „Ja, warte“, „Ja, aber …“, „Ja oder Rom“, „Okay“, „Mhm“, „Doch“ allein und „Keine Ahnung“.
+  - **Nein** → verworfen, neu antworten: „Nein“, „Nee“, „Nö“, „No“, „Nope“, „Falsch“, „Stopp“, „Korrektur“, „Anders“, „Nicht ganz“, „Doch nicht“ (ein „nicht“/„nein“/„falsch“ irgendwo im kurzen Satz, außer es gehört zur Antwort). Mit Rufname zählt das nur, wenn es kein Befehl ist: „Quizmaster, stopp“ fragt weiter „Spiel beenden?“, die Antwort bleibt offen.
+  - **„Warte“, „Moment“, „Sekunde“** → nichts passiert, die Antwort bleibt offen.
+  - Etwas Unklares (höchstens 4 Wörter, keine Frage, z.B. „Hä“) → einmal „Ja oder nein?“. Danach bleibt der Bot still.
   - ein neues „Meine Antwort ist …“ ersetzt die alte – auch mit Bestätigungswort davor: „Genau, meine Antwort ist zehn“ ist die neue Antwort „zehn“ (wieder mit Rückfrage), nicht das „Ja“ zur alten
   - Korrektur im selben Satz: Es gilt das **letzte** Schlüsselwort und das, was nach einer Korrektur kommt. „Meine Antwort ist Nabu, ach nein, Tatooine“, „… Nabu – nein, warte, Tatooine“, „… Nabu, ich meine Tatooine“ und „Meine Antwort ist Nabu … meine Antwort ist Tatooine“ ergeben alle „Tatooine“. Die Antwort „Nein“ bleibt „Nein“.
-  - läuft die Zeit ab, bevor du bestätigst, gilt die zuletzt genannte Antwort. Kommt „Meine Antwort ist …“ erst in den letzten 1,5 Sekunden (oder danach, solange der Bot noch wartet), fragt der Bot nicht mehr nach, sondern gibt sie sofort ab.
+  - **Nachfrist für das „Ja“** (`game.confirmGraceSec`, Regel `nachfrist`, Standard 8 s): Nach der Rückfrage bleiben bis zu 8 s für das „Ja“, auch wenn die Antwortzeit dann schon um ist – die Uhr auf quiz-base steht in dieser Zeit schon auf 0. Genauer: Das „Ja“ geht bis 1,5 s vor `min(Antwortzeit + Nachfrist, Rückfrage + Nachfrist)`, mindestens bis 1,5 s vor Ende der Antwortzeit. Die Antwortzeit verlängert sich höchstens einmal je Frage und nur um die Nachfrist; eine weitere Antwort danach verlängert nicht weiter. `!quiz regel nachfrist aus` (0) gibt das alte Verhalten: Das „Ja“ geht nur bis 1,5 s vor Ende der Antwortzeit.
+  - Kommt bis dahin kein „Ja“, zählt die zuletzt genannte Antwort wie gesagt (`game.confirmAtDeadline`, Regel `autoabgabe`, Standard an). Eine Zeitüberschreitung kostet dieselben Punkte wie eine falsche Antwort, die Auto-Abgabe ist also nie schlechter. Mit `!quiz regel autoabgabe aus` verfällt die Antwort, und es gilt „Zeit abgelaufen“. Kommt „Meine Antwort ist …“ erst in den letzten 1,5 Sekunden dieser Zeit, fragt der Bot nicht mehr nach, sondern gibt sie sofort ab.
   - Wird das Spiel beendet, während eine Antwort noch auf „Ja“ wartet, verfällt sie: keine Bewertung, keine Punkte.
   - Während der Rückfrage bewertet der Bot die Antwort schon (Fuzzy → Cache → LLM, nie die Spielleitung): Beim „Ja“ liegt das Urteil meist schon vor, statt dass das LLM erst dann 1–3 s nachdenkt. Bis zum „Ja“ wird nichts davon sichtbar, weder im Chat noch in der Ansage noch im Log auf `info`. Ersetzt du die Antwort oder sagst „Nein“, zählt die alte Bewertung nicht; es läuft höchstens eine gleichzeitig, und je Frage und Person fragt der Bot vorab höchstens zweimal das LLM (weitere ersetzte Antworten bewertet er erst beim „Ja“). Das kostet nur bei ersetzten Antworten einen zusätzlichen LLM-Aufruf, höchstens zwei je Frage und Person (im Endstand als `prejudge` gezählt). Getippte Antworten werden wie bisher erst nach dem Absenden bewertet.
   Wer das Schlüsselwort vergisst, wird einmal pro Spiel daran erinnert. Getippte Antworten im Chat brauchen kein Schlüsselwort.
@@ -135,6 +142,7 @@ Alles, worauf der Bot reagiert, steht als kleine Zeile im Text-Channel des Spiel
 | `deepgram` | EU-Endpunkt, `DEEPGRAM_API_KEY`, `nova-3` | Anbieter-Einstellungen; der Schlüssel kommt aus `.env` |
 | `silenceMs` | `900` | Pause, die eine Äußerung beendet |
 | `minSpeechMs` / `minRms` | `350` / `250` | kürzere/leisere Geräusche werden verworfen |
+| `minConfirmSpeechMs` | `250` | Mindestlänge für die Person, die gerade eine Rückfrage („Paris?“) beantwortet – ein kurzes „Ja“ |
 | `ignoreWhileSpeaking` | `true` | Echo-Schutz |
 | `bargeIn` | `true` | Wer dran ist, darf Hinweise, Erinnerungen und Rückfragen unterbrechen |
 | `wakeWords` | `quizmaster`, … | Rufnamen |
@@ -170,7 +178,7 @@ Für gesprochene Antworten gibt es eine zweite lokale Erkennung: **NVIDIA Parake
 Danach `npx qbhost voice-setup` (im Docker-Container passiert das beim nächsten Start von selbst) und `npm run doctor`.
 
 - **Was hört was:** Parakeet hört die Phasen in `parakeetFor`, Standard nur `answer`: Wer eine Frage beantwortet. Alles andere – Kartenwahl, Ja/Nein, „Hier!“, der Rufname bei allen anderen – hört whisper wie bisher, also `whisperFastModel`, ohne schnelles Modell `whisperModel`. Mit dem Beispiel oben laufen genau zwei Erkenner: Parakeet und ein whisper-server mit `base`. Das Hauptmodell `small` wird dann gar nicht mehr gestartet (es würde nur noch Antworten hören).
-- **Parakeet zuerst, whisper für alles, was keine Antwort ist:** In einer Phase, die Parakeet hört, zählt sein Text nur, wenn er eine Antwort mit Schlüsselwort ist („Meine Antwort ist …“). Sonst hört whisper dieselbe Aufnahme noch einmal, und nur dessen Text geht in Befehle, Rufname, Ja/Nein und Kartenwahl. Die antwortende Person kann also weiter „Quizmaster, wiederhole die Frage“ oder „Quizmaster, Spiel beenden“ sagen. Fällt Parakeet aus, hört whisper die Antwort; Ja/Nein und der Rufname gehen nie an Parakeet, auch nicht als Rückfall. Nur wenn es gar keinen whisper gibt (`parakeetFor` mit allen vier Phasen), zählt Parakeets Text für alles. In der Rückfrage gilt dasselbe: Hat whisper „Meine Antwort ist …“ gehört, hört Parakeet noch einmal, und sein Text zählt nur, wenn er das Schlüsselwort auch hat; sonst (leer, Fehler, „mein Antwort ist“) bleibt whispers Text – nie ein dritter Durchgang, und eine verhörte neue Antwort bestätigt nie die alte.
+- **Parakeet zuerst, whisper für alles, was keine Antwort ist:** In einer Phase, die Parakeet hört, zählt sein Text nur, wenn er eine Antwort mit Schlüsselwort ist („Meine Antwort ist …“). Sonst hört whisper dieselbe Aufnahme noch einmal, und nur dessen Text geht in Befehle, Rufname, Ja/Nein und Kartenwahl. Die antwortende Person kann also weiter „Quizmaster, wiederhole die Frage“ oder „Quizmaster, Spiel beenden“ sagen. Fällt Parakeet aus, hört whisper die Antwort; Ja/Nein und der Rufname gehen nie an Parakeet, auch nicht als Rückfall. Nur wenn es gar keinen whisper gibt (`parakeetFor` mit allen vier Phasen), zählt Parakeets Text für alles. In der Rückfrage gilt dasselbe: Hat whisper „Meine Antwort ist …“ gehört, hört Parakeet noch einmal, und sein Text zählt nur, wenn er das Schlüsselwort auch hat; sonst (leer, Fehler, verhörtes Schlüsselwort wie „eine Antwort ist“) bleibt whispers Text – nie ein dritter Durchgang, und eine verhörte neue Antwort bestätigt nie die alte.
 
   | Äußerung | Engines (Reihenfolge) | Zeit auf 1 vCPU (geschätzt aus den Einzelmessungen) | gemessen auf dem M4 |
   |---|---|---|---|
@@ -331,6 +339,15 @@ Mit `voice.latencyLog` (Standard `true`) schreibt der Bot `⏱`-Zeilen auf die L
 - `tts`: reine Synthesedauer, vom tatsächlichen Start der Synthese bis zum fertigen Audio. Wartet ein Satz hinter einer noch laufenden Synthese (Piper arbeitet einen Satz nach dem anderen ab), beginnt die Messung erst, wenn diese fertig ist.
 - `cache`: ob das Audio aus dem Satz-Cache kam (`CachedTts`, wiederkehrende Sätze wie „Buzzer frei!“). Dann ist `tts` die Wartezeit auf das schon vorhandene Audio, zählt nicht in `tts_p50/p90` der Bilanz und hält den nächsten Satz nicht auf.
 - `warte`: Zeit, die der Satz ohne eigene Synthese verbrachte, also das Warten auf eine laufende Synthese davor plus das Warten, bis der vorige Satz zu Ende gesprochen war.
+
+**Verworfenes der Person, die antwortet** – ohne Text (Regel 8), auf `info`, nur für die Person, die gerade eine Frage beantwortet oder eine Rückfrage bestätigt; bei allen anderen bleibt es auf `debug`:
+```
+🔇 Anna (Rückfrage): verworfen – zu kurz (200 ms, rms 3100)
+🔇 Anna (Antwort): nichts erkannt (900 ms)
+🎙 Anna: ohne Schlüsselwort (3 Wörter)
+🎙 Anna: Rückfrage unklar (1 Wörter) – frage nach
+```
+Damit lässt sich im Server-Log sehen, ob ein „Ja“ gesprochen, aber zu kurz, zu leise oder nicht erkannt war. „ohne Schlüsselwort“ gibt es nur für Äußerungen bis 6 Wörter.
 
 **`reaktion`** – Zeit vom Ende einer Äußerung bis zum ersten Ton der Antwort. Gezählt wird der erste Satz, der in die Schlange kommt, nachdem der Bot eine Äußerung verwendet hat (siehe `erkennung`); auf Nebengespräche und lautes Nachdenken folgt also nie eine Reaktion. Kommt der Satz später als 15 s nach dem Ende der Spiellogik, gibt es keine Zeile. Eine neuere verwendete Äußerung ersetzt eine ältere, die noch auf ihre Antwort wartet; ein Nebengespräch dazwischen ändert nichts. Bei der Kartenwahl ist die Reaktion die vorgelesene Frage. Wird der Antwortsatz vor dem Abspielen ersetzt, verworfen oder scheitert seine Synthese, gibt es keine Reaktionszeile. Die Teile ergeben zusammen `gesamt`.
 - `gesamt`: Ende des Sprechens bis zum Wiedergabestart der Antwort.
