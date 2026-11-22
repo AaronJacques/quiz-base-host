@@ -374,7 +374,8 @@ export function confirmReply(text: string, pending = ''): 'yes' | 'no' | null {
   const ownSet = new Set(speechNorm(pending).split(' ').filter(Boolean));
   if (NO_FIRST.has(words[0]!) || words.some((w) => NO_ANYWHERE.has(w) && !ownSet.has(w))) return 'no';
   if (words.some((w) => WAIT_WORDS.has(w) && !ownSet.has(w))) return null;
-  if (words.length > 1 && /\?\s*$/.test(text.trim())) return null; // "Ja, war das richtig?" asks back
+  // Speech recognition writes a rising "Ja, genau" as "Ja, genau?" – only a real question back is no "Ja".
+  if (asksBack(text)) return null;
   const s = words.join(' ');
   const phrase = YES_PHRASES.find((p) => s === p || s.startsWith(`${p} `));
   const rest = phrase ? words.slice(phrase.split(' ').length) : YES_FIRST.has(words[0]!) ? words.slice(1) : null;
@@ -383,6 +384,22 @@ export function confirmReply(text: string, pending = ''): 'yes' | 'no' | null {
   if (dangles(rest) && !ownSet.has(rest.at(-1)!)) return null;
   const content = withoutPhrases(rest).filter((w) => !YES_REST.has(w));
   return !content.length || repeatsAnswer(content, pending) ? 'yes' : null;
+}
+
+/** Question words, "du"/"ihr" and verbs that ask someone: with a "?" at the end, the utterance asks – it answers nothing. */
+const ASKING_WORDS = new Set(
+  'was wer wie wo wann warum wieso weshalb welche welcher welches welchen du ihr dir dich euch meinst glaubst denkst weißt weisst oder'.split(' '),
+);
+const ASKING_PAIR = /(?:^| )(?:war|ist|wäre|stimmt|zählt|gilt) (?:das|es)(?: |$)/u;
+
+/**
+ * Does the utterance ask back – a "?" at the end *and* a question word, "du"/"ihr" or "ist das …" ("Ja, war das
+ * richtig?", "Ben, was meinst du?")? A "?" alone is often just a rising voice ("Ja, genau?", "Paris?"): no question.
+ */
+export function asksBack(text: string): boolean {
+  if (!/\?\s*$/.test(text.trim())) return false;
+  const s = speechNorm(text);
+  return s.split(' ').some((w) => ASKING_WORDS.has(w)) || ASKING_PAIR.test(s);
 }
 
 /**

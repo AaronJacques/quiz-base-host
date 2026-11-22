@@ -18,7 +18,7 @@ import { createJudge } from '../src/judge/index.ts';
 import { UsageMeter, type JsonRequest, type JsonResponse, type LlmClient } from '../src/llm/client.ts';
 import { TafelquizController } from '../src/modes/tafelquiz/controller.ts';
 import { decodeWav, durationMs, encodeWav, resample, rms, toChannels, type Pcm } from '../src/voice/audio.ts';
-import { confirmReply, confirmWaits, endAskReply, extractAnswer, hasStrongKeyword, isBuzz, isEcho, mentionsCard, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
+import { asksBack, confirmReply, confirmWaits, endAskReply, extractAnswer, hasStrongKeyword, isBuzz, isEcho, mentionsCard, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
 import { VoiceBridge } from '../src/discord/voice-bridge.ts';
 import { LoopbackTransport } from '../src/voice/loopback.ts';
 import { createVoiceKit, voiceProblems } from '../src/voice/index.ts';
@@ -2212,4 +2212,67 @@ describe('QuizBot voice: live test findings (L-F2, L-F3)', () => {
     expect(t.chat()).not.toContain('„zehn“ ist');
     await t.bot.shutdown();
   }, 30000);
+});
+
+describe('voice: delta review 2 of package C (C-F12, C-F13)', () => {
+  it('C-F12: a clear "Ja" with a rising "?" counts; only a real question back does not', () => {
+    for (const said of ['Ja, genau?', 'Ja, Paris?', 'Ja, richtig?', 'Jawohl?', 'Ja?', 'Genau?', 'Ja, das ist meine Antwort?'])
+      expect(confirmReply(said, 'Paris'), said).toBe('yes');
+    for (const said of ['Ja, war das richtig?', 'Ja, ist das richtig?', 'Stimmt das?', 'Ja, Rom?', 'Ben, was meinst du?'])
+      expect(confirmReply(said, 'Paris'), said).toBeNull();
+    expect(asksBack('Ja, war das richtig?')).toBe(true);
+    expect(asksBack('Ben, was meinst du?')).toBe(true);
+    expect(asksBack('Ja, genau?')).toBe(false);
+    expect(asksBack('Paris?')).toBe(false);
+    expect(asksBack('Was meinst du')).toBe(false); // no "?": not a question by this rule
+  });
+});
+
+describe('QuizBot voice: delta review 2 of package C (C-F12, C-F13)', () => {
+  async function asked(t: ReturnType<typeof voiceSetup>) {
+    await voiceGame(t);
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+  }
+  const answersOf = (t: ReturnType<typeof voiceSetup>) => {
+    const out: string[] = [];
+    t.session().bus.on('player:answer', (a) => void out.push(a.answer));
+    return out;
+  };
+
+  it('C-F12: "Ja, genau?" confirms; "Ja, war das richtig?" gets one "Ja oder nein?" instead of silence', async () => {
+    const t = voiceSetup();
+    await asked(t);
+    const answers = answersOf(t);
+    t.room().speak(annaS, 'Meine Antwort ist zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    t.room().speak(annaS, 'Ja, war das richtig?');
+    await until(() => t.room().played.includes(CONFIRM_AGAIN_LINE));
+    expect(answers).toEqual([]);
+    t.room().speak(annaS, 'Ja, genau?');
+    await until(() => answers.length === 1);
+    expect(answers).toEqual(['zehn']);
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('C-F13: after a cut-off keyword a question to the others is no answer – the keyword stays open, nothing is asked', async () => {
+    const t = voiceSetup();
+    await asked(t);
+    const answers = answersOf(t);
+    t.room().speak(annaS, 'Meine Antwort ist neun');
+    await until(() => t.room().played.includes('neun?'));
+    t.room().speak(annaS, 'Genau, meine Antwort ist');
+    await new Promise((r) => setTimeout(r, 300));
+    t.room().speak(annaS, 'Ben, was meinst du?');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(t.bot.activeGame?.pending?.answer).toBe('neun'); // not replaced by the question
+    expect(t.room().played.some((p) => p.includes('meinst'))).toBe(false);
+    expect(t.room().played).not.toContain(CONFIRM_AGAIN_LINE);
+    t.room().speak(annaS, 'zehn'); // the keyword is still open
+    await until(() => t.room().played.includes('zehn?'));
+    t.room().speak(annaS, 'Ja');
+    await until(() => answers.length === 1);
+    expect(answers).toEqual(['zehn']);
+    await t.bot.shutdown();
+  }, 20000);
 });
