@@ -65,6 +65,13 @@ export const ConfigSchema = z.object({
       revealPauseSolvedSec: z.number().min(0).max(30).default(1.5),
       /** Am Ende das Spiel auf der Seite automatisch beenden. */
       autoEnd: z.boolean().default(true),
+      /**
+       * Sprache: mindestens so viele Sekunden nach der Rückfrage „X?“ bleiben für das „Ja“; verlängert die Antwortzeit
+       * bei Bedarf (die Uhr auf quiz-base steht dann schon auf 0). 0 = aus. Per Discord: `!quiz regel nachfrist 5`.
+       */
+      confirmGraceSec: z.number().int().min(0).max(20).default(8),
+      /** Sprache: Eine Antwort, die bei Fristende (plus Nachfrist) noch auf „Ja“ wartet, zählt wie gesagt. Aus = sie verfällt (Zeit abgelaufen). */
+      confirmAtDeadline: z.boolean().default(true),
     })
     .prefault({}),
 
@@ -284,6 +291,8 @@ export const ConfigSchema = z.object({
       silenceMs: z.number().int().default(900),
       /** Kürzere/leisere Äußerungen werden verworfen (Husten, Klicks, Rauschen). */
       minSpeechMs: z.number().int().default(350),
+      /** Mindestlänge für eine Äußerung der Person, die gerade eine Rückfrage bestätigt (kurzes „Ja“); sonst gilt `minSpeechMs`. */
+      minConfirmSpeechMs: z.number().int().min(100).default(250),
       minRms: z.number().default(250),
       maxSpeechSec: z.number().default(15),
       /** Was jemand sagt, während der Bot spricht, wird ignoriert (Schutz vor Echo ohne Kopfhörer). */

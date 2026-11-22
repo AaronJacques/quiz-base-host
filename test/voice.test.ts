@@ -18,11 +18,11 @@ import { createJudge } from '../src/judge/index.ts';
 import { UsageMeter, type JsonRequest, type JsonResponse, type LlmClient } from '../src/llm/client.ts';
 import { TafelquizController } from '../src/modes/tafelquiz/controller.ts';
 import { decodeWav, durationMs, encodeWav, resample, rms, toChannels, type Pcm } from '../src/voice/audio.ts';
-import { confirmReply, endAskReply, extractAnswer, isBuzz, isEcho, mentionsCard, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
+import { confirmReply, confirmWaits, endAskReply, extractAnswer, isBuzz, isEcho, mentionsCard, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../src/voice/commands.ts';
 import { VoiceBridge } from '../src/discord/voice-bridge.ts';
 import { LoopbackTransport } from '../src/voice/loopback.ts';
 import { createVoiceKit, voiceProblems } from '../src/voice/index.ts';
-import { END_ASK_LINE, END_KEEP_LINE, gameOverLine, GOODBYE_LINE, questionLine, revealLine, turnLine, verdictLine } from '../src/voice/narration.ts';
+import { CONFIRM_AGAIN_LINE, END_ASK_LINE, END_KEEP_LINE, gameOverLine, GOODBYE_LINE, questionLine, revealLine, turnLine, verdictLine } from '../src/voice/narration.ts';
 import { cleanTranscript, collapseLoops, WhisperServerStt, type SpeechToText } from '../src/voice/stt.ts';
 import { VoiceHost, type Attention } from '../src/voice/voice-host.ts';
 import type { Speaker, Utterance, VoiceTransport } from '../src/voice/transport.ts';
@@ -189,10 +189,11 @@ class FakeRoom implements VoiceTransport {
   drop() {
     this.closeHandlers.forEach((h) => h());
   }
-  speak(speaker: Speaker, text: string) {
+  /** `ms`: how long the utterance is (default 500 ms). */
+  speak(speaker: Speaker, text: string, ms = 500) {
     const id = 1000 + this.texts.size;
     this.texts.set(id, text);
-    const samples = new Int16Array(8000).fill(4000);
+    const samples = new Int16Array(Math.round(ms * 16)).fill(4000);
     samples[0] = id;
     const now = Date.now();
     for (const h of this.handlers) h({ speaker, pcm: { rate: 16000, channels: 1, samples }, startedAt: now - 500, endedAt: now });
@@ -628,7 +629,8 @@ describe('QuizBot voice (review fixes)', () => {
   }, 20000);
 
   it('submits an answer said in the last moment without waiting for "Ja" (F17)', async () => {
-    const t = voiceSetup({ answerTimeoutSec: 3 }, { extraTimeSec: 0 });
+    // Without grace for "Ja" (`confirmGraceSec: 0`) – the behaviour before package C; with grace see "Nachfrist" below.
+    const t = voiceSetup({ answerTimeoutSec: 3, confirmGraceSec: 0 }, { extraTimeSec: 0 });
     await voiceGame(t);
     t.room().speak(annaS, 'Sport für hundert');
     await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
@@ -1656,4 +1658,192 @@ describe('QuizBot voice: "ich bin …" links only names of the lobby (review F17
     expect(links()[benS.id]).toBe('Ben');
     await t.bot.shutdown();
   }, 25000);
+});
+
+describe('voice: keyword and confirmation (package C)', () => {
+  it('takes more ways of saying the keyword – also "mein Antwort", corrections and the wake word in front', () => {
+    const answers: [string, string][] = [
+      ['Nein, mein Antwort ist Hans Zimmer', 'Hans Zimmer'], // live game 20.11.
+      ['Mein Antwort ist Paris', 'Paris'],
+      ['Meiner Antwort ist Paris', 'Paris'],
+      ['Maine Antwort ist Paris', 'Paris'],
+      ['Meine Antwort es Paris', 'Paris'],
+      ['Meine Antwort ist: Paris', 'Paris'],
+      ['Quizmaster, meine Antwort ist Paris', 'Paris'],
+      ['Ich korrigiere, meine Antwort ist Tatooine', 'Tatooine'],
+      ['Äh, also, meine Antwort ist Rom', 'Rom'],
+      ['Meine Antwort ist Es', 'Es'], // Stephen King
+      ['Meine Antwort ist Nabu, mein Antwort ist Tatooine', 'Tatooine'],
+      ['Oh, quatsch, meine Antwort ist Bern', 'Bern'],
+    ];
+    for (const [said, answer] of answers) expect(extractAnswer(said), said).toBe(answer);
+    for (const said of ['Eine Antwort ist schwer', 'Meine Antwort war falsch', 'Die Antworten sind schwer', 'Ich hab keine Antwort']) expect(extractAnswer(said), said).toBeNull();
+    expect(extractAnswer('Meine Antwort es')).toBe(''); // keep listening, not the answer "es"
+    expect(cleanSpokenAnswer('mein Antwort ist Paris')).toBe('Paris');
+  });
+
+  it('understands "Ja" and "Nein" – a "Ja" with anything else after it is no "Ja"', () => {
+    for (const [said, pending] of [['Ja?'], ['Jo'], ['Jawohl'], ['Yeah'], ['Ja, das ist meine Antwort'], ['Ja, Paris', 'Paris'], ['Quizmaster, ja'], ['Äh, ja'], ['Das stimmt'], ['Auf jeden Fall']] as [string, string?][])
+      expect(confirmReply(said, pending), said).toBe('yes');
+    for (const said of ['Ja, warte', 'Moment', 'Okay', 'Mhm', 'Hä', 'Doch', 'Ja, aber', 'Ja oder Rom', 'Keine Ahnung']) expect(confirmReply(said, 'Paris'), said).toBeNull();
+    for (const said of ['No', 'Nope', 'Nicht ganz', 'Quizmaster, nein', 'Ja, nein, doch nicht']) expect(confirmReply(said), said).toBe('no');
+    expect(confirmReply('Ja, Nicht ohne meine Tochter', 'Nicht ohne meine Tochter')).toBe('yes'); // the answer's own words
+    expect(confirmReply('Nein, mein Antwort ist Hans Zimmer')).toBeNull(); // a new answer, handled as one
+    expect([confirmWaits('Moment'), confirmWaits('Warte mal'), confirmWaits('Hä'), confirmWaits('Ja')]).toEqual([true, true, false, false]);
+  });
+});
+
+describe('QuizBot voice: keyword, confirmation and grace (package C)', () => {
+  /** Anna picks Sport 100 ("Wie viele Pins beim Bowling?", 10) and is asked; returns the time of the ask. */
+  async function asked(t: ReturnType<typeof voiceSetup>) {
+    await voiceGame(t);
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+    return Date.now();
+  }
+  const answersOf = (t: ReturnType<typeof voiceSetup>) => {
+    const out: string[] = [];
+    t.session().bus.on('player:answer', (a) => void out.push(a.answer));
+    return out;
+  };
+  /** Info lines of the logger while `fn` runs. */
+  async function infoLog(fn: () => Promise<void>): Promise<string> {
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => (lines.push(String(chunk)), true));
+    setLogLevel('info');
+    try {
+      await fn();
+    } finally {
+      spy.mockRestore();
+      setLogLevel('error');
+    }
+    return lines.join('');
+  }
+
+  it('"Nein, mein Antwort ist Hans Zimmer" in the confirmation corrects the answer, it is not discarded (live game 20.11.)', async () => {
+    const t = voiceSetup();
+    await asked(t);
+    const answers = answersOf(t);
+    t.room().speak(annaS, 'Meine Antwort ist Tanzzimmer');
+    await until(() => t.room().played.includes('Tanzzimmer?'));
+    t.room().speak(annaS, 'Nein, mein Antwort ist Hans Zimmer');
+    await until(() => t.room().played.includes('Hans Zimmer?'));
+    expect(t.room().played).not.toContain('Okay. Deine Antwort?');
+    t.room().speak(annaS, 'Ja');
+    await until(() => answers.length === 1);
+    expect(answers).toEqual(['Hans Zimmer']);
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('"Quizmaster, meine Antwort ist …" and "Quizmaster, ja" of the person answering are the answer; for everybody else commands stay commands', async () => {
+    const t = voiceSetup();
+    await asked(t);
+    const answers = answersOf(t);
+    const notUnderstood = () => t.room().played.filter((p) => p.startsWith('Das habe ich nicht verstanden')).length;
+    t.room().speak(annaS, 'Quizmaster, meine Antwort ist zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    expect(notUnderstood()).toBe(0);
+    t.room().speak(benS, 'Quizmaster, meine Antwort ist neun'); // Ben is not asked: a command, as before
+    await until(() => notUnderstood() === 1);
+    expect(t.bot.activeGame?.pending?.answer).toBe('zehn');
+    const questions = () => t.room().played.filter((p) => p.includes('Pins')).length;
+    const before = questions();
+    t.room().speak(annaS, 'Quizmaster, wiederhole die Frage'); // no keyword, no yes/no: still a command
+    await until(() => questions() === before + 1);
+    expect(answers).toEqual([]);
+    t.room().speak(annaS, 'Quizmaster, ja');
+    await until(() => t.chat().includes('„zehn“ ist richtig'));
+    expect(answers).toEqual(['zehn']);
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('grace: an answer 0.5 s before the end of the answer time (D0) is asked back, "Ja" 4.5 s after D0 counts and is judged', async () => {
+    // Before package C it was submitted unconfirmed (≥ D0 − 1.5 s). Now "Ja" has until min(D0 + 8, said + 8) − 1.5 s = D0 + 6 s.
+    const t = voiceSetup({ answerTimeoutSec: 3, confirmGraceSec: 8 }, { extraTimeSec: 0 });
+    const at = await asked(t);
+    const answers = answersOf(t);
+    await new Promise((r) => setTimeout(r, Math.max(0, at + 2500 - Date.now())));
+    t.room().speak(annaS, 'Meine Antwort ist zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    await new Promise((r) => setTimeout(r, Math.max(0, at + 3000 + 4500 - Date.now())));
+    expect(answers).toEqual([]); // still waiting for "Ja" – not submitted, no timeout
+    expect(t.chat()).not.toContain('(keine Antwort)');
+    t.room().speak(annaS, 'Ja');
+    await until(() => t.chat().includes('„zehn“ ist richtig'), 4000);
+    expect(answers).toEqual(['zehn']);
+    expect(Date.now() - at).toBeLessThan(3000 + 6000); // by the "Ja", before the bot would have submitted it
+    await t.bot.shutdown();
+  }, 25000);
+
+  it('no "Ja" at all: at the end of the time for "Ja" the answer counts as said (confirmAtDeadline on)', async () => {
+    const t = voiceSetup({ answerTimeoutSec: 2, confirmGraceSec: 1 }, { extraTimeSec: 0 });
+    await asked(t);
+    t.room().speak(annaS, 'Meine Antwort ist zehn');
+    await until(() => t.chat().includes('„zehn“ ist richtig'), 6000);
+    expect(t.chat()).not.toContain('(keine Antwort)');
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('confirmAtDeadline off: an answer without "Ja" lapses – the controller gives "(keine Antwort)"', async () => {
+    const t = voiceSetup({ answerTimeoutSec: 3, confirmGraceSec: 2, confirmAtDeadline: false }, { extraTimeSec: 0 });
+    await asked(t);
+    const answers = answersOf(t);
+    t.room().speak(annaS, 'Meine Antwort ist zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    await until(() => t.chat().includes('(keine Antwort)'), 10000);
+    expect(answers).toEqual([]);
+    expect(t.chat()).not.toContain('„zehn“ ist');
+    await t.bot.shutdown();
+  }, 25000);
+
+  it('an unclear reply gets one "Ja oder nein?", a second one nothing; "Moment" keeps the answer open – logs without text', async () => {
+    const t = voiceSetup();
+    await asked(t);
+    const answers = answersOf(t);
+    const again = () => t.room().played.filter((p) => p === CONFIRM_AGAIN_LINE).length;
+    const log = await infoLog(async () => {
+      t.room().speak(annaS, 'Vielleicht Kegelbahn'); // no keyword
+      await until(() => t.room().played.some((p) => p.startsWith('Sag: Meine Antwort ist')));
+      t.room().speak(annaS, 'Meine Antwort ist zehn');
+      await until(() => t.room().played.includes('zehn?'));
+      t.room().speak(annaS, 'Hä');
+      await until(() => again() === 1);
+      t.room().speak(annaS, 'Hä');
+      await new Promise((r) => setTimeout(r, 400));
+      t.room().speak(annaS, 'Moment');
+      await new Promise((r) => setTimeout(r, 400));
+      expect(again()).toBe(1);
+      expect(t.bot.activeGame?.pending?.answer).toBe('zehn');
+      expect(answers).toEqual([]);
+      t.room().speak(annaS, 'Ja');
+      await until(() => answers.length === 1);
+    });
+    expect(answers).toEqual(['zehn']);
+    expect(log).toContain('🎙 Anna: ohne Schlüsselwort (2 Wörter)');
+    expect(log.split('🎙 Anna: Rückfrage unklar (1 Wörter) – frage nach').length - 1).toBe(1);
+    expect(log).not.toMatch(/Kegelbahn|Hä|Moment/); // only what the bot acted on is logged with text (rule 8)
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('a short "Ja" in the confirmation is heard (minConfirmSpeechMs); what is dropped shows on info without text – only for the person answering', async () => {
+    const t = voiceSetup();
+    await asked(t);
+    const answers = answersOf(t);
+    const log = await infoLog(async () => {
+      t.room().speak(annaS, 'Meine Antwort ist zehn');
+      await until(() => t.room().played.includes('zehn?'));
+      t.room().speak(annaS, 'Jawohl', 200); // < 250 ms: dropped
+      t.room().speak(benS, 'Blablub', 200); // not asked: stays on debug
+      t.room().speak(annaS, '', 500); // nothing recognised
+      await new Promise((r) => setTimeout(r, 400));
+      expect(answers).toEqual([]);
+      t.room().speak(annaS, 'Ja', 280); // shorter than minSpeechMs (350), long enough for a confirmation
+      await until(() => answers.length === 1);
+    });
+    expect(answers).toEqual(['zehn']);
+    expect(log).toMatch(/🔇 Anna \(Rückfrage\): verworfen – zu kurz \(200 ms, rms \d+\)/);
+    expect(log).toContain('🔇 Anna (Rückfrage): nichts erkannt (500 ms)');
+    expect(log).not.toMatch(/Jawohl|Blablub|🔇 Ben/);
+    await t.bot.shutdown();
+  }, 20000);
 });

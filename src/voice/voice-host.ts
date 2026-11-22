@@ -731,14 +731,22 @@ export class VoiceHost {
     const ms = durationMs(u.pcm);
     const loud = rms(u.pcm);
     const who = u.speaker.displayName;
-    if (ms < this.d.cfg.minSpeechMs || loud < this.d.cfg.minRms) return log.debug(`verworfen (${who}, ${Math.round(ms)} ms, rms ${Math.round(loud)})`);
+    // Who is this, for the bot? Decided first: a short "Ja" to "Paris?" has its own minimum length (cheap and synchronous).
+    const attention = this.d.attention?.(u.speaker) ?? 'full';
+    // The person answering: what is dropped shows on `info` – never with text (rule 8). Everybody else stays on `debug`.
+    const minded = attention === 'answer' || attention === 'confirm';
+    const phase = attention === 'confirm' ? 'Rückfrage' : 'Antwort';
+    const minMs = attention === 'confirm' ? this.d.cfg.minConfirmSpeechMs : this.d.cfg.minSpeechMs;
+    if (ms < minMs || loud < this.d.cfg.minRms) {
+      const why = `${ms < minMs ? 'zu kurz' : 'zu leise'} (${Math.round(ms)} ms, rms ${Math.round(loud)})`;
+      return minded ? log.info(`🔇 ${who} (${phase}): verworfen – ${why}`) : log.debug(`verworfen (${who}, ${Math.round(ms)} ms, rms ${Math.round(loud)})`);
+    }
     const over = this.overlapped(u);
     // Barge-in: the person on turn may talk over hints and prompts – whatever else they talked over stays ignored.
     const bargeIn = over.length > 0 && over.every((o) => o.interruptible) && this.mayInterrupt(u.speaker);
     if (over.length && !bargeIn) return log.info(`🙉 ${who} sprach, während ich sprach – ignoriert`);
     if (bargeIn && this.playing?.interruptible && this.speaking()) this.interrupt(who);
     let text: string;
-    const attention = this.d.attention?.(u.speaker) ?? 'full';
     const passes: SttPass[] = [];
     if (attention === 'wake') {
       const start = head(u.pcm, WAKE_HEAD_MS);
@@ -785,7 +793,7 @@ export class VoiceHost {
     // Without headphones the bot's own voice comes back – that is no barge-in.
     const echo = !!text && bargeIn && over.some((o) => isEcho(text, o.text));
     const heard = this.latency.recognised({ endedAt: u.endedAt, heardAt, sttDoneAt, attention, audioMs: ms, passes, toBot: !!text && !echo });
-    if (!text) return log.debug(`nichts erkannt (${who})`);
+    if (!text) return minded ? log.info(`🔇 ${who} (${phase}): nichts erkannt (${Math.round(ms)} ms)`) : log.debug(`nichts erkannt (${who})`);
     if (echo) return log.info(`🙉 ${who}: klang wie meine eigene Ansage – ignoriert`);
     log.debug(`🎙 ${who}: „${text}“`); // side talk stays out of the normal log
     const used = () => {

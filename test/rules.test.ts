@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigSchema } from '../src/config.ts';
-import { applyRule, findRule, formatRuleValue, parseFactor, scoreFor } from '../src/modes/tafelquiz/rules.ts';
+import { rulesText } from '../src/discord/format.ts';
+import { applyRule, findRule, formatRuleValue, parseFactor, pickRules, scoreFor } from '../src/modes/tafelquiz/rules.ts';
 
 const base = () => ConfigSchema.parse({}).game;
 
@@ -96,6 +97,50 @@ describe('rule parsing', () => {
       expect(applyRule(g, spec, 'aus'), name).toBeNull();
       expect(formatRuleValue(g, spec), name).toBe('aus');
     }
+  });
+});
+
+describe('voice rules: grace for "Ja" and the submission at the deadline (package C)', () => {
+  it('defaults: 8 s grace, auto submission on; config limits 0–20 s', () => {
+    const g = base();
+    expect([g.confirmGraceSec, g.confirmAtDeadline]).toEqual([8, true]);
+    expect(ConfigSchema.parse({}).voice.minConfirmSpeechMs).toBe(250);
+    expect(() => ConfigSchema.parse({ game: { confirmGraceSec: 21 } })).toThrow();
+    expect(ConfigSchema.parse({ game: { confirmGraceSec: 0 } }).game.confirmGraceSec).toBe(0);
+  });
+
+  it('regel nachfrist 5 / aus, regel autoabgabe aus', () => {
+    const g = base();
+    const grace = findRule('nachfrist')!;
+    expect(findRule('jazeit')).toBe(grace);
+    expect(grace.key).toBe('confirmGraceSec');
+    expect(formatRuleValue(g, grace)).toBe('8 s');
+    expect(applyRule(g, grace, '5')).toBeNull();
+    expect(g.confirmGraceSec).toBe(5);
+    expect(applyRule(g, grace, 'aus')).toBeNull();
+    expect(g.confirmGraceSec).toBe(0);
+    expect(formatRuleValue(g, grace)).toBe('aus');
+    expect(applyRule(g, grace, '0')).toBeNull();
+    expect(g.confirmGraceSec).toBe(0);
+    for (const bad of ['21', '-1', 'lang']) expect(applyRule(g, grace, bad), bad).toBe(`"${bad}": bitte Sekunden zwischen 1 und 20 oder "aus".`);
+    expect(applyRule(g, grace, '20')).toBeNull();
+    expect(g.confirmGraceSec).toBe(20);
+
+    const auto = findRule('autoabgabe')!;
+    expect(auto.key).toBe('confirmAtDeadline');
+    expect(formatRuleValue(g, auto)).toBe('an');
+    expect(applyRule(g, auto, 'aus')).toBeNull();
+    expect(g.confirmAtDeadline).toBe(false);
+    expect(formatRuleValue(g, auto)).toBe('aus');
+    expect(applyRule(g, auto, 'vielleicht')).toMatch(/"an" oder "aus"/);
+  });
+
+  it('`regeln` lists both, and both are persisted with the other adjustable rules', () => {
+    const g = { ...base(), confirmGraceSec: 5, confirmAtDeadline: false };
+    const text = rulesText(g, '!quiz');
+    expect(text).toContain('• Nachfrist für das „Ja“ (Sprache): **5 s**  `nachfrist`');
+    expect(text).toContain('• Unbestätigte Antwort bei Zeitende werten (Sprache): **aus**  `autoabgabe`');
+    expect(pickRules(g)).toMatchObject({ confirmGraceSec: 5, confirmAtDeadline: false });
   });
 });
 

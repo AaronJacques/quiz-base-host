@@ -62,6 +62,8 @@ Ablauf und Punkte des Tafelquiz. Die Punkteregeln sind **pro Server zur Laufzeit
 | `revealPauseSec` | `4` | Pause zwischen Auflösung und Schließen der Frage, damit alle die Lösung lesen. Gilt, wenn niemand die Frage gelöst hat. |
 | `revealPauseSolvedSec` | `1.5` | Kürzere Pause, wenn jemand die Frage richtig gelöst hat (am Zug oder per Buzzer). 0 bis 30, Dezimalwerte erlaubt. |
 | `autoEnd` | `true` | Am Ende das Spiel auf der Seite automatisch beenden. |
+| `confirmGraceSec` | `8` | Sprache: Mindestens so viele Sekunden nach der Rückfrage „X?“ bleiben für das „Ja“; verlängert die Antwortzeit bei Bedarf einmal um höchstens diesen Wert (die Uhr auf quiz-base steht dann schon auf 0). 0 bis 20, 0 = aus (altes Verhalten). Regel `nachfrist`. |
+| `confirmAtDeadline` | `true` | Sprache: Eine Antwort, die bei Fristende (plus Nachfrist) noch auf „Ja“ wartet, zählt wie gesagt. Aus = sie verfällt (Zeit abgelaufen). Regel `autoabgabe`. |
 
 Faktoren sind Multiplikatoren. Bei einem Fragewert von 200 ergibt `correctFactor: 1` +200, `wrongFactor: 0.5` −100.
 
@@ -171,6 +173,7 @@ Sprachsteuerung im Voice-Channel. Alles läuft lokal: whisper.cpp (Spracherkennu
 | `sayVoice` | `Anna` | Stimme für `tts: "say"`. Deutsche Stimmen mit vollem Namen angeben, z.B. `Anna`, `Reed (Deutsch (Deutschland))`. |
 | `silenceMs` | `900` | Sprechpause, nach der eine Äußerung als beendet gilt. |
 | `minSpeechMs` | `350` | Kürzere Geräusche werden verworfen (Husten, Klicks). |
+| `minConfirmSpeechMs` | `250` | Mindestlänge für eine Äußerung der Person, die gerade eine Rückfrage bestätigt (kurzes „Ja“); sonst gilt `minSpeechMs`. Mindestens 100. |
 | `minRms` | `250` | Leisere Geräusche werden verworfen. |
 | `maxSpeechSec` | `15` | Obergrenze für eine Äußerung in Sekunden. Mit `whisperAudioCtx` höchstens dessen Fenster (512 → 10 s), außer Parakeet hört alle Phasen. |
 | `ignoreWhileSpeaking` | `true` | Was jemand sagt, während der Bot spricht, wird ignoriert (Schutz vor Echo ohne Kopfhörer). |
@@ -209,6 +212,8 @@ Diese Regeln kannst du im Discord-Chat ändern (`!quiz regel …`). Sie werden p
 | `erinnerungstakt`, `nacherinnerung` | `pickReminderRepeatSec` | Weitere Erinnerungen im selben Zug, nur im Chat (5 bis 600, `aus` = keine) |
 | `kartenhinweis`, `hinweis` | `pickHint` | Hinweis „Welche Karte?“ bei gesprochener Kartenwahl (`an` / `aus`) |
 | `pause`, `richtigpause` | `revealPauseSolvedSec` | Pause nach richtiger Antwort, bevor die Karte schließt, in Sekunden (0 bis 30, eine Nachkommastelle, z.B. `1,5`) |
+| `nachfrist`, `jazeit` | `confirmGraceSec` | Sprache: Nachfrist für das „Ja“ nach der Rückfrage in Sekunden (1 bis 20, `aus` = keine) |
+| `autoabgabe` | `confirmAtDeadline` | Sprache: unbestätigte Antwort bei Zeitende werten (`an` / `aus`) |
 
 Faktoren akzeptieren `100%`, `50%`, `0.5`, `1/2`, `halb`, `2x`, `nichts`. Beispiel: `!quiz regel minus 0` = kein Abzug.
 

@@ -40,6 +40,8 @@ export function pickHintLine(example?: BoardCell): string {
 
 /** The person answering talked without the keyword – said once per game. */
 export const ANSWER_KEYWORD_LINE = 'Sag: Meine Antwort ist, und dann deine Antwort.';
+/** Once per answer, when the reply to "Paris?" was neither yes nor no. */
+export const CONFIRM_AGAIN_LINE = 'Ja oder nein?';
 
 export function categoriesLine(categories: string[]): string {
   if (!categories.length) return '';
@@ -177,6 +179,7 @@ export const FIXED_LINES: readonly string[] = [
   BUZZER_OPEN_LINE,
   'Okay. Deine Antwort?',
   ANSWER_KEYWORD_LINE,
+  CONFIRM_AGAIN_LINE,
   'Niemand? Schade.',
   'Da bin ich mir nicht sicher. Die Spielleitung entscheidet.',
   START_LINE,
