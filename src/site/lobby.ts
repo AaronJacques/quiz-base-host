@@ -1,5 +1,6 @@
 import type { BrowserDriver } from '../browser/driver.ts';
 import { createLogger, sleep } from '../core/logger.ts';
+import { NotLoggedInError } from './errors.ts';
 
 const log = createLogger('lobby');
 
@@ -77,8 +78,9 @@ export async function createLobbyWithPublicBoard(
 export async function createLobbyWithOwnBoard(driver: BrowserDriver, baseUrl: string, boardTitle: string): Promise<void> {
   log.info(`Erstelle Lobby: Tafelquiz / eigenes Board "${boardTitle}"`);
   await openFormat(driver, baseUrl, 'Tafelquiz');
-  const own = await call<{ ok: boolean; error?: string }>(driver, `clickButton('Eigenes Board verwenden')`);
-  if (!own.ok) throw new Error('„Eigenes Board verwenden“ fehlt – ist der Browser bei quiz-base angemeldet? (npx qbhost login)');
+  // The button appears only when logged in – give a slow page a few seconds before calling it a lost login.
+  const own = await until(driver, `clickButton('Eigenes Board verwenden').ok`, 5000);
+  if (!own) throw new NotLoggedInError('„Eigenes Board verwenden“ fehlt – nicht bei quiz-base angemeldet.');
   await sleep(400);
   const listed = await until(
     driver,

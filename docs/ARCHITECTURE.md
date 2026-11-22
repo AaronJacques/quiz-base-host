@@ -15,6 +15,7 @@ src/
 ├── board-cli.ts           `qbhost login` (sichtbarer Browser, Nutzer meldet sich selbst an) und `qbhost board-create`
 ├── board-studio.ts        BoardStudio = Generator + Register + Board-Editor im eingeloggten Browser; vom CLI und vom Bot genutzt
 ├── session.ts             GameSession = eine Runde (Browser, Bus, Controller, Judge); vom CLI und vom Bot genutzt
+├── account.ts             quiz-base-Konto: LoginStatusStore (`.qbhost/login-status.json`), AccountKeeper (Keep-alive im Leerlauf, Anmeldeprüfung, passive Auth-Beobachtung), formatLoginStatus
 ├── config.ts              Zod-Schema mit allen Einstellungen + Defaults
 │
 ├── core/                  framework-freie Basis
@@ -23,8 +24,9 @@ src/
 │   └── logger.ts
 │
 ├── browser/               "Wie kommt JS in einen Tab?"  – kein quiz-base-Wissen
-│   ├── driver.ts          BrowserDriver-Interface: open, goto, evaluate(expr), screenshot
-│   ├── playwright-driver.ts   eigener Chromium (persistentes Profil) + CDP-Attach an Chrome
+│   ├── driver.ts          BrowserDriver-Interface: open, goto, evaluate(expr), screenshot; ResponseWatch (passive Beobachtung)
+│   ├── playwright-driver.ts   eigener Chromium (persistentes Profil, Profil-Sperre, Warten auf laufende Token-Anfragen, closeOpenBrowsers) + CDP-Attach an Chrome
+│   ├── profile-lock.ts    eine Sperre pro Profilpfad im Prozess (FIFO, verdrängbarer Halter)
 │   └── orca-driver.ts     Orca-Built-in-Browser über `orca eval/goto/screenshot`
 │
 ├── site/                  "Wie sieht quiz-base aus?"  – das gesamte DOM-Wissen
@@ -135,6 +137,23 @@ BoardStore                         Register: angelegt + Link → `!quiz neu <Nam
 ```
 
 Das LLM sieht nie den Browser, und der Browser-Teil ruft kein LLM. Spiel und Editor teilen sich das eingeloggte Browser-Profil, deshalb laufen sie nie gleichzeitig (Chromium sperrt ein Profil für eine zweite Instanz).
+
+## Profil und Anmeldung
+
+```
+GameSession ─┐                         ┌─ Spiel (wartet ≤ 20 s)
+BoardStudio ─┼─ PlaywrightDriver.open ─┤   profileLock(profileDir): ein Browser pro Profil im Prozess, FIFO
+qbhost login ┤                         └─ Keep-alive: verdrängbar, wartet nie (lockWaitMs 0) → ProfileBusyError = „busy“
+AccountKeeper┘
+     │ watch: quizBaseAuthWatch ── Seite → *.supabase.co/auth/v1/… (nur Statuscode + error_code bei ≥ 400)
+     ▼
+LoginStatusStore ── .qbhost/login-status.json ── qbhost doctor (ohne Browser), Discord (A2)
+```
+
+- Jeder `PlaywrightDriver` hält die Sperre von `open()` bis zum Ende von `close()` und gibt sie in jedem Pfad frei (Startfehler, Ladefehler, `close()` wirft). `close()` während `open()` bricht das Öffnen ab. `closeOpenBrowsers(ms)` schließt beim Herunterfahren alle noch offenen Browser parallel.
+- Zwischen Prozessen schützt Chromiums `SingletonLock`; ein Start scheitert dann (Ergebnis `error` der Prüfung).
+- Der Such-Browser (`profileDir-search`) hat eine eigene Sperre und blockiert nichts.
+- `AccountKeeper` prüft nur, wenn `isIdle()` stimmt (Spiel, Board-Anlage und Voice-Raum liefert der Bot, A2). Im Polling-Pfad läuft nichts davon: ein Zeitgeber (unref) schaut höchstens alle 5 min auf den Plan.
 
 ## Erweiterungspunkte
 

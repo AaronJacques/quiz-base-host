@@ -191,6 +191,20 @@ Das Web-Spieler-Pult (`http://<rechner>:4747`). Mitspieler öffnen es im Browser
 | `port` | `4747` | Port. CLI: `--port`. |
 | `host` | `0.0.0.0` | Adresse, auf der gelauscht wird. `0.0.0.0` = aus dem ganzen Netzwerk erreichbar, sonst nur `127.0.0.1` (nur dieser Rechner). Das Pult hat keine Anmeldung, daher nur in einem Netz, dem du vertraust. |
 
+## `account`
+
+Das quiz-base-Konto des Bots (eigene Boards). Der Bot hält die Anmeldung im Leerlauf frisch und schreibt ihren Stand in eine Status-Datei. Nur mit `browser.driver: "playwright"`; mit `orca`/`cdp` gibt es keine eigenen Prüfläufe. Siehe [DEPLOY.md](DEPLOY.md#anmeldung-hält).
+
+| Option | Default | Bedeutung |
+|---|---|---|
+| `keepAliveHours` | `6` | Alle so viele Stunden öffnet der Bot im Leerlauf (kein Spiel, keine Board-Anlage, kein Voice-Raum) kurz headless quiz-base, damit die Seite ihre Sitzung erneuert, und prüft das Benutzermenü. `0` = aus (dann auch keine Prüfung beim Start und nach Spielen). Höchstens `48`. |
+| `keepAliveJitterMin` | `30` | Zufällige Verschiebung je Lauf, ± Minuten. |
+| `startCheckDelaySec` | `120` | Erste Prüfung so viele Sekunden nach dem Start (Sprachmodelle laden zuerst). Läuft vorher ein Spiel, entfällt sie; dann zählt die Prüfung nach dem Spiel. |
+| `afterGameCheckSec` | `60` | Prüfung so viele Sekunden nach jedem Spiel, sobald der Bot im Leerlauf ist. `0` = keine. |
+| `holdSec` | `20` | So lange bleibt die Seite höchstens offen, wenn keine Erneuerung zu sehen ist (5–120). |
+| `statusFile` | `.qbhost/login-status.json` | Anmeldestatus mit Zeitstempeln, Statuscodes und Fehlercodes der Seite. Ohne Tokens, Cookies und URLs. `qbhost doctor` zeigt ihn. |
+| `loginCommand` | `npx qbhost login` | Befehl, den Hinweise (und ab A2 die DM) zum Neuanmelden nennen. Auf dem Server: `"npx qbhost login --server <ssh-host>"`. |
+
 ## Spielregeln (zur Laufzeit änderbar)
 
 Diese Regeln kannst du im Discord-Chat ändern (`!quiz regel …`). Sie werden pro Server in `discord.dataDir` gespeichert und gelten ab der nächsten Frage. Während eines Spiels darf nur die Spielleitung ändern.

@@ -5,5 +5,6 @@
     "channelIds": ["<Channel-ID>"],
     "prefix": "!quiz"
   },
+  "account": { "loginCommand": "npx qbhost login --server quizmaster-vps" },
   "voice": { "enabled": true, "whisperModel": "models/ggml-small-q5_1.bin", "whisperFastModel": "models/ggml-base-q5_1.bin", "whisperAudioCtx": 512, "ttsSplitSentences": true, "ttsDiskCache": true }
 }

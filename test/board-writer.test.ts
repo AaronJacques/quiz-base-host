@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildBoard, defaultSpec, mcSlots, type BoardOut, type BoardSpec, type GeneratedBoard } from '../src/boardgen/index.ts';
 import { ConfigSchema } from '../src/config.ts';
 import { setLogLevel } from '../src/core/logger.ts';
+import { NotLoggedInError } from '../src/site/errors.ts';
 import { writeBoard } from '../src/site/editor/writer.ts';
 import { FakeBoardEditorPage } from './fake-editor.ts';
 
@@ -90,11 +91,21 @@ describe('writeBoard (Board-Editor)', () => {
     expect(page.saved!.categories[0]!.questions.map((q) => q.note)).toEqual(['Antwort 0-0 / Var 0-0', 'Antwort 0-1 / Var 0-1', 'Antwort 0-2 / Var 0-2']);
   });
 
-  it('ohne Login: klare Meldung, nichts eingetragen', async () => {
+  it('ohne Login: NotLoggedInError, nichts eingetragen', async () => {
     const page = new FakeBoardEditorPage();
     page.loggedIn = false;
-    await expect(writeBoard(page, board(), fast)).rejects.toThrow(/qbhost login/);
+    const err = await writeBoard(page, board(), fast).catch((e) => e);
+    expect(err).toBeInstanceOf(NotLoggedInError);
+    expect(err.message).toMatch(/Nicht bei quiz-base angemeldet/);
     expect(page.saved).toBeNull();
     expect(page.log).toEqual([]);
+  });
+
+  it('unklarer Login (null) ist nie „abgemeldet“: es geht weiter', async () => {
+    const page = new FakeBoardEditorPage();
+    const loginState = vi.spyOn(page, 'loginState').mockResolvedValue(null);
+    await writeBoard(page, board(), fast);
+    expect(loginState).toHaveBeenCalled();
+    expect(page.saved).not.toBeNull();
   });
 });

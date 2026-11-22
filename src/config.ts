@@ -324,6 +324,26 @@ export const ConfigSchema = z.object({
       host: z.string().default('0.0.0.0'),
     })
     .prefault({}),
+
+  /** quiz-base-Konto des Bots (eigene Boards): Anmeldung im Leerlauf frisch halten und überwachen. Nur mit `browser.driver: playwright`. */
+  account: z
+    .object({
+      /** Alle so viele Stunden öffnet der Bot im Leerlauf kurz quiz-base, damit die Seite die Sitzung erneuert. 0 = aus. */
+      keepAliveHours: z.number().min(0).max(48).default(6),
+      /** Zufällige Verschiebung je Lauf (± Minuten). */
+      keepAliveJitterMin: z.number().int().min(0).max(120).default(30),
+      /** Erste Prüfung so viele Sekunden nach dem Start (Sprachmodelle laden zuerst). */
+      startCheckDelaySec: z.number().int().min(0).default(120),
+      /** Prüfung so viele Sekunden nach jedem Spiel (im Leerlauf). 0 = keine. */
+      afterGameCheckSec: z.number().int().min(0).default(60),
+      /** So lange bleibt die Seite höchstens offen, wenn keine Erneuerung zu sehen ist. */
+      holdSec: z.number().int().min(5).max(120).default(20),
+      /** Anmeldestatus mit Zeitstempeln (ohne Tokens). */
+      statusFile: z.string().default('.qbhost/login-status.json'),
+      /** Befehl, den Hinweise und DMs zum Neuanmelden nennen (Server: "npx qbhost login --server <ssh-host>"). */
+      loginCommand: z.string().default('npx qbhost login'),
+    })
+    .prefault({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

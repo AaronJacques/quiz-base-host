@@ -1,5 +1,6 @@
 import type { GeneratedBoard } from '../../boardgen/schema.ts';
 import { createLogger, sleep } from '../../core/logger.ts';
+import { NotLoggedInError } from '../errors.ts';
 import type { ActionResult } from '../tafelquiz/page.ts';
 import type { BoardEditorPort, EditorQuestion, EditorState } from './page.ts';
 
@@ -51,7 +52,8 @@ export async function writeBoard(port: BoardEditorPort, board: GeneratedBoard, o
   await port.start();
   await waitFor((s) => s.templates.includes('Benutzerdefiniert'), 'Board-Editor lädt nicht');
   const loggedIn = await port.loginState();
-  if (loggedIn === false) throw new EditorError('Nicht bei quiz-base angemeldet. Einmal "npx qbhost login" auf dem Bot-Rechner ausführen.');
+  // Only a sure "logged out" stops here; null (unclear) goes on – saving fails later if it really is logged out.
+  if (loggedIn === false) throw new NotLoggedInError('Nicht bei quiz-base angemeldet.');
   await step(port.chooseTemplate('Benutzerdefiniert'), 'Template wählen');
 
   // Step 2: number of boards.

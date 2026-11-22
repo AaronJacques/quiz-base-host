@@ -70,7 +70,7 @@ docker compose -f app/deploy/compose.yml restart bot        # Neustart
 docker compose -f app/deploy/compose.yml exec bot node_modules/.bin/tsx src/cli.ts doctor   # Selbstdiagnose
 ```
 
-- **Deploy während eines Spiels:** Ein laufendes Spiel wird beim Neustart beendet (der Bot hat 40 s, es auf quiz-base sauber zu schließen). Pushes auf `main` also nicht mitten in einer Runde.
+- **Deploy während eines Spiels:** Ein laufendes Spiel wird beim Neustart beendet (der Bot hat 60 s, es auf quiz-base sauber zu schließen und die Browser zu schließen). Pushes auf `main` also nicht mitten in einer Runde.
 - **Rollback von Hand:** `mv app app.bad && mv app.prev app && docker image tag quizmaster:prev quizmaster:latest && docker compose -f app/deploy/compose.yml up -d --no-build`
 - **Kleine Server:** siehe [unten](#kleine-server). Nach einer Änderung von `qbhost.config.json` prüft der Container beim nächsten Start die Sprachmodelle und lädt neue nach (vorhandene werden übersprungen). Erzwingen: `data/voice/.ready` löschen.
 - **quiz-base-Anmeldung für eigene Boards:** vom Mac aus mit `npx qbhost login --server quizmaster-vps`, siehe [unten](#quiz-base-anmeldung-auf-dem-server).
@@ -156,6 +156,34 @@ Das stoppt den Bot kurz, löscht den Profilordner des Bots auf dem Server und st
   sudo docker start quizmaster-bot-1                                 # Bot starten (Name aus der ersten Zeile)
   ```
 - **`Nicht angemeldet`:** Die Anmeldung wurde nicht erkannt, z. B. wegen eines falschen Passworts oder weil die Zeit um war. Einfach noch einmal starten.
+
+### Anmeldung hält
+
+Die Anmeldung ging auf dem Server mehrfach nach einigen Tagen verloren, ohne dass sich jemand abgemeldet hat. Das Cookie selbst läuft erst nach 400 Tagen ab; die Sitzung endet also auf quiz-base-Seite (Leerlauf- oder Zeitlimit) oder geht bei einem harten Stopp verloren. Der Bot tut deshalb dreierlei:
+
+- **Keep-alive:** Im Leerlauf (kein Spiel, keine Board-Anlage, kein Voice-Raum) öffnet er alle 6 h (± 30 min) kurz headless quiz-base, außerdem 120 s nach dem Start und 60 s nach jedem Spiel. Die Seite erneuert dabei ihre Sitzung selbst (das Access-Token gilt 1 h, also erneuert jeder dieser Besuche). Der Bot liest nur das Benutzermenü und schließt den Browser sauber; er wartet dabei bis zu 5 s auf eine laufende Erneuerung. Braucht ein Spiel oder eine Board-Anlage das Profil, bricht er die Prüfung ab (die Lobby startet höchstens ~20 s später). Einstellungen: `account` in [CONFIG.md](CONFIG.md#account). Abschalten ohne Rollback: `"account": { "keepAliveHours": 0 }` und Neustart.
+- **Status:** `data/login-status.json` (im Container `.qbhost/login-status.json`) hält Zustand, „angemeldet seit“, letzte Prüfungen und die letzten Anfragen der Seite an ihre Anmeldung: Art, Statuscode und bei Fehlern den Supabase-Fehlercode. Keine Tokens, Cookies oder URLs. Anzeigen ohne Browser:
+  ```bash
+  sudo docker exec quizmaster-bot-1 node_modules/.bin/tsx src/cli.ts doctor
+  ```
+  ```
+  ✅ quiz-base-Anmeldung: angemeldet (geprüft 14:02 Keep-alive, erneuert 14:02, nächste Prüfung ~20:10)
+  ❌ quiz-base-Anmeldung: abgemeldet seit 20.11. 15:02 (Erneuerung abgelehnt: 400 session_expired) → npx qbhost login --server quizmaster-vps
+  ```
+  Den Befehl in der Meldung legt `account.loginCommand` fest; auf dem Server in `qbhost.config.json` `"account": { "loginCommand": "npx qbhost login --server quizmaster-vps" }` eintragen (Vorlage: `deploy/qbhost.config.server.example.json`).
+- **Sauberer Stopp:** Docker gibt dem Bot 60 s (`stop_grace_period`, auch `docker stop -t 60` im Login-Skript). Ein Chromium, der hart beendet wird, kann ein gerade erneuertes Token verlieren (Chromium schreibt Cookies gebündelt etwa alle 30 s).
+
+Log-Zeilen (`docker logs`), alle mit `🔐`:
+- `🔐 quiz-base-Anmeldung (keepalive): angemeldet · Sitzung erneuert (200) · 14 s · Browser zu in 1,2 s` – so soll es alle ~6 h aussehen.
+- `🔐 quiz-base-Anmeldung (start): abgemeldet · Erneuerung abgelehnt (400 session_expired) · angemeldet seit 20.11. 15:08 (seit 49 h ohne Erneuerung)` – Verlust, zusätzlich als Warnung.
+- `🔐 Seite hat eine anonyme Sitzung angelegt (Spiel)` bzw. `🔐 Seite hat sich abgemeldet (Spiel)` – die Seite selbst hat das getan; Quelle und Zeit stehen in der Status-Datei.
+
+Was die Fehlercodes nahelegen (Erwartung nach Supabase-Standard, nicht geprüft):
+- `session_expired`: Leerlauf- oder Zeitlimit des quiz-base-Projekts. Tritt das trotz Keep-alive immer im gleichen Abstand zu „angemeldet seit“ auf, ist es ein festes Zeitlimit; dagegen hilft nur, rechtzeitig neu anzumelden.
+- `refresh_token_already_used`: Ein schon benutztes Token wurde noch einmal geschickt, meist nach einem harten Stopp kurz nach einer Erneuerung. Dann das Log des letzten Herunterfahrens prüfen.
+- `session_not_found`, `refresh_token_not_found`: Die Sitzung wurde gelöscht (Abmelden anderswo, Passwortwechsel, Betreiber).
+
+Nicht garantiert: Ein festes Zeitlimit, ein Widerruf durch quiz-base oder ein Passwortwechsel beendet die Sitzung trotzdem. Ein Absturz, OOM-Kill oder Stromausfall kurz nach einer Erneuerung kann das neue Token verlieren. Der Bot merkt das spätestens bei der nächsten Prüfung (≤ 6 h) oder beim nächsten Spiel mit eigenem Board.
 
 ## Kleine Server
 

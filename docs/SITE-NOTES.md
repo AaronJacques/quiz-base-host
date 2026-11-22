@@ -71,6 +71,19 @@ Live erkundet mit Host + 2 Testspielern. Diese Datei dokumentiert, worauf `src/s
 - Header: `button[aria-label="Benutzermenu"]` öffnet ein Menü. Abgemeldet enthält es das Login-Formular: `input[type=email]` (`deine@email.com`), `input[type=password]`, Button `Anmelden`, `Passwort vergessen?`, `Noch kein Account? Registrieren`. Nur E-Mail + Passwort, kein OAuth.
 - Angemeldet (live 13.11.2026) enthält das Menü die Buttons `Profil`, `Postfach`, `Meine Boards`, `Frage einreichen`, `Meine Einreichungen`, `Premium`, `Abmelden`. Nach dem Anmelden **klappt quiz-base das Menü zu** – `qbhost login` öffnet es dann einmal kurz zum Prüfen.
 - `src/site/editor/probe.browser.js` `account()` erkennt den Login nur an festen Menü-Beschriftungen und liest weder Namen noch E-Mail.
+- `BoardEditorPage.loginState()` liest bis zu dreimal im Abstand von 2,5 s (Menü öffnen, bis zu 4 s auf das offene Menü warten, selbst geöffnetes Menü wieder schließen). „Abgemeldet“ gilt erst nach zwei solchen Blicken mindestens 2 s auseinander (`decideLogin`), ein unklares Ergebnis (`null`) nie als abgemeldet.
+- „Eigenes Board verwenden“ erscheint im Lobby-Wizard nur angemeldet; `createLobbyWithOwnBoard` wartet bis zu 5 s darauf und wirft sonst `NotLoggedInError`.
+
+### Anmeldung und Sitzung (Server-Diagnose 22.11.2026)
+
+- Cookie `sb-<ref>-auth-token`, persistent, Laufzeit **400 Tage** ab dem Schreiben (Standard von `@supabase/ssr`), nicht in Stücke geteilt (~3 KB). Ein clientseitiger Cookie-Ablauf ist also nicht die Ursache verlorener Anmeldungen.
+- Die Seite erneuert erst, wenn das Access-Token (1 h) abgelaufen ist: Während Board-Anlage und Spiel unter 1 h nach dem Login blieb das Cookie unverändert. Jeder Seitenaufruf mehr als 1 h nach der letzten Erneuerung löst eine aus.
+- Die Seite spricht ihre Supabase-Anmeldung selbst an (`https://<ref>.supabase.co/auth/v1/…`):
+  - `token?grant_type=refresh_token` = Erneuerung, `token?grant_type=password` = Anmelden, `signup` = (anonyme) Sitzung anlegen, `logout`, `user`.
+  - qbhost ruft keinen dieser Endpunkte auf. Die Bot-Browser beobachten nur passiv Statuscode und bei Status ≥ 400 das Feld `error_code` (`src/site/auth.ts`, `readWatchedResponse` in `src/browser/driver.ts`); Antworten mit 2xx werden nie gelesen (sie enthalten Tokens).
+  - Erwartete `error_code`s (Supabase-Standard, nicht live gesehen): `refresh_token_already_used` (Wiederverwendung nach Rotation), `session_expired` (Leerlauf- oder Zeitlimit), `session_not_found` / `refresh_token_not_found` (Sitzung gelöscht oder abgemeldet). Der Code setzt nichts davon voraus, er loggt nur.
+- Ein frisches, leeres Profil auf der Startseite (live 22.11.2026): Das Benutzermenü zeigt das Login-Formular (zweimal im Abstand von 2,5 s gelesen → „abgemeldet“); dabei schickt die Startseite keine Anfrage an `auth/v1`.
+- Die Probe klickt nur den Menü-Button (`toggleMenu`), nie „Abmelden“.
 
 ## Board-Editor Tafelquiz (`/configure-lobby?format=tafelquiz`, Stand 12.11.2026)
 

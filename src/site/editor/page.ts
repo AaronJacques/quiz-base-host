@@ -60,7 +60,7 @@ export interface BoardEditorPort {
   /** Opens the empty Tafelquiz editor (step 1). */
   start(): Promise<void>;
   state(): Promise<EditorState>;
-  /** true/false from the user menu; null if it cannot be determined. */
+  /** true/false from the user menu; null if it cannot be determined (null is never "logged out"). */
   loginState(): Promise<boolean | null>;
   chooseTemplate(name: string): Promise<ActionResult>;
   clickButton(label: string): Promise<ActionResult>;
@@ -81,6 +81,35 @@ export interface BoardEditorPort {
   changePoints(i: number, delta: 1 | -1): Promise<ActionResult>;
   /** Saves the filled editor as own board (needs a quiz-base login). */
   save(meta: SaveMeta): Promise<SaveResult>;
+}
+
+/**
+ * Pure decision over the reads of one login check: true on the first true; false only after two false reads at
+ * least `minGapMs` apart (a page still loading can show "Anmelden" for a moment); otherwise null.
+ */
+export function decideLogin(reads: { at: number; value: boolean | null }[], minGapMs = 2000): boolean | null {
+  if (reads.some((r) => r.value === true)) return true;
+  const falses = reads.filter((r) => r.value === false).map((r) => r.at);
+  if (falses.length >= 2 && Math.max(...falses) - Math.min(...falses) >= minGapMs) return false;
+  return null;
+}
+
+/** Up to `attempts` reads `gapMs` apart (stops early on a decision or an abort), decided by decideLogin. */
+export async function loginStateWith(
+  read: () => Promise<boolean | null>,
+  opts: { attempts?: number; gapMs?: number; signal?: AbortSignal } = {},
+): Promise<boolean | null> {
+  const attempts = opts.attempts ?? 3;
+  const gapMs = opts.gapMs ?? 2500;
+  const reads: { at: number; value: boolean | null }[] = [];
+  for (let i = 0; i < attempts && !opts.signal?.aborted; i++) {
+    if (i) await sleep(gapMs, opts.signal);
+    if (opts.signal?.aborted) break;
+    reads.push({ at: Date.now(), value: await read().catch(() => null) });
+    const d = decideLogin(reads);
+    if (d !== null) return d;
+  }
+  return decideLogin(reads);
 }
 
 /** Typed façade over the editor probe. Only the board writer talks to it. */
@@ -110,15 +139,29 @@ export class BoardEditorPage implements BoardEditorPort {
     return this.call<EditorState>('state');
   }
 
-  async loginState(): Promise<boolean | null> {
+  /**
+   * Robust login check: up to `attempts` reads of the user menu `gapMs` apart, stops at the first "logged in".
+   * "Logged out" needs two such reads at least 2 s apart (decideLogin); anything else is null.
+   */
+  loginState(opts: { attempts?: number; gapMs?: number; signal?: AbortSignal } = {}): Promise<boolean | null> {
+    return loginStateWith(() => this.readLogin(opts.signal), opts);
+  }
+
+  /** One read: open the user menu if needed, wait until it shows (≤ 4 s), read, close what we opened. */
+  private async readLogin(signal?: AbortSignal): Promise<boolean | null> {
     const before = await this.call<{ menuOpen: boolean }>('account');
+    let openedHere = false;
     if (!before.menuOpen) {
       const opened = await this.act('toggleMenu');
       if (!opened.ok) return null;
-      await sleep(700);
+      openedHere = true;
     }
-    const acc = await this.call<{ menuOpen: boolean; loggedIn: boolean | null }>('account');
-    if (acc.menuOpen) await this.act('toggleMenu');
+    let acc = await this.call<{ menuOpen: boolean; loggedIn: boolean | null }>('account');
+    for (const end = Date.now() + 4000; !acc.menuOpen && Date.now() < end && !signal?.aborted; ) {
+      await sleep(250, signal);
+      acc = await this.call<{ menuOpen: boolean; loggedIn: boolean | null }>('account');
+    }
+    if (openedHere && acc.menuOpen) await this.act('toggleMenu');
     return acc.loggedIn;
   }
 
