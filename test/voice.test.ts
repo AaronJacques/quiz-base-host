@@ -1674,6 +1674,7 @@ describe('voice: keyword and confirmation (package C)', () => {
       ['Äh, also, meine Antwort ist Rom', 'Rom'],
       ['Meine Antwort ist Es', 'Es'], // Stephen King
       ['Meine Antwort ist Nabu, mein Antwort ist Tatooine', 'Tatooine'],
+      ['Oh, quatsch, meine Antwort ist Bern', 'Bern'], // restored (V3 C-F10)
       ['Ach nein, quatsch, meine Antwort ist Bern', 'Bern'],
     ];
     for (const [said, answer] of answers) expect(extractAnswer(said), said).toBe(answer);
@@ -1857,7 +1858,7 @@ describe('voice: review fixes for package C (C-F1, C-F4, C-F5)', () => {
       ['Ja, sag ich doch', 'Paris'],
       ['Ja, das war meine Antwort', 'Paris'],
       ['Ja, glaube schon', 'Paris'],
-      ['Ja, Herr Zimmer', 'Hans Zimmer'], // misheard, by sound
+      ['Ja, Zimmer', 'Hans Zimmer'], // part of the waiting answer (no sound-alike matching since V3 C-F8)
       ['Jaja', 'Paris'],
       ['Mhm, ja', 'Paris'],
       ['Ja, meine finale Antwort', 'Paris'], // the bare keyword after "Ja" brings no new answer
@@ -1878,7 +1879,7 @@ describe('voice: review fixes for package C (C-F1, C-F4, C-F5)', () => {
   });
 
   it('C-F5: "ach"/"oh" only with "nein" in front of the keyword; talk about the answer is no answer; the strong keyword needs a verb', () => {
-    for (const said of ['Oh, die Antwort weiß ich nicht', 'Ach, meine Antwort weiß ich nicht', 'Die Antwort weiß ich nicht', 'Meine Antwort hab ich vergessen', 'Oh, meine Antwort ist Rom'])
+    for (const said of ['Oh, die Antwort weiß ich nicht', 'Ach, meine Antwort weiß ich nicht', 'Die Antwort weiß ich nicht', 'Meine Antwort hab ich vergessen'])
       expect(extractAnswer(said), said).toBeNull();
     expect(extractAnswer('Ach nein, meine Antwort ist Rom')).toBe('Rom');
     expect(extractAnswer('Oh nein, mein Antwort ist Rom')).toBe('Rom');
@@ -1993,6 +1994,149 @@ describe('QuizBot voice: review fixes for package C (C-F1, C-F2, C-F4–C-F6)', 
     await until(() => answers.length === 1);
     expect(answers).toEqual(['zehn']);
     expect(commands).toEqual([]);
+    await t.bot.shutdown();
+  }, 20000);
+});
+
+describe('voice: delta review of package C (C-F8–C-F11)', () => {
+  it('C-F8: a "Ja" with another answer never confirms the waiting one – numbers by value, words exactly, no sound-alikes', () => {
+    const other: [string, string][] = [
+      ['Ja, 1979', '1977'],
+      ['Ja, Rot drei', 'Rot vier'],
+      ['Ja, Apollo 13', 'Apollo 11'],
+      ['Ja, Hans Albers', 'Hans Zimmer'],
+      ['Ja, Homburg', 'Hamburg'],
+      ['Ja, Herr Zimmer', 'Hans Zimmer'], // could be another name: "Ja oder nein?" once, never the old answer
+      ['Ja, neunzehnhundertneunundsiebzig', '1977'],
+    ];
+    for (const [said, pending] of other) expect(confirmReply(said, pending), `${said} / ${pending}`).toBeNull();
+    const same: [string, string][] = [
+      ['Ja, 1977', '1977'],
+      ['Ja, neunzehnhundertsiebenundsiebzig', '1977'],
+      ['Ja, zehn', '10'],
+      ['Ja, Rot vier', 'Rot 4'],
+      ['Ja, Zimmer', 'Hans Zimmer'],
+      ['Ja, ein Pferd', 'Ein Pferd'],
+      ['Ja, das ist meine endgültige Antwort, 1977', '1977'],
+    ];
+    for (const [said, pending] of same) expect(confirmReply(said, pending), `${said} / ${pending}`).toBe('yes');
+  });
+
+  it('C-F9: a "Ja" cut off at a pause or asking back is no "Ja" – and the cut-off one waits without asking', () => {
+    for (const said of ['Ja, ich glaube', 'Ja, ich denke', 'Ja, ich hab', 'Ja, ich war', 'Ja, die', 'Ja, das ist']) {
+      expect(confirmReply(said, 'Paris'), said).toBeNull();
+      expect(confirmWaits(said), said).toBe(true);
+    }
+    for (const said of ['Ja, war das richtig?', 'Ja, ist das richtig?']) expect(confirmReply(said, 'Paris'), said).toBeNull();
+    // Whole phrases and a plain "Ja?" still confirm.
+    for (const said of ['Ja?', 'Ja, ich glaube schon', 'Ja, glaube ich', 'Ja, sag ich doch', 'Ja, das war meine Antwort', 'Ja, das ist es'])
+      expect(confirmReply(said, 'Paris'), said).toBe('yes');
+  });
+
+  it('C-F10: "Ach", "Oh", "Ach so", "Oh Mann" in front of the keyword with its verb – the answer counts', () => {
+    const answers: [string, string][] = [
+      ['Ach, quatsch, meine Antwort ist Bern', 'Bern'],
+      ['Ach Quatsch, meine Antwort ist Rom', 'Rom'],
+      ['Oh, meine Antwort ist Rom', 'Rom'],
+      ['Ach so, meine Antwort ist Paris', 'Paris'],
+      ['Oh Mann, meine Antwort ist Rom', 'Rom'],
+      ['Achso, ich antworte mit Rom', 'Rom'],
+    ];
+    for (const [said, answer] of answers) {
+      expect(extractAnswer(said), said).toBe(answer);
+      expect(hasStrongKeyword(said), said).toBe(true);
+    }
+    // Without a verb it stays thinking aloud.
+    for (const said of ['Oh, die Antwort weiß ich nicht', 'Ach, meine Antwort weiß ich nicht', 'Oh, Antwort Rom']) expect(extractAnswer(said), said).toBeNull();
+  });
+
+  it('a long run of fillers without the keyword is read at once (no exponential backtracking)', () => {
+    const start = Date.now();
+    for (const filler of ['ähm ', 'ach so, ', 'ach nein, ', 'oh, ja, ']) {
+      expect(extractAnswer(`${filler.repeat(26)}und dann`)).toBeNull();
+      expect(hasStrongKeyword(`${filler.repeat(26)}meine Antwort weiß`)).toBe(false);
+    }
+    expect(Date.now() - start).toBeLessThan(200);
+  });
+
+  it('C-F11: the keyword with its verb and nothing after it is no "Ja" – the answer is still to come', () => {
+    for (const said of ['Genau, meine Antwort ist', 'Ja, meine Antwort ist', 'Ja, die Antwort ist', 'Meine Antwort ist'])
+      expect(confirmReply(said, 'Paris'), said).toBeNull();
+    expect(confirmReply('Ja, meine finale Antwort', 'Paris')).toBe('yes'); // without verb: a "Ja"
+  });
+});
+
+describe('QuizBot voice: delta review of package C (C-F7, C-F8, C-F11)', () => {
+  async function asked(t: ReturnType<typeof voiceSetup>) {
+    await voiceGame(t);
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+  }
+  const answersOf = (t: ReturnType<typeof voiceSetup>) => {
+    const out: string[] = [];
+    t.session().bus.on('player:answer', (a) => void out.push(a.answer));
+    return out;
+  };
+
+  it('C-F11: "Genau, meine Antwort ist" + pause + "zehn" replaces the waiting answer – no "Ja", no asking back', async () => {
+    const t = voiceSetup();
+    await asked(t);
+    const answers = answersOf(t);
+    t.room().speak(annaS, 'Meine Antwort ist neun');
+    await until(() => t.room().played.includes('neun?'));
+    t.room().speak(annaS, 'Genau, meine Antwort ist');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(answers).toEqual([]); // the old answer was not given
+    expect(t.room().played).not.toContain(CONFIRM_AGAIN_LINE);
+    t.room().speak(annaS, 'zehn'); // the rest, as its own utterance
+    await until(() => t.room().played.includes('zehn?'));
+    t.room().speak(annaS, 'Ja');
+    await until(() => answers.length === 1);
+    expect(answers).toEqual(['zehn']);
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('C-F11: also without an answer waiting: "Meine Antwort ist" + "zehn" is asked back', async () => {
+    const t = voiceSetup();
+    await asked(t);
+    t.room().speak(annaS, 'Oh, meine Antwort ist'); // C-F10 lead, too
+    await new Promise((r) => setTimeout(r, 300));
+    t.room().speak(annaS, 'zehn');
+    await until(() => t.room().played.includes('zehn?'));
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('C-F8: "Ja, 1979" while "1977?" waits gives "Ja oder nein?", never the old answer', async () => {
+    const t = voiceSetup();
+    await asked(t);
+    const answers = answersOf(t);
+    t.room().speak(annaS, 'Meine Antwort ist 1977');
+    await until(() => t.room().played.includes('1977?'));
+    t.room().speak(annaS, 'Ja, 1979');
+    await until(() => t.room().played.includes(CONFIRM_AGAIN_LINE));
+    expect(answers).toEqual([]);
+    expect(t.bot.activeGame?.pending?.answer).toBe('1977');
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('C-F7: skipping while "Paris?" waits drops that answer: a late "Ja" submits nothing, and nothing stays "being judged"', async () => {
+    // A pause between the reveal and the next turn – that is when the old answer was still waiting.
+    const t = voiceSetup({ revealPauseSec: 3, revealPauseSolvedSec: 3 });
+    await asked(t); // Anna is the leader
+    const answers = answersOf(t);
+    t.room().speak(annaS, 'Meine Antwort ist neun');
+    await until(() => t.room().played.includes('neun?'));
+    await t.write(annaS, '!quiz skip');
+    await until(() => t.chat().includes('Lösung'));
+    expect(t.bot.activeGame?.pending).toBeNull();
+    expect(t.bot.activeGame?.awaiting).toBeNull();
+    t.room().speak(annaS, 'Ja');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(answers).toEqual([]);
+    expect(t.bot.activeGame?.judging).toBe(false);
+    await t.write(annaS, '!quiz skip');
+    await until(() => t.chat().includes('Gerade gibt es nichts zu überspringen'));
+    expect(t.chat()).not.toContain('Ich bewerte gerade noch');
     await t.bot.shutdown();
   }, 20000);
 });
