@@ -346,6 +346,25 @@ export function isFormula(s: string): boolean {
 }
 
 /**
+ * The short solution of a note "<short solution> - <explanation>" – "1. September 1939 - In Europa begann der Zweite
+ * Weltkrieg am 1. September 1939 …" → "1. September 1939". The explanation starts after a dash with spaces (or a line
+ * break), begins with a letter and has at least 5 words; otherwise the whole note is the solution ("Bryan Adams - Summer
+ * Of 69", "1939 - 1945"). The same rule as the spoken reveal (voice/narration.ts `solutionCore`).
+ */
+export function referenceCore(note: string): string {
+  const text = stripUrls(note).trim();
+  const m = /^(.+?)(?:\s+[-–—]\s+|[ \t]*\n\s*)(?=\p{L})(.+)$/su.exec(text);
+  if (m && /[\p{L}\d]/u.test(m[1]!) && m[2]!.trim().split(/\s+/).length >= 5) return m[1]!.trim();
+  return text;
+}
+
+/** Months and seasons – parts of a date ("1. September 1939", "Sommer 1961"). */
+export const DATE_WORDS: ReadonlySet<string> = new Set([
+  'januar', 'jaenner', 'februar', 'maerz', 'april', 'mai', 'juni', 'juli', 'august', 'september', 'oktober', 'november', 'dezember',
+  'fruehling', 'fruehjahr', 'sommer', 'herbst', 'winter',
+]);
+
+/**
  * Splits a host note into acceptable answer variants. Notes often look like
  * "Tatooine https://…", "Volksrepublik China", "Breaking Bad / BB",
  * "Der Federball (Badminton) kann …" – we take the whole note, the part before
@@ -355,6 +374,13 @@ export function referenceVariants(note: string): string[] {
   const clean = stripUrls(note).replace(/\s+/g, ' ').trim();
   if (!clean) return [];
   const variants = new Set<string>([clean]);
+  // "Polen - Am 1. September 1939 überfiel …": the short solution before the explanation is an answer of its own.
+  const core = referenceCore(note).replace(/\s+/g, ' ');
+  if (core !== clean) {
+    variants.add(core);
+    const coreBare = isFormula(core) ? core : core.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+    if (coreBare) variants.add(coreBare);
+  }
   const formula = isFormula(clean);
   const withoutParens = formula ? clean : clean.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
   if (withoutParens) variants.add(withoutParens);

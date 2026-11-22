@@ -258,3 +258,24 @@ describe('review V3 (B-F10): a small number right after "Millionen"', () => {
     expect(tok('eine Million fünfhunderttausend zwei')[0]).toMatchObject({ value: 1_500_002, ambiguous: false });
   });
 });
+
+describe('referenceCore: the short solution before an explanation', () => {
+  it.each([
+    ['1. September 1939 - In Europa begann der Zweite Weltkrieg am 1. September 1939 mit dem Überfall auf Polen.', '1. September 1939'],
+    ['Polen – Am 1. September 1939 überfiel die Wehrmacht Polen.', 'Polen'],
+    ['1939\nIn Europa begann der Krieg mit dem Überfall auf Polen.', '1939'],
+    ['Bryan Adams - Summer Of 69', 'Bryan Adams - Summer Of 69'], // short tail: part of the solution
+    ['1939 - 1945 dauerte der Krieg in ganz Europa', '1939 - 1945 dauerte der Krieg in ganz Europa'], // tail starts with a digit
+    ['Half-Life 2', 'Half-Life 2'],
+    ['Tatooine https://jedipedia.fandom.com/wiki/Anakin', 'Tatooine'],
+  ])('%j → %j', async (note, core) => {
+    const { referenceCore } = await import('../src/judge/normalize.ts');
+    expect(referenceCore(note)).toBe(core);
+  });
+
+  it('the short solution is an answer variant', async () => {
+    const { referenceVariants } = await import('../src/judge/normalize.ts');
+    expect(referenceVariants('Polen - Am 1. September 1939 überfiel die Wehrmacht Polen.')).toContain('Polen');
+    expect(referenceVariants('Bryan Adams - Summer Of 69')).not.toContain('Bryan Adams');
+  });
+});

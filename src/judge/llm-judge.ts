@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ImageInput, LlmClient, UsageMeter } from '../llm/client.ts';
 import type { AnswerJudge, JudgeInput, JudgeResult } from './judge.ts';
-import { numberParts, stripDialogueDash } from './normalize.ts';
+import { DATE_WORDS, numberParts, referenceCore, stripDialogueDash } from './normalize.ts';
 
 const VerdictSchema = z.object({
   correct: z.boolean(),
@@ -14,7 +14,7 @@ const SolveSchema = z.object({
 });
 
 /** Bump when JUDGE_SYSTEM changes meaningfully – invalidates cached verdicts. */
-export const JUDGE_RULES_VERSION = 4;
+export const JUDGE_RULES_VERSION = 5;
 
 // Kept short and stable on purpose: it is the bulk of every judging request.
 const JUDGE_SYSTEM = `Du bist ein fairer, lockerer Quizmaster bei einem Spieleabend unter Freunden.
@@ -25,6 +25,7 @@ Regeln:
 - Zusätzliche Wörter sind ok, solange sie nichts Falsches behaupten.
 - Fragt die Frage nach X "und/oder" Y, reicht eines davon.
 - Zahlen und Jahre müssen im Wert exakt stimmen (Einheiten egal); ausgeschriebene Zahlen zählen wie Ziffern ("neunzehnhundertneunundsiebzig" = 1979, also falsch, wenn 1977 gesucht ist). Toleranz nur bei Schätzfragen ("ca.") oder üblichen Rundungen bekannter Werte (z.B. "42 km" für 42,195 km beim Marathon), wenn die Frage nicht ausdrücklich exakt fragt.
+- Mehr Genauigkeit als gefragt ist nie nötig: Fragt die Frage nach einem Zeitpunkt oder Jahr ("Wann …?", "In welchem Jahr …?"), genügt das richtige Jahr, auch wenn die Lösung Tag und Monat nennt ("1939" für "1. September 1939"). Tag oder Monat sind nur nötig, wenn die Frage ausdrücklich nach dem Tag oder dem genauen Datum fragt.
 - Mehrere widersprüchliche Antworten auf einmal ("A oder B") sind falsch.
 - Die Lösung des Hosts kann zusätzliche Erklärungen oder Links enthalten – bewerte nur gegen den Kern.
 - Formeln: Es zählt der mathematische Inhalt, nicht die Schreibweise (x^2 = x² = x2, 1/2 = 0,5, pi = π, * = · = ×, sqrt(2) = √2). Eine andere Formel oder ein anderer Wert ist falsch.
@@ -48,8 +49,11 @@ export function numberHint(answer: string, reference: string | null, spoken = fa
   const values = (s: string | null) => {
     const seen = new Set<string>();
     const out: string[] = [];
-    for (const t of s ? numberParts(s).numbers : []) {
+    const { words, numbers: found } = s ? numberParts(s) : { words: [], numbers: [] };
+    for (const t of found) {
       if (t.article || t.partial) continue;
+      // The day of a date ("1. September 1939") is no value the answer has to name – only the year.
+      if (t.ordinal && t.value <= 31 && DATE_WORDS.has(words[t.to + 1]?.replace(/\.+$/, '') ?? '')) continue;
       // "12.000", "1.500", "12 000": thousands or not – every reading, never just one of them.
       const shown = t.readings?.length ? t.readings.map((r) => r.map(plainNumber).join(' und ')).join(' oder ') : plainNumber(t.value);
       if (!seen.has(shown) && out.length < HINT_VALUES) out.push(shown);
@@ -62,7 +66,8 @@ export function numberHint(answer: string, reference: string | null, spoken = fa
   const undashed = spoken ? values(stripDialogueDash(answer)) : plain;
   const negative = !!reference && numberParts(reference).numbers.some((t) => t.value < 0);
   const a = undashed.join() === plain.join() || !negative ? undashed : [`${undashed.join(', ') || '–'} oder ${plain.join(', ')}`];
-  const r = values(reference);
+  // Only the short solution: numbers of an explanation ("der Zweite Weltkrieg") are no values to match.
+  const r = values(reference ? referenceCore(reference) : null);
   if (!a.length && !r.length) return null;
   const show = (v: string[]) => (v.length ? v.join(', ') : '–');
   return `Zahlenwerte (automatisch gelesen): Antwort ${show(a)} | Lösung ${show(r)}`;

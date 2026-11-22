@@ -674,3 +674,99 @@ describe('FuzzyJudge – numbers, review V3', () => {
     }
   });
 });
+
+// Live test 2026-11-22 (L-F1): „1939“ for „Wann begann der 2. Weltkrieg?“ was judged wrong (−50) – the note names the
+// date twice and adds an explanation. One year value decides, the explanation does not count.
+describe('FuzzyJudge – year in a note with date and explanation (L-F1)', () => {
+  const q = 'Wann begann der 2. Weltkrieg?';
+  const note = '1. September 1939 - In Europa begann der Zweite Weltkrieg am 1. September 1939 mit dem von Adolf Hitler befohlenen Überfall auf Polen.';
+  const run = async (question: string, reference: string, answer: string) => {
+    const out: { mode: string; verdict: string; method: string; reason?: string }[] = [];
+    for (const rejectDissimilar of [false, true]) {
+      for (const spoken of [false, true]) {
+        const r = await new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar }).judge({ question, reference, answer, spoken });
+        out.push({ mode: `${rejectDissimilar ? 'strict' : 'cascade'}${spoken ? '/spoken' : ''}`, ...r });
+      }
+    }
+    return out;
+  };
+  const expectAll = async (question: string, reference: string, answer: string, verdict: 'correct' | 'wrong') => {
+    for (const r of await run(question, reference, answer)) {
+      expect(r.verdict, `${answer} (${r.mode}): ${r.reason}`).toBe(verdict);
+      expect(r.method).toBe('fuzzy');
+    }
+  };
+  const notCorrect = async (question: string, reference: string, answer: string) => {
+    for (const r of await run(question, reference, answer)) expect(r.verdict, `${answer} (${r.mode}): ${r.reason}`).not.toBe('correct');
+  };
+  const cascadeUnsure = async (question: string, reference: string, answer: string) => {
+    for (const r of await run(question, reference, answer)) if (r.mode.startsWith('cascade')) expect(r.verdict, `${answer} (${r.mode})`).toBe('unsure');
+  };
+
+  it.each(['1939', 'neunzehnhundertneununddreißig', '1. September 1939', 'September 1939', 'Im Jahr 1939', '1939 glaube ich'])('„%s“ is right without the LLM', async (answer) => {
+    await expectAll(q, note, answer, 'correct');
+  });
+
+  it.each(['1940', 'neunzehnhundertvierzig', '1. September 1940', '1945'])('„%s“ is wrong without the LLM', async (answer) => {
+    await expectAll(q, note, answer, 'wrong');
+  });
+
+  it('„1. September“ without the year, or another day, is not right without the LLM', async () => {
+    await notCorrect(q, note, '1. September');
+    await cascadeUnsure(q, note, '1. September');
+    await notCorrect(q, note, '3. September 1939');
+    await cascadeUnsure(q, note, '3. September 1939');
+    await cascadeUnsure(q, note, 'Oktober 1939');
+  });
+
+  it('two different years in the short solution stay with the LLM', async () => {
+    for (const reference of ['1. September 1939 (Europa) bzw. 7. Juli 1937 (Asien)', '1939 in Europa, 1937 in Asien']) {
+      await cascadeUnsure(q, reference, '1939');
+      await cascadeUnsure(q, reference, '1937');
+    }
+  });
+
+  it('the same year said twice decides, also without an explanation dash', async () => {
+    await expectAll(q, '1. September 1939, also im Herbst 1939', '1939', 'correct');
+    await expectAll(q, '1. September 1939, also im Herbst 1939', '1941', 'wrong');
+  });
+
+  it('a question for the day or the exact date is no question for the year', async () => {
+    await cascadeUnsure('Wann genau begann der 2. Weltkrieg?', note, '1939');
+    await cascadeUnsure('An welchem Tag begann der 2. Weltkrieg?', note, '1939');
+    await cascadeUnsure('Wann begann der Krieg (Datum)?', note, '1939');
+  });
+
+  it('the old live case still holds: 1977 ← „neunzehnhundertneunundsiebzig“ wrong without the LLM', async () => {
+    await expectAll('In welchem Jahr kam der erste Star-Wars-Film, Eine neue Hoffnung, in die US-Kinos?', '1977', 'neunzehnhundertneunundsiebzig', 'wrong');
+  });
+
+  // The short solution before an explanation ("<Kurzlösung> - <Erklärsatz>"): the rules judge against it; numbers of the
+  // explanation never make an answer right or wrong – an answer with one of them goes to the LLM.
+  describe('short solution before an explanation', () => {
+    const war = '1939 - Der Krieg in Europa dauerte bis 1945 und kostete rund 60 Millionen Menschen das Leben.';
+    it('estimates, ranges and other numbers of the explanation do not block the short solution', async () => {
+      await expectAll(q, war, '1939', 'correct');
+      await expectAll(q, war, '1941', 'wrong');
+    });
+    it('a number of the explanation is never wrong or right by the rules', async () => {
+      await cascadeUnsure(q, war, '1945');
+      await notCorrect(q, war, '60 Millionen');
+    });
+    it('a text short solution: exact without the LLM; a year of its explanation is not a solution', async () => {
+      const poland = 'Polen - Am 1. September 1939 überfiel die Wehrmacht Polen ohne Kriegserklärung.';
+      await expectAll('Welches Land wurde zuerst überfallen?', poland, 'Polen', 'correct');
+      await notCorrect('Welches Land wurde zuerst überfallen?', poland, '1939');
+      await cascadeUnsure('Welches Land wurde zuerst überfallen?', poland, '1939');
+    });
+    it('a short tail or a range is no explanation', async () => {
+      await cascadeUnsure(q, '1939 - 1945 dauerte der Krieg in ganz Europa', '1939'); // a range: R0
+      const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
+      expect((await j.judge({ question: 'Song?', reference: 'Bryan Adams - Summer Of 69', answer: 'Summer of 69' })).verdict).toBe('unsure');
+    });
+    it('a line break separates an explanation as well', async () => {
+      await expectAll(q, '1. September 1939\nIn Europa begann der Krieg mit dem Überfall auf Polen.', '1939', 'correct');
+      await expectAll(q, '1. September 1939\nIn Europa begann der Krieg mit dem Überfall auf Polen.', '1940', 'wrong');
+    });
+  });
+});
