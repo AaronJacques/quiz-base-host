@@ -174,7 +174,7 @@ describe('AccountKeeper: schedule', () => {
     const s = h.store.read();
     expect(s.history[0]).toMatchObject({ result: 'ok', refresh: { status: 200 } });
     expect(s.authHistory).toEqual([expect.objectContaining({ kind: 'refresh', status: 200, source: 'start' })]);
-    expect(stderr.join('')).toMatch(/angemeldet · Sitzung erneuert \(200\)/);
+    expect(stderr.join('')).toMatch(/angemeldet · Token erneuert \(200\)/);
     await h.keeper.stop();
   });
 
@@ -306,7 +306,7 @@ describe('AccountKeeper: state changes', () => {
     expect(s.state).toBe('ok');
     expect(s.lastOkAt).toBe(new Date(T0 + HOUR).toISOString());
     expect(s.okSince).toBe(new Date(T0).toISOString());
-    expect(stderr.join('')).toMatch(/Sitzung erneuert \(Board-Anlage\)/);
+    expect(stderr.join('')).toMatch(/Token-Erneuerung der Seite \(200, Board-Anlage\)\n/);
   });
 
   it('signup and logout of the page are warned about (evidence for an anonymous session)', () => {
@@ -355,6 +355,10 @@ describe('AccountKeeper: state changes', () => {
     await runCheck(h.keeper);
     const s = h.store.read();
     expect(s.state).toBe('lost');
+    // A1-F10: the log does not claim a renewed login – only that the page renewed a token.
+    const log = stderr.join('');
+    expect(log).toMatch(/Token-Erneuerung der Seite \(200, Spiel\) – Konto nicht bestätigt, evtl\. anonyme Sitzung/);
+    expect(log).not.toMatch(/Sitzung erneuert/);
     expect(s.notifiedLostAt).toBe(new Date(T0).toISOString());
     expect(s.lostAt).not.toBeNull();
     expect(h.changes.length).toBe(before);
@@ -432,7 +436,7 @@ describe('formatLoginStatus', () => {
       authHistory: [{ at: '2026-11-22T13:02:05.000Z', kind: 'refresh', status: 200, source: 'keepalive' }],
     };
     expect(formatLoginStatus(s, now, 'npx qbhost login')).toBe('quiz-base-Anmeldung: angemeldet (geprüft 14:02 Keep-alive, erneuert 14:02, nächste Prüfung ~20:10)');
-    expect(formatLoginHistory(s, now)).toEqual(['14:02 Keep-alive: angemeldet · Sitzung erneuert (200) · 14 s · Browser zu in 1,2 s']);
+    expect(formatLoginHistory(s, now)).toEqual(['14:02 Keep-alive: angemeldet · Token erneuert (200) · 14 s · Browser zu in 1,2 s']);
   });
 
   it('lost: since when, and the command', () => {
@@ -519,6 +523,57 @@ describe('AccountKeeper: retries (A1-F5) and stop', () => {
     expect(await p).toBe('error');
     expect(h.calls.close).toBe(1);
     expect(h.store.read().history[0]).toMatchObject({ result: 'error', error: 'Zeitlimit (60 s)' });
+  });
+});
+
+describe('A1-F9: the 60-s deadline covers opening and the menu, not the hold', () => {
+  it('holdSec 120 without a refresh: no time-limit warning, the hold runs out, result ok', async () => {
+    const h = harness({ account: { holdSec: 120 } });
+    const p = h.keeper.check('keepalive');
+    await vi.advanceTimersByTimeAsync(119_000);
+    expect(h.calls.close).toBe(0); // still holding – the deadline did not cut it off at 60 s
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await p).toBe('ok');
+    const c = h.store.read().history[0]!;
+    expect(c).toMatchObject({ result: 'ok', refresh: 'none' });
+    expect(c.error).toBeUndefined();
+    expect(c.ms).toBeGreaterThanOrEqual(120_000);
+    expect(stderr.join('')).not.toMatch(/Zeitlimit/);
+  });
+
+  it('a slow but valid run (menu after 50 s, then 20 s hold) stays ok without a warning', async () => {
+    const h = harness();
+    h.plans.push({ state: () => new Promise((r) => setTimeout(() => r(true), 50_000)) });
+    const p = h.keeper.check('keepalive');
+    await vi.advanceTimersByTimeAsync(75_000);
+    expect(await p).toBe('ok');
+    expect(h.store.read().history[0]!.error).toBeUndefined();
+    expect(stderr.join('')).not.toMatch(/Zeitlimit/);
+  });
+
+  it('opening or the menu itself hanging longer than 60 s is still aborted', async () => {
+    const h = harness({ account: { holdSec: 120 } });
+    h.plans.push({ state: waitForAbort });
+    const p = h.keeper.check('keepalive');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await p).toBe('error');
+    expect(stderr.join('')).toMatch(/Zeitlimit \(60 s\)/);
+  });
+});
+
+describe('A1-F10: status line names only renewals of the confirmed login', () => {
+  it('a refresh before okSince (anonymous session) is not shown as "erneuert"', () => {
+    const now = Date.parse('2026-11-22T13:30:00Z');
+    const s: LoginStatus = {
+      ...freshStatus(),
+      state: 'ok',
+      okSince: '2026-11-22T13:00:00.000Z',
+      lastOkAt: '2026-11-22T13:00:00.000Z',
+      lastCheckAt: '2026-11-22T13:00:00.000Z',
+      history: [{ at: '2026-11-22T13:00:00.000Z', source: 'start', result: 'ok', refresh: 'none', ms: 9000 }],
+      authHistory: [{ at: '2026-11-22T11:00:00.000Z', kind: 'refresh', status: 200, source: 'game' }],
+    };
+    expect(formatLoginStatus(s, now, 'x')).toBe('quiz-base-Anmeldung: angemeldet (geprüft 14:00 Start)');
   });
 });
 

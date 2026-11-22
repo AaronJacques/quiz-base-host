@@ -261,7 +261,10 @@ const NOT_IDLE_RETRY_MS = MINUTE;
 const BUSY_RETRY_MS = 10 * MINUTE;
 /** stop() waits at most this long for a running check to close its browser. */
 const STOP_WAIT_MS = 8000;
-/** A check (open, menu, hold) takes at most this long; then it is aborted and the browser closed. */
+/**
+ * Opening the page and reading the user menu take at most this long; then the check is aborted and the browser
+ * closed. Holding afterwards is bounded by `account.holdSec` itself (any value up to 120 s), closing by the driver.
+ */
 const RUN_LIMIT_MS = 60_000;
 /** Navigation limit of the keep-alive browser (Playwright's default is 30 s). */
 const KEEPALIVE_NAV_MS = 20_000;
@@ -487,7 +490,8 @@ export class AccountKeeper {
     let closeMs: number | undefined;
     let timedOut = false;
     this.lastConflict = false;
-    // A hanging page (or Chromium start) must not keep the profile: abort – which closes the browser – after RUN_LIMIT_MS.
+    // A hanging page (or Chromium start) must not keep the profile: abort – which closes the browser – if opening and
+    // reading the menu take longer than RUN_LIMIT_MS. The hold that follows has its own bound (holdSec).
     const deadline = setTimeout(() => {
       timedOut = true;
       log.warn(`🔐 Anmeldeprüfung (${source}): Zeitlimit (${RUN_LIMIT_MS / 1000} s) – breche ab`);
@@ -507,6 +511,7 @@ export class AccountKeeper {
     if (probe) {
       try {
         const v = ac.signal.aborted ? null : await probe.loginState(ac.signal);
+        clearTimeout(deadline);
         menu = v;
         result = v === true ? 'ok' : v === false ? 'lost' : ac.signal.aborted ? 'aborted' : 'unclear';
         if (!ac.signal.aborted) {
@@ -601,7 +606,9 @@ export class AccountKeeper {
     const where = SOURCE_LABEL[source];
     const code = `${e.status}${e.code ? ` ${e.code}` : ''}`;
     if (e.kind === 'refresh' && e.ok) {
-      if (applyState) log.info(`🔐 Sitzung erneuert (${where})`);
+      // A 200 renews whatever session the page has – also an anonymous one. Whether the account is logged in only
+      // the menu says (the state), so the line claims nothing more.
+      if (applyState) log.info(`🔐 Token-Erneuerung der Seite (${code}, ${where})${r.after === 'ok' ? '' : ' – Konto nicht bestätigt, evtl. anonyme Sitzung'}`);
     } else if (e.kind === 'refresh' && !e.ok) log.warn(`🔐 Seite: Sitzungserneuerung abgelehnt (${code}, ${where})`);
     else if (e.kind === 'signup') log.warn(`🔐 Seite hat eine anonyme Sitzung angelegt (${where})`);
     else if (e.kind === 'logout') log.warn(`🔐 Seite hat sich abgemeldet (${where})`);
@@ -663,7 +670,7 @@ const seconds = (ms: number) => `${(ms / 1000).toFixed(1).replace('.', ',').repl
 function refreshText(r: LoginCheck['refresh']): string | null {
   if (!r) return null;
   if (r === 'none') return 'keine Erneuerung';
-  return refreshEffect(r.status) === 'ok' ? `Sitzung erneuert (${r.status})` : `Erneuerung abgelehnt (${r.status}${r.code ? ` ${r.code}` : ''})`;
+  return refreshEffect(r.status) === 'ok' ? `Token erneuert (${r.status})` : `Erneuerung abgelehnt (${r.status}${r.code ? ` ${r.code}` : ''})`;
 }
 
 function checkLine(c: LoginCheck): string {
@@ -675,9 +682,15 @@ function checkLine(c: LoginCheck): string {
   return parts.join(' · ');
 }
 
+/** Last successful refresh since the login was confirmed (okSince) – an earlier one may be an anonymous session's. */
+function renewalSinceOk(s: LoginStatus): AuthRecord | undefined {
+  if (!s.okSince) return undefined;
+  const since = Date.parse(s.okSince);
+  return [...s.authHistory].reverse().find((a) => a.kind === 'refresh' && refreshEffect(a.status) === 'ok' && Date.parse(a.at) >= since);
+}
+
 function lastRenewal(s: LoginStatus): string | null {
-  const r = [...s.authHistory].reverse().find((a) => a.kind === 'refresh' && refreshEffect(a.status) === 'ok');
-  return r?.at ?? s.okSince;
+  return renewalSinceOk(s)?.at ?? s.okSince;
 }
 
 function lostTail(before: LoginStatus, now: number): string {
@@ -719,7 +732,7 @@ export function formatLoginStatus(s: LoginStatus, now: number, loginCommand: str
   if (s.state === 'ok') {
     const bits: string[] = [];
     if (s.lastCheckAt) bits.push(`geprüft ${when(s.lastCheckAt, now)}${last ? ` ${SOURCE_LABEL[last.source]}` : ''}`);
-    const renewed = [...s.authHistory].reverse().find((a) => a.kind === 'refresh' && refreshEffect(a.status) === 'ok');
+    const renewed = renewalSinceOk(s);
     if (renewed) bits.push(`erneuert ${when(renewed.at, now)}`);
     if (s.nextDueAt) bits.push(`nächste Prüfung ~${when(s.nextDueAt, now)}`);
     return `${head}angemeldet${bits.length ? ` (${bits.join(', ')})` : ''}`;

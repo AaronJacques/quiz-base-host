@@ -207,7 +207,7 @@ Das quiz-base-Konto des Bots (eigene Boards). Der Bot hält die Anmeldung im Lee
 | `keepAliveJitterMin` | `30` | Zufällige Verschiebung je Lauf, ± Minuten. |
 | `startCheckDelaySec` | `120` | Erste Prüfung so viele Sekunden nach dem Start (Sprachmodelle laden zuerst). Läuft vorher ein Spiel, entfällt sie; dann zählt die Prüfung nach dem Spiel. |
 | `afterGameCheckSec` | `60` | Prüfung so viele Sekunden nach jedem Spiel, sobald der Bot im Leerlauf ist. `0` = keine. |
-| `holdSec` | `20` | So lange bleibt die Seite höchstens offen, wenn keine Erneuerung zu sehen ist (5–120). |
+| `holdSec` | `20` | So lange bleibt die Seite nach dem Lesen des Menüs höchstens offen, wenn keine Erneuerung zu sehen ist (5–120). Zählt nicht zum Zeitlimit von 60 s für Öffnen und Menü. |
 | `statusFile` | `.qbhost/login-status.json` | Anmeldestatus mit Zeitstempeln, Statuscodes und Fehlercodes der Seite. Ohne Tokens, Cookies und URLs. `qbhost doctor` zeigt ihn. |
 | `loginCommand` | `npx qbhost login` | Befehl, den Hinweise, `!quiz status` und die DM bei Verlust zum Neuanmelden nennen. Auf dem Server: `"npx qbhost login --server <ssh-host>"`. |
 
