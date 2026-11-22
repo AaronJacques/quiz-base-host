@@ -29,6 +29,8 @@ export interface ChatGateway {
   send(channelId: string, text: string): Promise<void>;
   /** Direct message – used for secrets like the solution when the leader must decide. */
   sendDirect(userId: string, text: string): Promise<void>;
+  /** Owners of the bot application (Developer Portal: the user, or the team's members) – recipients of operational DMs without `discord.ownerIds`. Optional; never throws (unknown → []). */
+  ownerIds?(): Promise<string[]>;
   react(msg: ChatMessage, emoji: string): Promise<void>;
   /** Joins a voice channel (optional – platforms/tests without voice leave it out). */
   joinVoice?(guildId: string, channelId: string, opts: { silenceMs: number; maxSpeechSec: number }): Promise<VoiceTransport>;

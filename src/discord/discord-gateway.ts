@@ -14,6 +14,7 @@ export class DiscordGateway implements ChatGateway {
   });
   private handlers: ((m: ChatMessage) => void | Promise<void>)[] = [];
   private raw = new Map<string, Message>();
+  private owners: string[] | null = null;
 
   get botUserId(): string {
     return this.client.user?.id ?? '';
@@ -75,6 +76,21 @@ export class DiscordGateway implements ChatGateway {
   async sendDirect(userId: string, text: string): Promise<void> {
     const user = await this.client.users.fetch(userId);
     await user.send(text);
+  }
+
+  /** The application's owner (a user, or every member of the owning team). Cached once known; errors → []. */
+  async ownerIds(): Promise<string[]> {
+    if (this.owners) return this.owners;
+    try {
+      const app = await this.client.application?.fetch();
+      const owner = app?.owner;
+      const ids = !owner ? [] : 'members' in owner ? [...owner.members.values()].map((m) => m.id) : [owner.id];
+      if (ids.length) this.owners = ids;
+      return ids;
+    } catch (e) {
+      log.warn(`Besitzer der Discord-App nicht lesbar: ${(e as Error).message}`);
+      return [];
+    }
   }
 
   async react(msg: ChatMessage, emoji: string): Promise<void> {

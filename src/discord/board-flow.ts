@@ -29,6 +29,8 @@ export interface BoardFlowDeps {
   say: (channelId: string, text: string) => Promise<void>;
   /** Why boards cannot be created right now (a game runs), or null. */
   blockedBy: (guildId: string) => string | null;
+  /** A board starts being generated or created (the account keeper gives the browser profile back). Must not throw. */
+  onBusy?: () => void;
 }
 
 /**
@@ -49,6 +51,20 @@ export class BoardCreateFlow {
   /** The editor is open in the shared browser profile – no lobby may start now. */
   get creating(): boolean {
     return this.busy?.stage === 'creating';
+  }
+
+  /** A board is being generated or created right now (not idle for maintenance). */
+  get busyAny(): boolean {
+    return this.busy !== null;
+  }
+
+  private markBusy(p: Pending): void {
+    this.busy = p;
+    try {
+      this.d.onBusy?.();
+    } catch (e) {
+      log.warn(`Board-Generator: ${(e as Error).message}`);
+    }
   }
 
   private allowed(msg: ChatMessage): boolean {
@@ -151,7 +167,7 @@ export class BoardCreateFlow {
   private async generate(p: Pending): Promise<void> {
     if (this.busy) return this.d.say(p.channelId, '⏳ Ich bin gerade mit einem anderen Board beschäftigt. Gleich noch einmal versuchen.');
     p.stage = 'generating';
-    this.busy = p;
+    this.markBusy(p);
     await this.d.say(p.channelId, `⏳ Claude schreibt das Board zu **${p.spec.topic}** … (1–3 Minuten)`);
     try {
       const { record } = await this.d.studio.generate(p.spec, (text) => void this.d.say(p.channelId, text));
@@ -193,7 +209,7 @@ export class BoardCreateFlow {
     if (this.busy) return this.d.say(p.channelId, '⏳ Ich bin gerade mit einem anderen Board beschäftigt. Gleich noch einmal `anlegen`.');
     const board = this.d.studio.load(p.recordId);
     p.stage = 'creating';
-    this.busy = p;
+    this.markBusy(p);
     await this.d.say(p.channelId, `⏳ Lege **${board.title}** auf quiz-base an … (ca. 1 Minute)`);
     try {
       const rec = await this.d.studio.create(p.recordId);

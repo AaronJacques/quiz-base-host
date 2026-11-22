@@ -152,6 +152,8 @@ export const ConfigSchema = z.object({
       /** Automatisch starten, sobald alle in quiz-base bereit UND mit Discord verknüpft sind. */
       autoStart: z.boolean().default(true),
       dataDir: z.string().default('.qbhost/discord'),
+      /** Besitzer des Bots: bekommen Betriebsmeldungen per DM (z.B. quiz-base-Anmeldung verloren). Leer = Besitzer der Discord-App (Developer Portal). */
+      ownerIds: z.array(z.string()).default([]),
     })
     .prefault({}),
 

@@ -25,7 +25,7 @@ Hinweise für KI-Agenten (Claude Code, Codex, …), die an diesem Repo arbeiten.
 | `src/llm` | `LlmClient`: Claude-CLI (`claude -p`) oder Anthropic-SDK | core |
 | `src/boardgen` | Board-Generator: Parameter, Prompts, Prüfregeln, Prüfrunde, Register (`.qbhost/boards/`), Vorschau | core, llm, judge/normalize |
 | `src/channels` | Terminal + Web-Spieler-Pult (nur über den EventBus) | core |
-| `src/discord` | Discord-Bot: Befehle, Verknüpfung, Kartenwahl, Rendering; `voice-bridge.ts` sagt Spielereignisse an; `board-flow.ts` = `!quiz erstellen` | core, modes/rules, session + board-studio (Typen), boardgen, voice |
+| `src/discord` | Discord-Bot: Befehle, Verknüpfung, Kartenwahl, Rendering; `voice-bridge.ts` sagt Spielereignisse an; `board-flow.ts` = `!quiz erstellen`; DM an die Besitzer bei verlorener quiz-base-Anmeldung; `index.ts` verdrahtet den Anmeldewächter und fährt mit Zeitbudget (≤ 50 s) herunter | core, modes/rules, session + board-studio (Typen), account (Typen, Formatierung), boardgen, voice |
 | `src/voice` | Sprache: Voice-Transport (Discord / Loopback), whisper.cpp-STT, Piper/`say`-TTS, Sprechwarteschlange, Sprachbefehle, Moderationstexte | core, judge/normalize |
 | `src/session.ts` | Eine Spielrunde: Browser + Bus + Controller + Judge | alles |
 | `src/account.ts` | quiz-base-Konto: Anmeldestatus (`.qbhost/login-status.json`), Keep-alive im Leerlauf, passive Beobachtung der Auth-Anfragen der Seite | alles |

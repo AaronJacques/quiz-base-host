@@ -1,3 +1,4 @@
+import { formatLoginStatus, loginSourceLabel, when, type LoginChange, type LoginStatus } from '../account.ts';
 import type { BoardStudio } from '../board-studio.ts';
 import type { Config } from '../config.ts';
 import type { EventBus, HostEvents } from '../core/events.ts';
@@ -44,6 +45,22 @@ export interface BotDeps {
   voice?: VoiceKit | null;
   /** Board generator (`!quiz erstellen`); without it the command reports "not set up". */
   boards?: BoardStudio | null;
+  /** The quiz-base account keeper (login watch, keep-alive); without it no login line and no DMs. */
+  account?: AccountSource | null;
+}
+
+/** What the bot needs from the quiz-base account keeper (`AccountKeeper` implements it; tests use a fake). */
+export interface AccountSource {
+  /** Command for logging in again (`account.loginCommand`). */
+  readonly loginCommand: string;
+  status(): LoginStatus;
+  /** A game, a voice room or a board creation starts: abort a running login check. */
+  interrupt(reason: string): void;
+  gameEnded(): void;
+  /** State changes (ok ↔ lost …); returns the unsubscribe function. */
+  onChange(cb: (status: LoginStatus, change: LoginChange) => void): () => void;
+  /** A loss DM went out (one per loss, also across restarts). */
+  markNotified(at: number): void;
 }
 
 export interface VoiceKit {
@@ -93,6 +110,12 @@ const PENDING_SUBMIT_MS = 1500;
 const CONFIRM_AGAIN_MAX_WORDS = 4;
 /** Without keyword and without an answer waiting, utterances up to this many words are logged (no text, rule 8). */
 const NO_KEYWORD_LOG_WORDS = 6;
+/** A loss DM that reached nobody is tried again this often, this far apart (and at the next start). */
+const LOGIN_DM_RETRIES = 3;
+const LOGIN_DM_RETRY_MS = 60 * 60_000;
+/** Shutdown: ending the game on quiz-base and the goodbye in the voice channel get at most this long. */
+const SHUTDOWN_END_GAME_MS = 15_000;
+const SHUTDOWN_GOODBYE_MS = 8000;
 /** Answers that are really "wait a second". */
 const STALLING = /^(äh+m*|ähm|hm+|mh+|moment|einen moment|warte|wart mal|lass mich (kurz )?(überlegen|nachdenken)|ich überlege|gute frage|ok|okay|also)$/;
 
@@ -193,6 +216,15 @@ export class QuizBot {
   private voiceJoining: Promise<void> | null = null;
   private shuttingDown = false;
   private boards: BoardCreateFlow | null;
+  /** The loss DM: one delivery at a time, retries while nobody got it. */
+  private lossNotice: { sending: Promise<void> | null; timer?: NodeJS.Timeout; tries: number } = { sending: null, tries: 0 };
+  private ownersWarned = false;
+  /**
+   * A loss DM reached the owner and no login check confirmed the login since. Until then a further loss gets no
+   * DM (it is only marked as reported): a renewal seen in a game browser may be an anonymous session (A1 review F2).
+   */
+  private lossReported = false;
+  private accountOff: (() => void) | null = null;
 
   constructor(private d: BotDeps) {
     this.boards = d.boards
@@ -207,6 +239,7 @@ export class QuizBot {
                 ? `🎲 Während ein Spiel läuft, lege ich keine Boards an (Spiel und Editor teilen sich den Browser). Nach dem Spiel gern.`
                 : BUSY_ELSEWHERE
               : null,
+          onBusy: () => this.d.account?.interrupt('Board-Anlage'),
         })
       : null;
     const c = this.commands = {} as Record<string, Handler>;
@@ -234,6 +267,7 @@ export class QuizBot {
     alias(['voice', 'sprache', 'stimme', 'vc'], (m, a) => this.cmdVoice(m, a));
     alias(['wiederholen', 'nochmal', 'repeat'], (m, _a, g) => this.cmdRepeat(m, g));
     d.gateway.onMessage((m) => this.onMessage(m).catch((e) => log.error(`Nachricht: ${(e as Error).stack ?? e}`)));
+    this.accountOff = d.account?.onChange((status, change) => this.onLoginChange(status, change)) ?? null;
   }
 
   private get prefix(): string {
@@ -343,7 +377,11 @@ export class QuizBot {
     const query = text.replace(/^["„“']+|["„“']+$/g, '').replace(/[.!?]+$/, '').trim();
     // Boards this bot created (own quiz-base account) are not in the public search.
     const own = this.d.boards?.findOwn(query) ?? [];
-    if (own.length === 1) return this.createGame(msg, own[0]!.title, true);
+    if (own.length === 1) {
+      if (this.accountStatus()?.state === 'lost')
+        await this.say(msg.channelId, '⚠️ Ich bin bei quiz-base gerade nicht angemeldet – ich versuche es trotzdem (der Stand kann veraltet sein).');
+      return this.createGame(msg, own[0]!.title, true);
+    }
     if (msg.viaVoice) void this.speak(`Ich suche ${query}.`);
     let results = await this.getBoards(msg.channelId, query);
     if (!results) return;
@@ -388,6 +426,7 @@ export class QuizBot {
       hinted: new Set(), endAsk: null, pickContext: null, reasons: [], lobbyStatusSig: '', offs: [],
     };
     this.game = g;
+    this.d.account?.interrupt('Spiel startet'); // a login check gives the browser profile back
     this.attach(g);
     if (msg.voiceChannelId && !this.voice && this.voiceReady && this.d.config.voice.autoJoin) {
       void this.joinVoice(msg.guildId!, msg.voiceChannelId, msg.channelId).catch((e) => this.say(msg.channelId, `⚠️ Voice: ${(e as Error).message}`));
@@ -476,7 +515,10 @@ export class QuizBot {
   }
 
   private async cmdStatus(msg: ChatMessage, game: ActiveGame | null): Promise<void> {
-    if (!game) return this.reply(msg, `Gerade läuft kein Spiel. \`${this.prefix} neu\` startet eins.`);
+    if (!game) {
+      const login = this.loginLine();
+      return this.reply(msg, `Gerade läuft kein Spiel. \`${this.prefix} neu\` startet eins.${login ? `\n🔐 ${login}` : ''}`, 'Gerade läuft kein Spiel.');
+    }
     if (game.phase === 'lobby') return this.reply(msg, this.lobbyStatus(game));
     return this.cmdScores(msg, game);
   }
@@ -1072,6 +1114,7 @@ export class QuizBot {
     this.touchVoice();
     await g.session.close().catch(() => {});
     await this.flush(g.channelId);
+    this.d.account?.gameEnded();
   }
 
   /** Send now (flushes anything queued first so order is kept). */
@@ -1110,15 +1153,164 @@ export class QuizBot {
     return this.game;
   }
 
+  /** Ends the game (on quiz-base at most `SHUTDOWN_END_GAME_MS`), closes its browser and leaves the voice channel (goodbye at most `SHUTDOWN_GOODBYE_MS`). */
   async shutdown(): Promise<void> {
     this.shuttingDown = true; // one goodbye only ("Ich muss leider los"), not the one after the game as well
+    this.accountOff?.();
+    this.accountOff = null;
+    clearTimeout(this.lossNotice.timer);
     const g = this.game; // the game may already be finished (and this.game null) once endGame() returns
     if (g) {
       await this.say(g.channelId, '👋 Der Quiz-Host fährt herunter, das Spiel wird beendet.');
-      await g.session.endGame().catch(() => {});
-      await this.finish(g);
+      const ended = await within(g.session.endGame().catch(() => {}), SHUTDOWN_END_GAME_MS);
+      if (!ended) log.warn('Spiel auf quiz-base nicht rechtzeitig beendet');
+      await this.finish(g); // closes the game's browser
     }
-    await this.leaveVoice(null, 'Ich muss leider los. Tschüss!');
+    await this.leaveVoice(null, 'Ich muss leider los. Tschüss!', '', SHUTDOWN_GOODBYE_MS);
+  }
+
+  // ───────────────────────────── quiz-base account ─────────────────────────────
+
+  /** No game, no board being generated or created, no voice room: the account keeper may use the browser profile. */
+  isIdleForMaintenance(): boolean {
+    return !this.game && !this.boards?.busyAny && !this.voice && !this.voiceJoining && !this.shuttingDown;
+  }
+
+  /**
+   * After the gateway login: a loss nobody was told about yet (the DM failed, or the bot stopped before it went
+   * out) is reported now. A loss that was reported (`notifiedLostAt`) is not reported again.
+   */
+  reportPendingLoss(): void {
+    const s = this.accountStatus();
+    if (s?.state === 'lost' && s.notifiedLostAt !== null) this.lossReported = true;
+    if (s?.state === 'lost' && s.notifiedLostAt === null) this.sendLossNotice(lossSource(s));
+  }
+
+  private accountStatus(): LoginStatus | null {
+    try {
+      return this.d.account?.status() ?? null;
+    } catch (e) {
+      log.warn(`Anmeldestatus: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** "quiz-base-Anmeldung: …" for `!quiz status` – no game content, no URLs. */
+  private loginLine(): string | null {
+    const s = this.accountStatus();
+    return s ? formatLoginStatus(s, Date.now(), this.d.account!.loginCommand) : null;
+  }
+
+  /** Called synchronously by the keeper: must not throw (rule 10); the DMs run in the background. */
+  private onLoginChange(status: LoginStatus, change: LoginChange): void {
+    try {
+      if (this.shuttingDown) return;
+      if (change.after === 'lost' && status.notifiedLostAt === null) {
+        if (!this.lossReported) return this.sendLossNotice(change.source);
+        // Lost again after an unconfirmed "back": the owner knows already – no second DM.
+        log.info('🔐 quiz-base-Anmeldung wieder verloren – schon per DM gemeldet, keine neue DM');
+        this.d.account?.markNotified(Date.now());
+      } else if (change.before === 'lost' && change.after === 'ok') {
+        this.lossNotice.tries = 0;
+        clearTimeout(this.lossNotice.timer);
+        this.lossNotice.timer = undefined;
+        const heard = change.notifiedLostAt !== null || this.lossReported;
+        if (!confirmedOk(status, change.source)) {
+          // Only a renewal of the page (maybe an anonymous session): wait for a check of the user menu or a board/lobby that worked.
+          if (heard) log.info('🔐 quiz-base-Anmeldung laut Seite wieder da, aber nicht bestätigt – „wieder da“-DM erst nach einer Prüfung');
+          return;
+        }
+        this.lossReported = false;
+        // "wieder da" only if the owner heard about the loss.
+        if (heard) void this.sendBackNotice(status);
+      }
+    } catch (e) {
+      log.warn(`Anmeldestatus-Meldung: ${(e as Error).message}`);
+    }
+  }
+
+  private sendLossNotice(source: string): void {
+    const n = this.lossNotice;
+    if (n.sending) return;
+    clearTimeout(n.timer);
+    n.timer = undefined;
+    n.sending = this.deliverLossNotice(source)
+      .catch((e) => log.warn(`Anmeldung verloren, DM: ${(e as Error).message}`))
+      .finally(() => (n.sending = null));
+  }
+
+  private async deliverLossNotice(source: string): Promise<void> {
+    const acc = this.d.account;
+    const s = this.accountStatus();
+    if (!acc || !s || this.shuttingDown || s.state !== 'lost' || s.notifiedLostAt !== null) return;
+    const delivered = await this.dmOwners(lossText(s, source, acc.loginCommand, this.prefix));
+    const n = this.lossNotice;
+    if (delivered > 0) {
+      n.tries = 0;
+      this.lossReported = true;
+      log.info(`🔐 Verlust der quiz-base-Anmeldung per DM gemeldet (${delivered} Empfänger)`);
+      // Back meanwhile: no mark (it would stick to the next loss), but say so.
+      if (this.accountStatus()?.state === 'lost') acc.markNotified(Date.now());
+      else void this.sendBackNotice(this.accountStatus()!);
+      return;
+    }
+    if (this.shuttingDown) return;
+    if (n.tries < LOGIN_DM_RETRIES) {
+      n.tries++;
+      log.warn(`🔐 Verlust der quiz-base-Anmeldung: DM nicht zugestellt – neuer Versuch in ${LOGIN_DM_RETRY_MS / 60_000} min (${n.tries}/${LOGIN_DM_RETRIES})`);
+      n.timer = setTimeout(() => {
+        n.timer = undefined;
+        try {
+          this.sendLossNotice(source);
+        } catch (e) {
+          log.warn(`Anmeldung verloren, DM: ${(e as Error).message}`);
+        }
+      }, LOGIN_DM_RETRY_MS);
+      n.timer.unref?.();
+    } else {
+      log.warn(`🔐 Verlust der quiz-base-Anmeldung: DM nicht zugestellt – sichtbar in \`${this.prefix} status\` und \`qbhost doctor\`, neuer Versuch beim nächsten Start`);
+    }
+  }
+
+  private async sendBackNotice(s: LoginStatus): Promise<void> {
+    try {
+      const now = Date.now();
+      await this.dmOwners(`✅ **quiz-base-Anmeldung wieder da** (${when(s.lastOkAt ?? now, now)}).`);
+    } catch (e) {
+      log.warn(`Anmeldung wieder da, DM: ${(e as Error).message}`);
+    }
+  }
+
+  /** DM to every owner; returns how many got it. Never throws. */
+  private async dmOwners(text: string): Promise<number> {
+    const ids = await this.ownerIds();
+    if (!ids.length) {
+      if (!this.ownersWarned) log.warn('Keine Besitzer-ID für Betriebsmeldungen – discord.ownerIds setzen');
+      this.ownersWarned = true;
+      return 0;
+    }
+    let delivered = 0;
+    for (const id of ids) {
+      try {
+        await this.d.gateway.sendDirect(id, text);
+        delivered++;
+      } catch (e) {
+        log.warn(`Betriebsmeldung per DM an ${id} nicht zugestellt: ${(e as Error).message}`);
+      }
+    }
+    return delivered;
+  }
+
+  /** `discord.ownerIds`, else the owner(s) of the Discord application. */
+  private async ownerIds(): Promise<string[]> {
+    const configured = this.d.config.discord.ownerIds;
+    if (configured.length) return configured;
+    try {
+      return (await this.d.gateway.ownerIds?.()) ?? [];
+    } catch (e) {
+      log.warn(`Besitzer der Discord-App: ${(e as Error).message}`);
+      return [];
+    }
   }
 
   // ───────────────────────────── voice ─────────────────────────────
@@ -1169,6 +1361,7 @@ export class QuizBot {
   private async joinVoice(guildId: string, voiceChannelId: string, textChannelId: string): Promise<void> {
     if (this.voiceJoining) return this.voiceJoining;
     if (this.voice?.voiceChannelId === voiceChannelId) return;
+    this.d.account?.interrupt('Voice-Channel'); // a login check gives the browser profile back
     this.voiceJoining = (async () => {
       if (this.voice) await this.leaveVoice(null);
       const kit = this.d.voice!;
@@ -1237,7 +1430,8 @@ export class QuizBot {
     }
   }
 
-  private async leaveVoice(textChannelId: string | null, goodbye?: string, note = ''): Promise<void> {
+  /** `goodbyeMaxMs`: the goodbye is cut off after this long (shutdown). */
+  private async leaveVoice(textChannelId: string | null, goodbye?: string, note = '', goodbyeMaxMs?: number): Promise<void> {
     const v = this.voice;
     if (!v) return;
     this.voice = null;
@@ -1246,7 +1440,10 @@ export class QuizBot {
     v.leaving = undefined;
     v.bridge.detach();
     // The goodbye after the game is queued already: let it finish (time-limited) instead of saying a second one.
-    if (goodbye) await (leaving ? leaving.done : v.host.say(goodbye)).catch(() => {});
+    if (goodbye) {
+      const said = (leaving ? leaving.done : v.host.say(goodbye)).catch(() => {});
+      await (goodbyeMaxMs === undefined ? said : within(said, goodbyeMaxMs));
+    }
     leaving?.stop();
     await v.host.close().catch(() => {});
     if (textChannelId) await this.say(textChannelId, `👋 Voice-Channel verlassen.${note}`);
@@ -1543,4 +1740,50 @@ function briefSpeech(text: string): string {
   if (s.length <= 280) return s;
   const cut = s.slice(0, 280);
   return cut.slice(0, Math.max(cut.lastIndexOf('. '), 120)) + '.';
+}
+
+/** Waits for `p` at most `ms`; true if it settled in time. Never rejects. */
+function within(p: Promise<unknown>, ms: number): Promise<boolean> {
+  let t: NodeJS.Timeout | undefined;
+  return Promise.race([
+    p.then(
+      () => true,
+      () => true,
+    ),
+    new Promise<boolean>((r) => (t = setTimeout(() => r(false), ms))),
+  ]).finally(() => clearTimeout(t));
+}
+
+const REFUSED = new Set([400, 401, 403]);
+
+/**
+ * "ok" confirmed by a check (user menu) or by something that only works logged in (own-board lobby, board saved) –
+ * not just a renewal the page did in a game browser (`game`/`board`: that may be an anonymous session).
+ */
+function confirmedOk(s: LoginStatus, source: string): boolean {
+  const last = s.history[s.history.length - 1];
+  return !!last && last.source === source && last.result === 'ok';
+}
+
+/** Where the current loss was seen: the latest lost check, else the latest refused renewal or logout of the page. */
+function lossSource(s: LoginStatus): string {
+  const check = [...s.history].reverse().find((c) => c.result === 'lost');
+  const auth = [...s.authHistory].reverse().find((a) => (a.kind === 'refresh' && REFUSED.has(a.status)) || a.kind === 'logout');
+  if (check && (!auth || check.at >= auth.at)) return check.source;
+  return auth?.source ?? 'unbekannt';
+}
+
+/**
+ * The loss DM: when and where it was noticed, the command to log in again, what still works. Only times, sources,
+ * status codes and Supabase error codes – never game content, solutions, editor links or URLs (rule 5).
+ */
+export function lossText(s: LoginStatus, source: string, loginCommand: string, prefix: string, now = Date.now()): string {
+  const refresh = [...s.authHistory].reverse().find((a) => a.kind === 'refresh');
+  const why = refresh && REFUSED.has(refresh.status) ? `, Grund: Erneuerung abgelehnt (${refresh.status}${refresh.code ? ` ${refresh.code}` : ''})` : '';
+  return [
+    `⚠️ **quiz-base-Anmeldung verloren** (bemerkt ${when(s.lostAt ?? now, now)} · ${loginSourceLabel(source)}).`,
+    `Eigene Boards (\`${prefix} neu <eigenes Board>\`, \`${prefix} erstellen … anlegen\`) gehen erst nach einer neuen Anmeldung: \`${loginCommand}\``,
+    `Öffentliche Boards gehen weiter. Zuletzt angemeldet: ${s.lastOkAt ? when(s.lastOkAt, now) : 'unbekannt'}${why}.`,
+    'Anleitung: docs/DEPLOY.md → „quiz-base-Anmeldung auf dem Server“.',
+  ].join('\n');
 }
