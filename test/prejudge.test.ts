@@ -478,6 +478,12 @@ describe('judging numbers in the cascade', () => {
     await p;
   });
 
+  it('B-F10/B-F11: the hint names both readings of "eine Million zwei" and of spoken "- 5" for a negative solution', async () => {
+    const { numberHint } = await import('../src/judge/llm-judge.ts');
+    expect(numberHint('eine Million zwei', '1,2 Millionen', true)).toBe('Zahlenwerte (automatisch gelesen): Antwort 1000002 oder 1200000 | Lösung 1200000');
+    expect(numberHint('- 5', '-5', true)).toBe('Zahlenwerte (automatisch gelesen): Antwort 5 oder -5 | Lösung -5');
+  });
+
   it('B-F9: a dialogue dash before a spoken answer is no minus, also in the hint', async () => {
     const { numberHint } = await import('../src/judge/llm-judge.ts');
     expect(numberHint('- 1977', '1977', true)).toBe('Zahlenwerte (automatisch gelesen): Antwort 1977 | Lösung 1977');

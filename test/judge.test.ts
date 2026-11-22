@@ -604,3 +604,73 @@ describe('FuzzyJudge – numbers, review fixes (open cases of the review closed)
     expect(await v('Wie viele Tore fielen?', '2', 'ein Tor')).toBe('wrong');
   });
 });
+
+// Review V3 (delta): readings that are ambiguous go to the LLM – never a deterministic verdict on one of them.
+describe('FuzzyJudge – numbers, review V3', () => {
+  const both = (rejectDissimilar: boolean) => new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar });
+  const lines = async (question: string, reference: string, answer: string, spoken = true) => {
+    const out: string[] = [];
+    for (const rd of [false, true]) {
+      const r = await both(rd).judge({ question, reference, answer, spoken });
+      out.push(`${rd ? 'strict' : 'cascade'}: ${r.verdict} ${r.reason ?? ''}`);
+    }
+    return out;
+  };
+  const neverDecidedByNumber = async (question: string, reference: string, answer: string, spoken = true) => {
+    for (const l of await lines(question, reference, answer, spoken)) {
+      expect(l, `${reference} ← ${answer}`).not.toMatch(/(?:wrong|correct) (?:falsche|falsches|Zahl stimmt|Jahr stimmt)/);
+      if (l.startsWith('cascade')) expect(l, `${reference} ← ${answer}`).toMatch(/unsure/);
+    }
+  };
+
+  // B-F10: "eine Million zwei" is 1 000 002 or the short form of 1,2 Millionen.
+  it.each([
+    ['1,2 Millionen', 'eine Million zwei'],
+    ['1,5 Millionen', 'eine Million fünf'],
+    ['3,7 Millionen', 'drei Millionen sieben'],
+    ['1,5 Millionen', 'eine Million fünfhundert'],
+    ['1000002', 'eine Million zwei'],
+  ])('B-F10: %s ← „%s“ goes to the LLM', async (reference, answer) => {
+    await neverDecidedByNumber('Wie viele Einwohner?', reference, answer);
+  });
+
+  it('B-F10: "eine Million fünfhunderttausend" stays one clear number', async () => {
+    for (const l of await lines('Wie viele Einwohner?', '1,5 Millionen', 'eine Million fünfhunderttausend')) expect(l).toMatch(/correct/);
+    for (const l of await lines('Wie viele Einwohner?', '1,2 Millionen', 'eine Million fünfhunderttausend')) expect(l).toMatch(/wrong/);
+  });
+
+  // B-F11: spoken "- 5" for a negative solution – dialogue dash or minus?
+  it.each([
+    ['-5', '- 5'],
+    ['-5 Grad', '- 5 Grad'],
+  ])('B-F11: %s ← spoken „%s“ is never wrong', async (reference, answer) => {
+    for (const l of await lines('Wie kalt war es?', reference, answer)) expect(l).not.toMatch(/wrong/);
+  });
+
+  it('B-F11: both readings agree → decided; typed "- 5" is a minus as before', async () => {
+    for (const l of await lines('Wie kalt war es?', '-5', '- 7')) expect(l).toMatch(/wrong/); // neither 7 nor -7
+    for (const l of await lines('Wie kalt war es?', '-5', '- 5', false)) expect(l).toMatch(/correct/);
+    for (const l of await lines('In welchem Jahr?', '1977', '- 1977')) expect(l).toMatch(/correct/); // B-F9 still holds
+  });
+
+  // B-F12: a number of the question said again next to the article.
+  it('B-F12: „Finale 2014 ein Tor“ for 1 is never wrong', async () => {
+    for (const l of await lines('Wie viele Tore fielen im Finale 2014?', '1', 'Finale 2014 ein Tor')) expect(l).not.toMatch(/wrong (?:falsche|falsches)/);
+    for (const l of await lines('Wie viele Tore fielen im Finale 2014?', '1', 'Finale 2014 ein Tor')) if (l.startsWith('cascade')) expect(l).not.toMatch(/wrong/);
+    for (const l of await lines('Wie viele Tore fielen im Finale?', '2', 'zwei Tore')) expect(l).toMatch(/correct/);
+  });
+
+  // B-F13: a bare number that the question names for two candidates.
+  it('B-F13: „2“ for „Rocky 2 oder Rambo 2?“ is not right without the LLM; a clear answer still is', async () => {
+    const q = 'Welcher Film kam zuerst: Rocky 2 oder Rambo 2?';
+    for (const l of await lines(q, 'Rambo 2', '2')) expect(l).not.toMatch(/correct/);
+    for (const l of await lines(q, 'Rambo 2', 'Rambo zwei')) expect(l).toMatch(/correct/);
+    for (const l of await lines('Wie viele Beine hat eine Spinne?', '8', 'acht')) expect(l).toMatch(/correct/);
+  });
+
+  it('the live case still holds', async () => {
+    for (const l of await lines('In welchem Jahr kam der erste Star-Wars-Film, Eine neue Hoffnung, in die US-Kinos?', '1977', 'neunzehnhundertneunundsiebzig')) {
+      expect(l).toMatch(/wrong falsche Zahl/);
+    }
+  });
+});
