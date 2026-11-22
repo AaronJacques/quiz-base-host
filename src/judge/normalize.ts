@@ -1,12 +1,10 @@
 /** Text normalisation and similarity helpers – pure functions, fully unit-tested. */
 
-const NUMBER_WORDS: Record<string, number> = {
-  null: 0, eins: 1, ein: 1, eine: 1, zwei: 2, drei: 3, vier: 4, fuenf: 5, sechs: 6, sieben: 7, acht: 8, neun: 9,
-  zehn: 10, elf: 11, zwoelf: 12, dreizehn: 13, vierzehn: 14, fuenfzehn: 15, zwanzig: 20, dreissig: 30, hundert: 100,
-  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
-};
+import { numberTokens, type NumberToken } from './number-words.ts';
 
-const STOPWORDS = new Set([
+export { numberTokens, parseNumberWord, type NumberToken } from './number-words.ts';
+
+export const STOPWORDS: ReadonlySet<string> = new Set([
   'der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'einen', 'einem', 'the', 'a', 'an',
   'ist', 'es', 'sind', 'war', 'is', 'it', 'auf', 'in', 'im', 'von', 'vom', 'of', 'und', 'and',
 ]);
@@ -16,6 +14,15 @@ export function stripUrls(s: string): string {
 }
 
 export function normalize(s: string): string {
+  return fold(s)
+    .replace(/(\d)[.,](\d)/g, '$1.$2')
+    .replace(/[^a-z0-9. ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Lower case, umlauts and accents folded, maths as ASCII, a leading minus as the word "minus". */
+function fold(s: string): string {
   return markNegatives(
     mathText(
       stripUrls(s)
@@ -27,10 +34,19 @@ export function normalize(s: string): string {
     ),
   )
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
-    .replace(/\bsqrt\b/g, 'wurzel')
-    .replace(/(\d)[.,](\d)/g, '$1.$2')
-    .replace(/[^a-z0-9. ]+/g, ' ')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\bsqrt\b/g, 'wurzel');
+}
+
+/**
+ * Like `normalize()`, but "1,5" and "1.500" stay apart (German decimal comma vs. thousands dot): the input of
+ * `numberTokens`. Other commas and hyphens separate words as in `normalize()`.
+ */
+export function foldForNumbers(s: string): string {
+  return fold(s)
+    .replace(/(\d),(?=\d)/g, '$1\u0001')
+    .replace(/[^a-z0-9.\u0001 ]+/g, ' ')
+    .replace(/\u0001/g, ',')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -295,22 +311,18 @@ export function vowelSkeleton(s: string): string {
     .replace(/(.)\1+/g, '$1');
 }
 
-/** Extracts numbers incl. German number words and signs ("vier" → 4, "42,195" → 42.195, "−7" / "minus 7" → -7). */
+/**
+ * Extracts numbers incl. German number words and signs ("vier" → 4, "neunzehnhundertsiebenundsiebzig" → 1977,
+ * "42,195" → 42.195, "−7" / "minus 7" → -7). See `numberTokens` (number-words.ts) for the forms it reads.
+ */
 export function numbers(s: string): number[] {
-  const out: number[] = [];
-  let sign = 1;
-  for (const t of normalize(s).split(' ')) {
-    if (t === 'minus') {
-      sign = -1;
-      continue;
-    }
-    const found = [...t.matchAll(/\d+(?:\.\d+)?/g)].map((m) => parseFloat(m[0]));
-    if (t in NUMBER_WORDS) found.push(NUMBER_WORDS[t]!);
-    if (found.length) found[0] = sign * found[0]!;
-    out.push(...found);
-    sign = 1;
-  }
-  return out;
+  return numberTokens(foldForNumbers(s)).map((t) => t.value);
+}
+
+/** The number tokens of a text (`numberTokens` on `foldForNumbers`), with the words they were read from. */
+export function numberParts(s: string): { words: string[]; numbers: NumberToken[] } {
+  const folded = foldForNumbers(s);
+  return { words: folded.split(' ').filter(Boolean), numbers: numberTokens(folded) };
 }
 
 const NON_ANSWERS = /^(keine ahnung|weiss (ich )?nicht|weiss nicht|k\.? ?a\.?|pass|passe|skip|\?+|idk|no idea|nichts)$/;
