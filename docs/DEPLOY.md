@@ -171,9 +171,12 @@ Die Anmeldung ging auf dem Server mehrfach nach einigen Tagen verloren, ohne das
   ❌ quiz-base-Anmeldung: abgemeldet seit 20.11. 15:02 (Erneuerung abgelehnt: 400 session_expired) → npx qbhost login --server quizmaster-vps
   ```
   Den Befehl in der Meldung legt `account.loginCommand` fest; auf dem Server in `qbhost.config.json` `"account": { "loginCommand": "npx qbhost login --server quizmaster-vps" }` eintragen (Vorlage: `deploy/qbhost.config.server.example.json`).
-- **Sauberer Stopp:** Docker gibt dem Bot 60 s (`stop_grace_period`, auch `docker stop -t 60` im Login-Skript). Ein Chromium, der hart beendet wird, kann ein gerade erneuertes Token verlieren (Chromium schreibt Cookies gebündelt etwa alle 30 s).
+- **DM bei Verlust:** Geht die Anmeldung verloren, schickt der Bot dem Besitzer **eine** DM mit dem Befehl zum Neuanmelden (`account.loginCommand`), auch nach einem Neustart nur eine. Empfänger: `discord.ownerIds`, sonst der Besitzer der Discord-App. Kommt die DM nicht an, steht der Verlust weiter im Log, in `!quiz status` und in `doctor`. Einzelheiten: [DISCORD.md](DISCORD.md#quiz-base-anmeldung-status-und-dm).
+- **Sauberer Stopp:** Docker gibt dem Bot 60 s (`stop_grace_period`, auch `docker stop -t 60` im Login-Skript). Ein Chromium, der hart beendet wird, kann ein gerade erneuertes Token verlieren (Chromium schreibt Cookies gebündelt etwa alle 30 s). Der Bot beendet deshalb der Reihe nach, jeweils mit Zeitlimit: den Anmeldewächter (8 s), das Spiel samt Browser (24 s, davon höchstens 15 s für das Beenden auf quiz-base und 8 s für den Abschied im Voice-Channel), alle noch offenen Browser (7 s), Sprache und Discord (je 3 s). Am Ende steht `Heruntergefahren in X s` im Log, bei einem Nachzügler mit `(N Browser erst am Ende geschlossen)`. Hängt alles, schließt ein Wachhund nach 45 s die Browser (≤ 5 s) und beendet mit Code 1, also spätestens nach 50 s.
 
 Log-Zeilen (`docker logs`), alle mit `🔐`:
+- `🔐 Anmeldewächter an: erste Prüfung in 120 s, dann alle 6 h im Leerlauf` – direkt nach „Bereit“.
+- `🔐 Verlust der quiz-base-Anmeldung per DM gemeldet (1 Empfänger)` bzw. `… DM nicht zugestellt – neuer Versuch in 60 min (1/3)`.
 - `🔐 quiz-base-Anmeldung (keepalive): angemeldet · Sitzung erneuert (200) · 14 s · Browser zu in 1,2 s` – so soll es alle ~6 h aussehen.
 - `🔐 quiz-base-Anmeldung (start): abgemeldet · Erneuerung abgelehnt (400 session_expired) · angemeldet seit 20.11. 15:08 (seit 49 h ohne Erneuerung)` – Verlust, zusätzlich als Warnung.
 - `🔐 Seite hat eine anonyme Sitzung angelegt (Spiel)` bzw. `🔐 Seite hat sich abgemeldet (Spiel)` – die Seite selbst hat das getan; Quelle und Zeit stehen in der Status-Datei.

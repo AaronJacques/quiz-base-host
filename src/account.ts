@@ -541,6 +541,11 @@ const SOURCE_LABEL: Record<AuthSource, string> = {
   board: 'Board-Anlage',
 };
 
+/** German label of a check or auth source ("Keep-alive", "Spiel", …) – for the loss DM. */
+export function loginSourceLabel(source: string): string {
+  return SOURCE_LABEL[source as AuthSource] ?? source;
+}
+
 const RESULT_LABEL: Record<LoginCheck['result'], string> = {
   ok: 'angemeldet',
   lost: 'abgemeldet',

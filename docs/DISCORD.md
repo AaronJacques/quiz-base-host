@@ -35,6 +35,20 @@ In `qbhost.config.json`:
 
 Channel-ID: In Discord unter Einstellungen → Erweitert den Entwicklermodus aktivieren, dann Rechtsklick auf den Channel → „Kanal-ID kopieren“.
 
+### quiz-base-Anmeldung: Status und DM
+
+Für eigene Boards ist der Bot bei quiz-base angemeldet ([DEPLOY.md](DEPLOY.md#anmeldung-hält)). Er prüft die Anmeldung im Leerlauf (kein Spiel, keine Board-Anlage, nicht im Voice-Channel), 120 s nach dem Start, 60 s nach jedem Spiel und alle 6 h. Ein Spiel, eine Board-Anlage oder der Beitritt in einen Voice-Channel unterbricht eine laufende Prüfung sofort. Solange der Bot im Voice-Channel ist, prüft er nicht (Spracherkennung und Browser zusammen wären auf kleinen Servern zu viel). Ohne Spiel verlässt er den Voice-Channel nach 20 min Stille von selbst, danach läuft der Wächter wieder.
+
+- **`!quiz status`** ohne laufendes Spiel zeigt zusätzlich eine Zeile `🔐 quiz-base-Anmeldung: …` (angemeldet / abgemeldet seit … → Befehl zum Neuanmelden / noch nicht geprüft). Während eines Spiels bleibt `!quiz status` wie bisher (Lobby bzw. Punktestand).
+- **DM bei Verlust:** Geht die Anmeldung verloren, bekommen die Besitzer des Bots **eine** DM mit Zeit, Quelle, dem Befehl zum Neuanmelden (`account.loginCommand`) und, falls bekannt, dem Fehlercode der Seite. Sie enthält nie Fragen, Lösungen, Board-Namen oder Links. Eine Verlust-DM gibt es einmal je Verlust, auch über Neustarts hinweg (`notifiedLostAt` in der Status-Datei). Ist die Anmeldung danach wieder da, kommt eine kurze DM „✅ quiz-base-Anmeldung wieder da“, aber nur, wenn vorher die Verlust-DM angekommen ist und eine Prüfung des Benutzermenüs (oder eine Lobby mit eigenem Board bzw. ein gespeichertes Board) es bestätigt. Eine bloße Sitzungserneuerung der Seite in einem Spiel-Browser reicht dafür nicht, denn das kann auch eine anonyme Sitzung sein. Geht die Anmeldung bis zu dieser Bestätigung erneut verloren, kommt keine zweite Verlust-DM.
+- **Empfänger:** `discord.ownerIds` in `qbhost.config.json`, sonst der Besitzer der Discord-App aus dem Developer Portal (bei einem Team alle Mitglieder). Ohne Empfänger steht einmal `Keine Besitzer-ID für Betriebsmeldungen – discord.ownerIds setzen` im Log.
+  ```json
+  { "discord": { "ownerIds": ["123456789012345678"] } }
+  ```
+  Die eigene ID: Entwicklermodus an, Rechtsklick auf den eigenen Namen → „Benutzer-ID kopieren“.
+- **DM kommt nicht an** (z.B. DMs gesperrt): Der Bot läuft normal weiter. Der Verlust steht im Log (Warnung), in `!quiz status` und in `qbhost doctor`. Der Bot versucht die DM bis zu dreimal im Abstand von 60 min und dann beim nächsten Start noch einmal, solange die Anmeldung verloren ist und noch keine Verlust-DM ankam.
+- Mit einem eigenen Board bei verlorener Anmeldung (`!quiz neu <eigenes Board>`) sagt der Bot das vorher und versucht es trotzdem; scheitert die Lobby, nennt die Meldung den Befehl zum Neuanmelden.
+
 ## 3. Ablauf einer Runde
 
 ```

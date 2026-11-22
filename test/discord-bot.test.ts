@@ -1,11 +1,13 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConfigSchema, type Config } from '../src/config.ts';
 import { EventBus } from '../src/core/events.ts';
 import { setLogLevel } from '../src/core/logger.ts';
-import { QuizBot, type BotDeps, type SessionLike, type VoiceKit } from '../src/discord/bot.ts';
+import { AccountKeeper, LoginStatusStore } from '../src/account.ts';
+import { QuizBot, lossText, type BotDeps, type SessionLike, type VoiceKit } from '../src/discord/bot.ts';
+import { SHUTDOWN_BUDGET, shutdownBot } from '../src/discord/index.ts';
 import type { ChatGateway, ChatMessage } from '../src/discord/gateway.ts';
 import { rankingLines } from '../src/discord/format.ts';
 import { GuildStore } from '../src/discord/store.ts';
@@ -24,6 +26,13 @@ class FakeGateway implements ChatGateway {
   botUserId = 'bot';
   sent: string[] = [];
   dms: string[] = [];
+  /** Every DM with its recipient (`dms` keeps only the text for the older tests). */
+  dmTo: { userId: string; text: string }[] = [];
+  /** DMs to these users fail (DMs blocked). */
+  blockedDms = new Set<string>();
+  /** Owners of the Discord application; unset = the platform does not tell. */
+  ownerIds?: () => Promise<string[]>;
+  joinVoice?: ChatGateway['joinVoice'];
   reactions: string[] = [];
   private handler?: (m: ChatMessage) => void | Promise<void>;
   onMessage(h: (m: ChatMessage) => void | Promise<void>) {
@@ -32,8 +41,10 @@ class FakeGateway implements ChatGateway {
   async send(_c: string, text: string) {
     this.sent.push(text);
   }
-  async sendDirect(_u: string, text: string) {
+  async sendDirect(userId: string, text: string) {
+    if (this.blockedDms.has(userId)) throw new Error('Cannot send messages to this user');
     this.dms.push(text);
+    this.dmTo.push({ userId, text });
   }
   async react(_m: ChatMessage, emoji: string) {
     this.reactions.push(emoji);
@@ -104,6 +115,14 @@ async function until(fn: () => boolean, ms = 5000) {
   throw new Error('timeout');
 }
 
+/** Bots of `setup()`: shut down after each test, so no game's polling loop outlives its test (it would run on a later test's fake clock). */
+const liveBots = new Set<QuizBot>();
+afterEach(async () => {
+  vi.useRealTimers();
+  for (const bot of liveBots) await bot.shutdown().catch(() => {});
+  liveBots.clear();
+});
+
 function setup(discord: Record<string, unknown> = {}, game: Record<string, unknown> = {}, players?: string[], extra: Partial<BotDeps> = {}) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbbot-'));
   const config = ConfigSchema.parse({
@@ -127,6 +146,7 @@ function setup(discord: Record<string, unknown> = {}, game: Record<string, unkno
     },
     ...extra,
   });
+  liveBots.add(bot);
   return { gw, bot, session: () => session!, created: () => session, searches, config };
 }
 
@@ -819,4 +839,421 @@ describe('QuizBot voice: ⏱ latency lines follow what the bot acts on (T1 revie
       setLogLevel('error');
     }
   }, 30000);
+});
+
+// ───────────────────────────── quiz-base account (Paket A2) ─────────────────────────────
+
+describe('QuizBot: quiz-base-Anmeldung (DM, Status, Leerlauf)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    setLogLevel('error');
+  });
+
+  /** A real AccountKeeper (never started: no browser) on a status file in a temp dir. */
+  function keeperFor(file: string) {
+    const config = ConfigSchema.parse({ account: { statusFile: file, loginCommand: 'npx qbhost login --server testhost' } });
+    return new AccountKeeper({ config, store: new LoginStatusStore(file) });
+  }
+
+  function accountSetup(discord: Record<string, unknown> = { ownerIds: ['owner1'] }, game: Record<string, unknown> = {}, extra: Partial<BotDeps> = {}) {
+    const file = path.join(mkdtempSync(path.join(os.tmpdir(), 'qblogin-')), 'login-status.json');
+    const keeper = keeperFor(file);
+    const s = setup(discord, game, undefined, { account: keeper, ...extra });
+    return { ...s, keeper, file };
+  }
+
+  /** Collects warnings (stderr) while `fn` runs. */
+  async function warnings(fn: () => Promise<void>): Promise<string[]> {
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+      lines.push(String(chunk).replace(/\x1b\[[0-9;]*m/g, ''));
+      return true;
+    });
+    setLogLevel('warn');
+    try {
+      await fn();
+    } finally {
+      spy.mockRestore();
+      setLogLevel('error');
+    }
+    return lines;
+  }
+
+  it('Verlust → genau eine DM an discord.ownerIds, mit Befehl und ohne Spielinhalte; Neustart → keine zweite; wieder da → eine DM', async () => {
+    const { gw, bot, keeper, file } = accountSetup({ ownerIds: ['owner1'] }, { answerTimeoutSec: 10 });
+    keeper.report(true, 'lobby');
+    // A question with its solution is open while the loss is noticed.
+    await startGame(gw, bot);
+    await gw.write(anna, 'sport 100');
+    await until(() => !!bot.activeGame?.awaiting);
+    keeper.report(false, 'board-create');
+    await until(() => gw.dmTo.length === 1);
+    keeper.report(false, 'lobby'); // lost → lost: no change, no DM
+    await sleep(50);
+    expect(gw.dmTo).toHaveLength(1);
+    const dm = gw.dmTo[0]!;
+    expect(dm.userId).toBe('owner1');
+    expect(dm.text).toContain('quiz-base-Anmeldung verloren');
+    expect(dm.text).toContain('`npx qbhost login --server testhost`');
+    expect(dm.text).toContain('Board-Anlage');
+    for (const secret of ['Pins', 'Bowling', 'Tatooine', 'Sport', 'Test Board', 'ABC123', 'http', 'supabase']) expect(dm.text).not.toContain(secret);
+    await until(() => keeper.status().notifiedLostAt !== null);
+    expect(JSON.parse(readFileSync(file, 'utf8')).notifiedLostAt).toBeTruthy();
+
+    // Restart: a new bot on the same status file reports nothing again.
+    const gw2 = new FakeGateway();
+    const keeper2 = keeperFor(file);
+    const bot2 = new QuizBot({ gateway: gw2, config: setup({ ownerIds: ['owner1'] }).config, store: new GuildStore(mkdtempSync(path.join(os.tmpdir(), 'qbbot-'))), createSession: () => null as never, listBoards: async () => [], account: keeper2 });
+    bot2.reportPendingLoss();
+    keeper2.report(false, 'lobby');
+    await sleep(50);
+    expect(gw2.dmTo).toHaveLength(0);
+
+    keeper2.report(true, 'board-create');
+    await until(() => gw2.dmTo.length === 1);
+    expect(gw2.dmTo[0]!.text).toMatch(/^✅ \*\*quiz-base-Anmeldung wieder da\*\* \(/);
+    expect(keeper2.status().notifiedLostAt).toBeNull();
+  }, 20000);
+
+  it('kein Flattern: eine Erneuerung im Spiel-Browser (evtl. anonyme Sitzung) bringt keine „wieder da“-DM und keine zweite Verlust-DM', async () => {
+    const { gw, keeper } = accountSetup();
+    const refresh = (status: number) =>
+      keeper.authWatch('game').onResponse({ url: 'https://ref.supabase.co/auth/v1/token?grant_type=refresh_token', status, ...(status >= 400 ? { errorCode: 'session_expired' } : {}) });
+    keeper.report(true, 'keepalive');
+    keeper.report(false, 'keepalive');
+    await until(() => gw.dmTo.length === 1 && keeper.status().notifiedLostAt !== null);
+    refresh(200); // lost → ok, but only the page's renewal
+    expect(keeper.status().state).toBe('ok');
+    refresh(400); // ok → lost again
+    expect(keeper.status().state).toBe('lost');
+    await sleep(50);
+    expect(gw.dmTo).toHaveLength(1);
+    expect(keeper.status().notifiedLostAt).not.toBeNull(); // marked: a restart does not report it again
+    keeper.report(true, 'keepalive'); // confirmed by the user menu
+    await until(() => gw.dmTo.length === 2);
+    expect(gw.dmTo[1]!.text).toContain('quiz-base-Anmeldung wieder da');
+    keeper.report(false, 'keepalive'); // a real new loss after a confirmed "back" → a new DM
+    await until(() => gw.dmTo.length === 3);
+    expect(gw.dmTo[2]!.text).toContain('quiz-base-Anmeldung verloren');
+  });
+
+  it('ohne discord.ownerIds geht die DM an den Besitzer der Discord-App', async () => {
+    const { gw, keeper } = accountSetup({});
+    gw.ownerIds = async () => ['owner1'];
+    keeper.report(false, 'lobby');
+    await until(() => gw.dmTo.length === 1);
+    expect(gw.dmTo[0]!.userId).toBe('owner1');
+    expect(gw.dmTo[0]!.text).toContain('Lobby');
+  });
+
+  it('ohne Empfänger: kein Absturz, eine Warnung; der Verlust bleibt sichtbar und wird beim nächsten Start gemeldet', async () => {
+    const { gw, keeper, file } = accountSetup({});
+    const lines = await warnings(async () => {
+      keeper.report(false, 'lobby');
+      await sleep(50);
+    });
+    expect(gw.dmTo).toHaveLength(0);
+    expect(lines.filter((l) => l.includes('Keine Besitzer-ID für Betriebsmeldungen – discord.ownerIds setzen'))).toHaveLength(1);
+    expect(keeper.status().state).toBe('lost');
+    expect(keeper.status().notifiedLostAt).toBeNull();
+    await gw.write(anna, '!quiz status');
+    expect(gw.all()).toContain('quiz-base-Anmeldung: abgemeldet seit');
+    expect(gw.all()).toContain('npx qbhost login --server testhost');
+
+    // Next start (owner known now): the loss nobody heard about is reported once.
+    const gw2 = new FakeGateway();
+    gw2.ownerIds = async () => ['owner1'];
+    const bot2 = new QuizBot({ gateway: gw2, config: setup({}).config, store: new GuildStore(mkdtempSync(path.join(os.tmpdir(), 'qbbot-'))), createSession: () => null as never, listBoards: async () => [], account: keeperFor(file) });
+    bot2.reportPendingLoss();
+    await until(() => gw2.dmTo.length === 1);
+    expect(gw2.dmTo[0]!.text).toContain('quiz-base-Anmeldung verloren');
+    await until(() => keeperFor(file).status().notifiedLostAt !== null);
+  });
+
+  it('DMs gesperrt: kein Absturz, kein markNotified, neuer Versuch nach 60 min (höchstens 3-mal)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { gw, keeper } = accountSetup({ ownerIds: ['owner1'] });
+    gw.blockedDms.add('owner1');
+    const lines = await warnings(async () => {
+      keeper.report(false, 'keepalive');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(keeper.status().notifiedLostAt).toBeNull();
+      await vi.advanceTimersByTimeAsync(60 * 60_000); // retry 1
+      await vi.advanceTimersByTimeAsync(60 * 60_000); // retry 2
+      gw.blockedDms.clear();
+      await vi.advanceTimersByTimeAsync(60 * 60_000); // retry 3 gets through
+    });
+    expect(lines.filter((l) => l.includes('DM an owner1 nicht zugestellt'))).toHaveLength(3);
+    expect(lines.some((l) => l.includes('neuer Versuch in 60 min (1/3)'))).toBe(true);
+    expect(gw.dmTo).toHaveLength(1);
+    expect(keeper.status().notifiedLostAt).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(3 * 60 * 60_000);
+    expect(gw.dmTo).toHaveLength(1);
+  });
+
+  it('DMs dauerhaft gesperrt: nach 3 Wiederholungen Schluss bis zum nächsten Start; wieder da → keine „wieder da“-DM', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { gw, keeper } = accountSetup({ ownerIds: ['owner1'] });
+    gw.blockedDms.add('owner1');
+    const lines = await warnings(async () => {
+      keeper.report(false, 'keepalive');
+      await vi.advanceTimersByTimeAsync(10 * 60 * 60_000);
+    });
+    expect(lines.filter((l) => l.includes('DM an owner1 nicht zugestellt'))).toHaveLength(4);
+    expect(lines.some((l) => l.includes('neuer Versuch beim nächsten Start'))).toBe(true);
+    gw.blockedDms.clear();
+    keeper.report(true, 'keepalive');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(gw.dmTo).toHaveLength(0);
+  });
+
+  it('!quiz status ohne Spiel zeigt die Anmeldung; mit Spiel unverändert', async () => {
+    const { gw, bot, keeper } = accountSetup();
+    await gw.write(anna, '!quiz status');
+    expect(gw.all()).toContain('Gerade läuft kein Spiel.');
+    expect(gw.all()).toContain('🔐 quiz-base-Anmeldung: noch nicht geprüft');
+    keeper.report(true, 'lobby');
+    gw.sent = [];
+    await gw.write(anna, '!quiz status');
+    expect(gw.all()).toMatch(/🔐 quiz-base-Anmeldung: angemeldet/);
+    await gw.write(anna, '!quiz neu 1');
+    await until(() => bot.activeGame?.phase === 'lobby');
+    gw.sent = [];
+    await gw.write(anna, '!quiz status');
+    expect(gw.all()).not.toContain('quiz-base-Anmeldung');
+  });
+
+  it('ohne Konto (account fehlt): Status wie bisher', async () => {
+    const { gw } = setup();
+    await gw.write(anna, '!quiz status');
+    expect(gw.all()).toBe('Gerade läuft kein Spiel. `!quiz neu` startet eins.');
+  });
+
+  it('Spielstart unterbricht die Prüfung, Spielende meldet gameEnded; isIdleForMaintenance nur ohne Spiel', async () => {
+    const { gw, bot, keeper } = accountSetup();
+    const interrupt = vi.spyOn(keeper, 'interrupt');
+    const ended = vi.spyOn(keeper, 'gameEnded');
+    expect(bot.isIdleForMaintenance()).toBe(true);
+    await gw.write(anna, '!quiz neu 1');
+    expect(interrupt).toHaveBeenCalledWith('Spiel startet');
+    expect(bot.isIdleForMaintenance()).toBe(false);
+    await until(() => bot.activeGame?.phase === 'lobby');
+    expect(ended).not.toHaveBeenCalled();
+    await gw.write(anna, '!quiz ende');
+    await until(() => !bot.activeGame);
+    await until(() => ended.mock.calls.length === 1);
+    expect(bot.isIdleForMaintenance()).toBe(true);
+  });
+
+  it('isIdleForMaintenance ist false im Voice-Channel und beim Beitreten; Beitritt unterbricht die Prüfung', async () => {
+    const room: VoiceTransport = { label: 'room', play: async () => {}, stop() {}, onUtterance() {}, onClose() {}, close: async () => {} };
+    let joined: () => void = () => {};
+    const joining = new Promise<void>((r) => (joined = r));
+    const voice: VoiceKit = {
+      stt: { engine: 'whisper:test', transcribe: async () => '', close: async () => {} },
+      tts: { engine: 'piper:test', synth: async () => ({ rate: 16000, channels: 1, samples: new Int16Array(3) }), close: async () => {} },
+      warmup: () => joining,
+    };
+    const { gw, bot, keeper } = accountSetup(undefined, {}, { voice });
+    gw.joinVoice = async () => room;
+    const interrupt = vi.spyOn(keeper, 'interrupt');
+    const cmd = gw.write(anna, '!quiz voice', { voiceChannelId: 'vc' });
+    await until(() => interrupt.mock.calls.length === 1);
+    expect(interrupt).toHaveBeenCalledWith('Voice-Channel');
+    expect(bot.isIdleForMaintenance()).toBe(false); // still joining (models warming up)
+    joined();
+    await cmd;
+    await until(() => gw.all().includes('Ich bin im Voice-Channel'));
+    expect(bot.isIdleForMaintenance()).toBe(false);
+    await gw.write(anna, '!quiz voice aus', { voiceChannelId: 'vc' });
+    await until(() => gw.all().includes('Voice-Channel verlassen'));
+    expect(bot.isIdleForMaintenance()).toBe(true);
+    await bot.shutdown();
+  });
+
+  it('isIdleForMaintenance ist false, solange ein Board erzeugt wird; der Start unterbricht die Prüfung', async () => {
+    const studio = new FakeStudio();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const generate = studio.generate.bind(studio);
+    studio.generate = async (spec, onProgress) => {
+      await gate;
+      return generate(spec, onProgress);
+    };
+    const { gw, bot, keeper } = accountSetup(undefined, {}, { boards: studio });
+    const interrupt = vi.spyOn(keeper, 'interrupt');
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2');
+    expect(bot.isIdleForMaintenance()).toBe(true); // only asked, nothing running
+    await gw.write(admin, 'ja');
+    await until(() => interrupt.mock.calls.length === 1);
+    expect(interrupt).toHaveBeenCalledWith('Board-Anlage');
+    expect(bot.isIdleForMaintenance()).toBe(false);
+    release();
+    await until(() => gw.all().includes('Schreib `anlegen`'));
+    expect(bot.isIdleForMaintenance()).toBe(true);
+    await gw.write(admin, 'anlegen');
+    await until(() => gw.all().includes('ist auf quiz-base angelegt'));
+    expect(interrupt).toHaveBeenCalledTimes(2);
+  });
+
+  it('eigenes Board bei verlorener Anmeldung: erst ein Hinweis, dann der Versuch', async () => {
+    const studio = new FakeStudio();
+    const { gw, keeper, session } = accountSetup(undefined, {}, { boards: studio });
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2');
+    await gw.write(admin, 'ja');
+    await until(() => gw.all().includes('Schreib `anlegen`'));
+    await gw.write(admin, 'anlegen');
+    await until(() => gw.all().includes('ist auf quiz-base angelegt'));
+    keeper.report(false, 'lobby');
+    gw.sent = [];
+    await gw.write(anna, '!quiz neu weltraum quiz');
+    await until(() => gw.all().includes('join?code=ABC123'));
+    expect(gw.sent[0]).toContain('Ich bin bei quiz-base gerade nicht angemeldet – ich versuche es trotzdem');
+    expect(session().lobbyOpts).toEqual({ own: true });
+  });
+
+  it('lossText nennt Zeit, Quelle, Befehl und den Grund – nur Status und Fehlercode', () => {
+    const now = Date.parse('2026-11-22T13:00:00Z');
+    const text = lossText(
+      {
+        version: 1, state: 'lost', okSince: '2026-11-20T15:08:00Z', lastOkAt: '2026-11-20T15:08:00Z', lostAt: '2026-11-22T12:02:00Z', notifiedLostAt: null,
+        lastCheckAt: null, nextDueAt: null, lastAuth: null, history: [],
+        authHistory: [{ at: '2026-11-22T12:02:00Z', kind: 'refresh', status: 400, code: 'session_expired', source: 'keepalive' }],
+      },
+      'keepalive',
+      'npx qbhost login --server testhost',
+      '!quiz',
+      now,
+    );
+    expect(text).toContain('bemerkt 13:02 · Keep-alive');
+    expect(text).toContain('Zuletzt angemeldet: 20.11. 16:08, Grund: Erneuerung abgelehnt (400 session_expired).');
+    expect(text).toContain('`!quiz neu <eigenes Board>`');
+    expect(text).toContain('`npx qbhost login --server testhost`');
+  });
+
+  it('shutdown endet, auch wenn das Spiel auf quiz-base nie endet, und schließt den Browser des Spiels', async () => {
+    let closed = 0;
+    const hanging: SessionLike = {
+      bus: new EventBus(),
+      rules: ConfigSchema.parse({}).game,
+      meter: new UsageMeter(),
+      createLobby: async () => ({ code: 'ABC123', joinUrl: 'https://www.quiz-base.de/join?code=ABC123' }),
+      run: () => new Promise<void>(() => {}),
+      endGame: () => new Promise<void>(() => {}),
+      close: async () => void closed++,
+    };
+    const { gw, bot } = accountSetup(undefined, {}, { createSession: () => hanging });
+    await gw.write(anna, '!quiz neu 1');
+    await until(() => bot.activeGame?.phase === 'lobby');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    let done = false;
+    const lines = await warnings(async () => {
+      const p = bot.shutdown().then(() => (done = true));
+      await vi.advanceTimersByTimeAsync(14_000);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(2000);
+      await p;
+    });
+    expect(done).toBe(true);
+    expect(closed).toBe(1);
+    expect(bot.activeGame).toBeNull();
+    expect(lines.some((l) => l.includes('Spiel auf quiz-base nicht rechtzeitig beendet'))).toBe(true);
+  });
+});
+
+describe('Herunterfahren (shutdownBot)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    setLogLevel('error');
+  });
+
+  it('Budgets: Schritte + Wachhund-Browser ≤ 50 s < 60 s Docker-Grace', () => {
+    const b = SHUTDOWN_BUDGET;
+    expect(b.keeper + b.bot + b.browsers + b.voice + b.gateway).toBeLessThanOrEqual(b.watchdog);
+    expect(b.watchdog + b.watchdogBrowsers).toBeLessThanOrEqual(50_000);
+  });
+
+  function parts(hang: Partial<Record<'keeper' | 'bot' | 'browsers' | 'voice' | 'gateway', boolean>> = {}) {
+    const order: string[] = [];
+    const never = new Promise<never>(() => {});
+    const exit = vi.fn();
+    const step = (name: string, hangs?: boolean, value?: unknown) => async () => {
+      order.push(name);
+      if (hangs) return never;
+      return value as never;
+    };
+    return {
+      order,
+      exit,
+      p: {
+        keeper: { stop: step('keeper', hang.keeper) },
+        bot: { shutdown: step('bot', hang.bot) },
+        closeBrowsers: vi.fn(async (ms: number) => {
+          order.push(`browsers:${ms}`);
+          if (hang.browsers) return never;
+          return 0;
+        }),
+        voice: { close: step('voice', hang.voice) },
+        gateway: { destroy: step('gateway', hang.gateway) },
+        exit,
+      },
+    };
+  }
+
+  async function logged(fn: () => Promise<void>): Promise<string> {
+    let out = '';
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((c: string | Uint8Array) => ((out += String(c)), true));
+    setLogLevel('info');
+    try {
+      await fn();
+    } finally {
+      spy.mockRestore();
+      setLogLevel('error');
+    }
+    return out.replace(/\x1b\[[0-9;]*m/g, '');
+  }
+
+  it('Reihenfolge: Wächter → Spiel → Browser → Sprache → Discord, loggt die Dauer', async () => {
+    const { p, order, exit } = parts();
+    const out = await logged(async () => void (await shutdownBot(p)));
+    expect(order).toEqual(['keeper', 'bot', `browsers:${SHUTDOWN_BUDGET.browsers}`, 'voice', 'gateway']);
+    expect(out).toMatch(/Heruntergefahren in \d+,\d s/);
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it('ein hängendes Spiel: nach dem Budget weiter, die Browser werden trotzdem geschlossen', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { p, order, exit } = parts({ bot: true });
+    let ms = -1;
+    let t = 0;
+    const out = await logged(async () => {
+      const run = shutdownBot({ ...p, now: () => t }).then((v) => (ms = v));
+      for (let i = 0; i < 30 && ms < 0; i++) {
+        t += 1000;
+        await vi.advanceTimersByTimeAsync(1000);
+      }
+      await run;
+    });
+    expect(order).toEqual(['keeper', 'bot', `browsers:${SHUTDOWN_BUDGET.browsers}`, 'voice', 'gateway']);
+    expect(ms).toBeGreaterThanOrEqual(SHUTDOWN_BUDGET.bot);
+    expect(ms).toBeLessThan(SHUTDOWN_BUDGET.watchdog);
+    expect(out).toContain('Herunterfahren: Spiel nicht in 24 s fertig – weiter');
+    expect(exit).not.toHaveBeenCalled();
+  });
+
+  it('hängt alles: der Wachhund schließt nach 45 s die Browser und beendet mit 1 (spätestens nach 50 s)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { p, exit } = parts({ keeper: true, bot: true, browsers: true, voice: true, gateway: true });
+    p.closeBrowsers.mockImplementation(async (ms: number) => (ms === SHUTDOWN_BUDGET.watchdogBrowsers ? 1 : new Promise<never>(() => {})));
+    const out = await logged(async () => {
+      void shutdownBot(p);
+      await vi.advanceTimersByTimeAsync(SHUTDOWN_BUDGET.watchdog - 1);
+      expect(exit).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(p.closeBrowsers).toHaveBeenCalledWith(SHUTDOWN_BUDGET.watchdogBrowsers);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(out).toContain('Herunterfahren dauerte über 45 s');
+  });
 });

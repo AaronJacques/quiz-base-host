@@ -133,6 +133,7 @@ Discord-Bot (`npx qbhost discord`). Einrichtung: [DISCORD.md](DISCORD.md).
 | `autoStart` | `true` | Spiel automatisch starten, sobald alle in quiz-base bereit **und** mit Discord verknüpft sind. `!quiz los` erzwingt den Start. |
 | `lobbyTimeoutMin` | `20` | Lobby schließen, wenn das Spiel nach so vielen Minuten nicht gestartet ist. |
 | `dataDir` | `.qbhost/discord` | Speicherort für Verknüpfungen und gespeicherte Regeln pro Server. |
+| `ownerIds` | `[]` | Discord-IDs der Besitzer des Bots. Sie bekommen Betriebsmeldungen per DM (quiz-base-Anmeldung verloren bzw. wieder da). Leer = Besitzer der Discord-App im Developer Portal (bei einem Team alle Mitglieder). |
 
 ## `voice`
 
@@ -208,7 +209,7 @@ Das quiz-base-Konto des Bots (eigene Boards). Der Bot hält die Anmeldung im Lee
 | `afterGameCheckSec` | `60` | Prüfung so viele Sekunden nach jedem Spiel, sobald der Bot im Leerlauf ist. `0` = keine. |
 | `holdSec` | `20` | So lange bleibt die Seite höchstens offen, wenn keine Erneuerung zu sehen ist (5–120). |
 | `statusFile` | `.qbhost/login-status.json` | Anmeldestatus mit Zeitstempeln, Statuscodes und Fehlercodes der Seite. Ohne Tokens, Cookies und URLs. `qbhost doctor` zeigt ihn. |
-| `loginCommand` | `npx qbhost login` | Befehl, den Hinweise (und ab A2 die DM) zum Neuanmelden nennen. Auf dem Server: `"npx qbhost login --server <ssh-host>"`. |
+| `loginCommand` | `npx qbhost login` | Befehl, den Hinweise, `!quiz status` und die DM bei Verlust zum Neuanmelden nennen. Auf dem Server: `"npx qbhost login --server <ssh-host>"`. |
 
 ## Spielregeln (zur Laufzeit änderbar)
 
