@@ -781,8 +781,13 @@ export class QuizBot {
       : g.answerDeadline - PENDING_SUBMIT_MS;
     g.pendingTimer = setTimeout(() => {
       if (g.pending !== p || g.awaiting !== a) return;
-      // Off: the answer lapses silently – the controller's timeout gives the verdict.
-      if (g.session.rules.confirmAtDeadline) this.submitAnswer(g, p.player, p.answer, true);
+      // Visible in the log and the chat (no recognised text, rule 8), not spoken: the verdict follows at once, and
+      // another sentence in front of it would delay it by its own length.
+      const counts = g.session.rules.confirmAtDeadline;
+      log.info(`🎙 ${p.player}: kein Ja bis Fristende – ${counts ? 'Antwort zählt wie gesagt' : 'Antwort verfällt'}`);
+      this.queue(g.channelId, `-# ⏱️ Kein „Ja“ von ${p.player} bis Fristende – ${counts ? 'die Antwort zählt wie gesagt' : 'die Antwort verfällt'}.`);
+      // Off: the answer lapses – the controller ends its wait right after it, with the usual timeout.
+      if (counts) this.submitAnswer(g, p.player, p.answer, true);
       else this.dropPending(g);
     }, Math.max(0, due - Date.now()));
   }
@@ -1136,6 +1141,7 @@ export class QuizBot {
     }
     clearTimeout(g.lobbyTimeout);
     clearTimeout(g.lobbyStatusTimer);
+    this.dropPending(g); // a spoken answer still waiting for "Ja": its timer must not fire on the closed session
     g.offs.forEach((off) => off());
     if (this.voice?.guildId === g.guildId) {
       this.voice.bridge.detach();

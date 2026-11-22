@@ -2140,3 +2140,76 @@ describe('QuizBot voice: delta review of package C (C-F7, C-F8, C-F11)', () => {
     await t.bot.shutdown();
   }, 20000);
 });
+
+describe('QuizBot voice: live test findings (L-F2, L-F3)', () => {
+  async function asked(t: ReturnType<typeof voiceSetup>) {
+    await voiceGame(t);
+    t.room().speak(annaS, 'Sport für hundert');
+    await until(() => t.bot.activeGame?.awaiting?.player === 'Anna');
+    return Date.now();
+  }
+  async function infoLog(fn: () => Promise<void>): Promise<string> {
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => (lines.push(String(chunk)), true));
+    setLogLevel('info');
+    try {
+      await fn();
+    } finally {
+      spy.mockRestore();
+      setLogLevel('error');
+    }
+    return lines.join('');
+  }
+
+  it('L-F2: an answer submitted without "Ja" says so in the log and the chat – without the recognised text, before the verdict', async () => {
+    const t = voiceSetup({ answerTimeoutSec: 2, confirmGraceSec: 1 }, { extraTimeSec: 0 });
+    await asked(t);
+    const log = await infoLog(async () => {
+      t.room().speak(annaS, 'Meine Antwort ist zehn');
+      await until(() => t.chat().includes('„zehn“ ist richtig'), 6000);
+    });
+    const line = log.split('\n').find((l) => l.includes('kein Ja bis Fristende'));
+    expect(line).toContain('🎙 Anna: kein Ja bis Fristende – Antwort zählt wie gesagt');
+    expect(line).not.toContain('zehn');
+    const chat = t.chat();
+    expect(chat).toContain('Kein „Ja“ von Anna bis Fristende – die Antwort zählt wie gesagt.');
+    expect(chat.indexOf('Kein „Ja“ von Anna')).toBeLessThan(chat.indexOf('„zehn“ ist richtig'));
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('A2-F3: the game ends while "neun?" waits for "Ja" – the waiting answer, its timer and an open keyword go with it', async () => {
+    const t = voiceSetup({ answerTimeoutSec: 3, confirmGraceSec: 3 }, { extraTimeSec: 0 });
+    await asked(t);
+    const g = t.bot.activeGame!;
+    const answers: string[] = [];
+    t.session().bus.on('player:answer', (a) => void answers.push(a.answer));
+    t.room().speak(annaS, 'Meine Antwort ist neun');
+    await until(() => t.room().played.includes('neun?'));
+    await t.session().page.endGame(); // ended in the browser – no "!quiz ende", which drops it already
+    await until(() => t.bot.activeGame === null);
+    expect(g.pending).toBeNull();
+    expect(g.openKeyword).toBeNull();
+    await new Promise((r) => setTimeout(r, 3500)); // past the time the timer would have submitted it
+    expect(answers).toEqual([]);
+    await t.bot.shutdown();
+  }, 20000);
+
+  it('L-F3: autoabgabe off – right after the answer lapses comes "Zeit ist um", no seconds of silence', async () => {
+    // Answer time 3 s, grace 8 s, answer at 1 s: it lapses at 1 + 8 = 9 s; before, the controller waited to 3 + 8 + 3 = 14 s.
+    const t = voiceSetup({ answerTimeoutSec: 3, confirmGraceSec: 8, confirmAtDeadline: false }, { extraTimeSec: 0 });
+    const at = await asked(t);
+    let lapsedAt = 0;
+    const log = await infoLog(async () => {
+      await new Promise((r) => setTimeout(r, Math.max(0, at + 1000 - Date.now())));
+      t.room().speak(annaS, 'Meine Antwort ist zehn');
+      await until(() => t.room().played.includes('zehn?'));
+      await until(() => t.chat().includes('Kein „Ja“ von Anna') && (lapsedAt ||= Date.now()) > 0, 12000);
+      await until(() => t.chat().includes('(keine Antwort)'), 6000);
+    });
+    expect(Date.now() - at).toBeLessThan(12000);
+    expect(Date.now() - lapsedAt).toBeLessThan(2000); // the timeout follows the lapse at once (chat bundles for 600 ms)
+    expect(log).toContain('🎙 Anna: kein Ja bis Fristende – Antwort verfällt');
+    expect(t.chat()).not.toContain('„zehn“ ist');
+    await t.bot.shutdown();
+  }, 30000);
+});

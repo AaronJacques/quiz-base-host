@@ -9,8 +9,10 @@ import type { TafelquizPort } from '../../site/tafelquiz/page.ts';
 import type { GameMode } from '../mode.ts';
 import { scoreFor } from './rules.ts';
 
-/** Lets a wait move its deadline: call `to(ms)` with the new total from the start; returns the unsubscribe. */
-type Extend = (to: (ms: number) => void) => () => void;
+/** Lets a wait move its deadline later: call `to(at)` with the new deadline (epoch ms); returns the unsubscribe. */
+type Extend = (to: (at: number) => void) => () => void;
+/** `confirmAtDeadline` off: the wait ends this long after the bot let an unconfirmed answer lapse. */
+const LAPSE_MARGIN_MS = 300;
 
 /** While waiting for a pick, the reminder rules are read again this often – a change (also from "aus") counts within it. */
 const REMINDER_RECHECK_MS = 30_000;
@@ -318,17 +320,23 @@ export class TafelquizController implements GameMode {
     const scope = `${this.questionId}|${player}`;
     const prejudging = this.judgeEarly(scope, q, referencePromise, hints, media);
     // Speech: an answer asked back ("Paris?") in the last `confirmGraceSec` of the answer time gets up to that much more
-    // for its "Ja" – once per ask, never more. An earlier one has its time for "Ja" within the answer time (the bot's
-    // `armPending` does the same sum), so it gets nothing. The bot submits it before this deadline (`confirmAtDeadline`);
-    // the clock on quiz-base is already at 0 then.
+    // for its "Ja" – never more. An earlier one has its time for "Ja" within the answer time (the bot's `armPending`
+    // does the same sum), so it gets nothing. The clock on quiz-base is already at 0 then.
+    // - `confirmAtDeadline` on: the bot submits it by D0 + grace; the wait ends 3 s after that at the latest.
+    // - off: the bot lets it lapse at min(D0 + grace, asked back + grace) – the wait ends right after that, with the
+    //   usual timeout ("Die Zeit ist um"), instead of seconds of silence in which a late "Ja" would go nowhere.
     const baseMs = timeoutSec * 1000 + 3000;
     const graceMs = this.d.game.confirmGraceSec * 1000;
-    let extendTo: ((ms: number) => void) | null = null;
+    const answerEnd = askedAt + timeoutSec * 1000; // D0, as the bot counts it
+    const waitFrom = Date.now(); // the wait below starts now (`whilePage` calls it at once)
+    let extendTo: ((at: number) => void) | null = null;
     // One listener for both: early judging and the grace (only the controller listens to this event).
     const offPending = this.d.bus.on('player:answer-pending', (p) => {
       if (p.player !== player) return;
       prejudging.pending(p.answer);
-      if (graceMs > 0 && Date.now() >= askedAt + timeoutSec * 1000 - graceMs) extendTo?.(baseMs + graceMs);
+      const now = Date.now();
+      if (graceMs <= 0 || now < answerEnd - graceMs) return;
+      extendTo?.(this.d.game.confirmAtDeadline ? waitFrom + baseMs + graceMs : Math.min(answerEnd, now) + graceMs + LAPSE_MARGIN_MS);
     });
     let outcome: AnswerOutcome;
     try {
@@ -575,7 +583,7 @@ export class TafelquizController implements GameMode {
 
   /**
    * Wait for the answer of `player`, or an operator decision; aborts if the question gets closed in the browser.
-   * `extend` may move the deadline (ms from now on) later – once; it returns its unsubscribe.
+   * `extend` may move the deadline (epoch ms) later, never earlier; it returns its unsubscribe.
    */
   private async collectAnswer(player: string, timeoutMs: number, extend?: Extend): Promise<AnswerOutcome> {
     const res = await this.whilePage((x) => x.phase === 'question', (signal) => this.collectAnswerRaw(player, timeoutMs, signal, extend));
@@ -586,20 +594,19 @@ export class TafelquizController implements GameMode {
     const ac = new AbortController();
     const onAbort = () => ac.abort();
     outer.addEventListener('abort', onAbort);
-    const start = Date.now();
+    let deadline = Date.now() + timeoutMs;
     let timer: NodeJS.Timeout | undefined;
-    let extended = false;
     let offExtend = () => {};
     const timeoutP = new Promise<null>((resolve) => {
-      const arm = (ms: number) => {
+      const arm = () => {
         clearTimeout(timer);
-        timer = setTimeout(() => resolve(null), Math.max(0, start + ms - Date.now()));
+        timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
       };
-      arm(timeoutMs);
-      offExtend = extend?.((ms) => {
-        if (extended || ms <= timeoutMs || ac.signal.aborted) return;
-        extended = true;
-        arm(ms);
+      arm();
+      offExtend = extend?.((at) => {
+        if (at <= deadline || ac.signal.aborted) return;
+        deadline = at;
+        arm();
       }) ?? offExtend;
       ac.signal.addEventListener('abort', () => resolve(null), { once: true });
     });

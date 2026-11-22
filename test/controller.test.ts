@@ -1053,6 +1053,22 @@ describe.concurrent('TafelquizController: grace for the spoken "Ja" (confirmGrac
     expect(late.answer).toBe('zehn');
   }, 20000);
 
+  it('L-F3: autoabgabe off – the wait ends right after the bot lets the unconfirmed answer lapse, not seconds later', async () => {
+    // Answer time 1 s, grace 3 s, asked back at 0.8 s: the bot lets it lapse at min(D0, 0.8 s) + 3 s = 3.8 s.
+    // On: the wait runs to 1 + 3 + 3 = 7 s (the bot submits before). Off: 3.8 s + 0.3 s, then "(keine Antwort)".
+    const off = await graceRun({ confirmGraceSec: 3, confirmAtDeadline: false }, [{ at: 800 }], 20000);
+    expect(off.answer).toBe('(keine Antwort)');
+    expect(off.ms).toBeGreaterThanOrEqual(3900);
+    expect(off.ms).toBeLessThan(4600);
+    // A later answer asked back moves it along with the bot's sum, never beyond answer time + grace.
+    const later = await graceRun({ confirmGraceSec: 3, confirmAtDeadline: false }, [{ at: 800 }, { at: 2500 }], 20000);
+    expect(later.ms).toBeGreaterThanOrEqual(4200);
+    expect(later.ms).toBeLessThan(4800);
+    // On (default): unchanged, the answer that comes 5 s after the asked back one still counts.
+    const on = await graceRun({ confirmGraceSec: 3 }, [{ at: 800 }], 5800);
+    expect(on.answer).toBe('zehn');
+  }, 30000);
+
   it('someone else\'s pending answer gives the person asked no grace', async () => {
     const v = await graceRun({ confirmGraceSec: 2 }, [{ at: 800, player: 'Ben' }], 5000);
     expect(v.answer).toBe('(keine Antwort)');

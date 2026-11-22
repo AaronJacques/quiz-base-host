@@ -63,7 +63,7 @@ Ablauf und Punkte des Tafelquiz. Die Punkteregeln sind **pro Server zur Laufzeit
 | `revealPauseSolvedSec` | `1.5` | Kürzere Pause, wenn jemand die Frage richtig gelöst hat (am Zug oder per Buzzer). 0 bis 30, Dezimalwerte erlaubt. |
 | `autoEnd` | `true` | Am Ende das Spiel auf der Seite automatisch beenden. |
 | `confirmGraceSec` | `8` | Sprache: So viele Sekunden ab der erkannten Antwort (Rückfrage „X?“) bleiben für das „Ja“, höchstens bis Antwortzeit plus diesem Wert und mindestens bis 1,5 s vor Ende der Antwortzeit. Kommt die Rückfrage in den letzten so vielen Sekunden der Antwortzeit, verlängert sich die Antwortzeit einmal um höchstens diesen Wert (die Uhr auf quiz-base steht dann schon auf 0). 0 bis 20, 0 = aus (altes Verhalten: bis 1,5 s vor Ende der Antwortzeit). Regel `nachfrist`. |
-| `confirmAtDeadline` | `true` | Sprache: Eine Antwort, die bei Fristende (plus Nachfrist) noch auf „Ja“ wartet, zählt wie gesagt. Aus = sie verfällt (Zeit abgelaufen). Regel `autoabgabe`. |
+| `confirmAtDeadline` | `true` | Sprache: Eine Antwort, die bei Fristende (plus Nachfrist) noch auf „Ja“ wartet, zählt wie gesagt. Aus = sie verfällt (Zeit abgelaufen), und die Zeitüberschreitung kommt gleich danach. In beiden Fällen steht ein Hinweis im Chat und im Log. Regel `autoabgabe`. |
 
 Faktoren sind Multiplikatoren. Bei einem Fragewert von 200 ergibt `correctFactor: 1` +200, `wrongFactor: 0.5` −100.
 
