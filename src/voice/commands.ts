@@ -201,11 +201,11 @@ export function isBuzz(text: string): boolean {
 /**
  * Fillers that may come before the answer keyword ("Okay, äh, meine Antwort ist …"). Confirmation words
  * belong here too: "Genau, meine Antwort ist zehn" is a new answer, not the "Ja" to the old one. So do
- * corrections ("Ich korrigiere, meine Antwort ist …", "Nein, mein Antwort ist …"; "ähm nein" and "nee warte"
- * are covered word by word) and the default wake words ("Quizmaster, meine Antwort ist …" from the person
+ * corrections ("Ich korrigiere, meine Antwort ist …", "Nein, mein Antwort ist …", "Ach nein, …"; "ähm nein" and "nee warte"
+ * are covered word by word – "ach" and "oh" only with "nein": "Oh, die Antwort weiß ich nicht" is thinking aloud) and the default wake words ("Quizmaster, meine Antwort ist …" from the person
  * answering). Custom wake words from `voice.wakeWords` are not stripped here – accepted, they are rare.
  */
-const ANSWER_LEAD = String.raw`(?:(?:(?:hey\s+|hallo\s+)?quiz\s*(?:master|meister|host)|ich korrigiere(?:\s+mich)?|korrektur|quatsch|äh+m*|ähm|hm+|okay|ok|also|gut|na gut|ja|jap|jep|jo|genau|richtig|korrekt|stimmt|exakt|klar|passt|nein|ne|nee|nö|doch|warte|moment|sorry|dann|so|und|ach|oh|oder|halt)[\s,.!…:–-]*)*`;
+const ANSWER_LEAD = String.raw`(?:(?:(?:hey\s+|hallo\s+)?quiz\s*(?:master|meister|host)|ich korrigiere(?:\s+mich)?|korrektur|quatsch|äh+m*|ähm|hm+|okay|ok|also|gut|na gut|ja|jap|jep|jo|genau|richtig|korrekt|stimmt|exakt|klar|passt|nein|ne|nee|nö|doch|warte|moment|sorry|dann|so|und|(?:ach|oh)[\s,.!…:–-]+nein|oder|halt)[\s,.!…:–-]*)*`;
 /**
  * The possessive before "Antwort" as speech recognition writes it: "mein Antwort", "meiner Antwort", "Maine Antwort".
  * Never "eine" – "Eine Antwort ist schwer" is no answer.
@@ -216,10 +216,22 @@ const ANSWER_POSS = String.raw`(?:meine|meiner|meinen|meinem|mein|maine|unsere|u
  * at the very end it is swallowed, so "Meine Antwort es" waits for the answer instead of taking "es".
  * Never "war": "Meine Antwort war falsch" is thinking aloud.
  */
+/** Without a verb, "Antwort" followed by one of these is talk about the answer: "Die Antwort weiß ich nicht", "Meine Antwort war …". */
+const NOT_ANSWER_VERB = String.raw`(?:war|waren|weiß|weiss|kenn|kenne|kennt|hab|habe|hatte|hätte|fällt|kommt|kam)`;
 const ANSWER_VERB = String.raw`(?:ist|is|isst|lautet|wäre|heißt|sei|es(?=[\s,.:;!…–-]+[\p{L}\p{N}]|[\s,.:;!?…–-]*$))`;
 /** "Meine Antwort ist", "Antwort:", "Die Antwort lautet", "Meine finale Antwort ist", "Ich antworte mit" … */
-const ANSWER_KEY = String.raw`(?:(?:${ANSWER_POSS}|die)\s+)?(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort(?:\s+${ANSWER_VERB}|(?!\s+(?:war|waren)(?![\p{L}\p{N}])))|ich antworte(?:\s+mit)?`;
+const ANSWER_KEY = String.raw`(?:(?:${ANSWER_POSS}|die)\s+)?(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort(?:\s+${ANSWER_VERB}|(?!\s+${NOT_ANSWER_VERB}(?![\p{L}\p{N}])))|ich antworte(?:\s+mit)?`;
 const ANSWER_RE = new RegExp(String.raw`^\s*${ANSWER_LEAD}(?:${ANSWER_KEY})(?=[\s,.:;!?…–-]|$)[\s,.:;!…–-]*(.*)$`, 'isu');
+/** The keyword with a verb ("… Antwort ist", "Ich antworte mit") – where a command could be meant too ("Quizmaster, Antwort bitte wiederholen"). */
+const ANSWER_STRONG_RE = new RegExp(
+  String.raw`^\s*${ANSWER_LEAD}(?:(?:(?:${ANSWER_POSS}|die)\s+)?(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort\s+${ANSWER_VERB}|ich antworte\s+mit)(?=[\s,.:;!?…–-]|$)`,
+  'isu',
+);
+
+/** Does the text bring the answer keyword *with* a verb ("Meine Antwort ist …", not "Antwort bitte wiederholen")? */
+export function hasStrongKeyword(text: string): boolean {
+  return ANSWER_STRONG_RE.test(text);
+}
 
 /**
  * Later keywords in the same utterance – stricter (possessive or article *and* verb), so "die Antwort auf
@@ -277,21 +289,29 @@ export function isEcho(heard: string, said: string): boolean {
   return hits / h.length >= 0.8 && hits / s.size >= 0.5;
 }
 
-/** Fillers and the wake word in front of the reply to "Paris?" ("Äh, ja", "Quizmaster, ja"). */
-const CONFIRM_LEAD = /^(?:(?:äh+m*|ähm|hm+|also|(?:hey |hallo )?quiz ?(?:master|meister|host))(?: |$))+/u;
+/** Fillers and the wake word in front of the reply to "Paris?" ("Äh, ja", "Mhm, ja", "Quizmaster, ja"). */
+const CONFIRM_LEAD = /^(?:(?:äh+m*|ähm|hm+|mh+m*|mhm|also|(?:hey |hallo )?quiz ?(?:master|meister|host))(?: |$))+/u;
 const NO_FIRST = new Set(['nein', 'ne', 'nee', 'nö', 'nä', 'falsch', 'stopp', 'stop', 'halt', 'korrektur', 'anders', 'nicht', 'no', 'nope']);
 const NO_ANYWHERE = new Set(['nicht', 'nein', 'nee', 'nö', 'falsch']);
-/** "Warte", "Moment": the answer stays open – no "Ja", no "Nein", and no asking back. */
-const WAIT_FIRST = new Set(['warte', 'wart', 'moment', 'sekunde', 'augenblick']);
+/** "Warte", "Moment" – also after a "Ja" ("Ja, Moment"): the answer stays open – no "Ja", no "Nein", and no asking back. */
+const WAIT_WORDS = new Set(['warte', 'wart', 'moment', 'sekunde', 'augenblick']);
+/** After a "Ja", these take it back or make it a doubt ("Ja, aber …", "Ja oder Rom", "Ja, keine Ahnung", "Ja, stopp"). */
+const YES_BREAKERS = new Set(['aber', 'oder', 'keine', 'ahnung', 'vielleicht', 'stopp', 'stop', 'halt', 'eigentlich', 'lieber']);
 const YES_FIRST = new Set(
-  ('ja jaa jaaa jaha jap japp jep jepp jo joa jup jupp jawohl jawoll genau richtig korrekt stimmt passt bestätigt bestätige ' +
+  ('ja jaa jaaa jaja jaha jap japp jep jepp jo joa jup jupp jawohl jawoll genau richtig korrekt stimmt passt bestätigt bestätige ' +
     'yes yeah yep yup klar sicher logo exakt absolut definitiv natürlich eingeloggt einloggen').split(' '),
 );
 const YES_PHRASES = ['so ist es', 'das ist es', 'das ist sie', 'das stimmt', 'das passt', 'auf jeden fall'];
-/** Words that may follow the "Ja" without making it something else ("Ja, das ist meine Antwort", "Ja, genau, bitte"). */
+/**
+ * Harmless words after the "Ja": "Ja, das ist meine endgültige Antwort", "Ja, einloggen", "Ja, ganz sicher",
+ * "Ja, sag ich doch", "Ja, das war meine Antwort", "Ja, glaube schon". Anything else is either the waiting answer
+ * (also misheard, by sound) or another answer ("Ja, Rom" while "Paris?" waits) – then it is no "Ja".
+ */
 const YES_REST = new Set(
-  ('ja genau bitte klar richtig korrekt stimmt so ist es das sie meine antwort die final endgültig absolut sicher danke gerne ' +
-    'doch logo exakt jawohl passt auf jeden fall natürlich bestätigt').split(' '),
+  ('ja jaja genau bitte klar richtig korrekt stimmt so ist es das sie die der meine meiner mein antwort final finale finaler ' +
+    'endgültig endgültige endgültiger letzte absolut sicher ganz schon wirklich bestimmt hundertprozentig total sehr danke gerne ' +
+    'doch logo exakt jawohl passt auf jeden fall natürlich bestätigt bestätige einloggen eingeloggt einlocken ' +
+    'sag sage sagte gesagt ich war glaube glaub denke denk hab habe nehme nehm gut okay ok mhm jo yes').split(' '),
 );
 
 /** The reply to "Paris?" as words, without fillers and wake word in front; [] if nothing is left. */
@@ -299,32 +319,46 @@ function confirmWords(text: string): string[] {
   return speechNorm(text).replace(CONFIRM_LEAD, '').split(' ').filter(Boolean);
 }
 
+/** A word of the reply that is a word of the waiting answer – also misheard ("Zimmer" / "Zimma", same sound). */
+function answerWord(w: string, own: string[]): boolean {
+  return own.some((o) => o === w || (w.length >= 3 && o.length >= 3 && (colognePhonetic(o) === colognePhonetic(w) || (Math.min(o.length, w.length) >= 5 && levenshtein(o, w) <= 1))));
+}
+
 /**
  * The reply to "Paris?" – yes, no, or something else (null). `pending` is the answer waiting for "Ja":
- * its words may come along ("Ja, Paris"). A "Ja" only counts with nothing else after it ("Ja, warte",
- * "Ja, aber …", "Ja oder Rom" are null). A new answer with the keyword is null – it is handled as an answer.
- * "Okay", "Mhm", "Doch" alone are no "Ja".
+ * its words may come along ("Ja, Paris", misheard "Ja, Herr Zimmer" for "Hans Zimmer"). After the "Ja" harmless
+ * words are fine ("Ja, das ist meine endgültige Antwort", "Ja, ganz sicher"); a wait word, a doubt or another
+ * answer make it null ("Ja, warte", "Ja, aber …", "Ja oder Rom", "Ja, Rom"). A new answer with the keyword is
+ * null – it is handled as an answer; the keyword without anything after it ("Ja, meine finale Antwort") is a "Ja".
+ * "Okay", "Mhm", "Doch" alone are no "Ja"; the bot's own "Ja oder nein?" said back is null.
  */
 export function confirmReply(text: string, pending = ''): 'yes' | 'no' | null {
   const all = speechNorm(text);
-  if (!all || all.split(' ').length > 6) return null;
-  if (extractAnswer(text) !== null) return null; // "Genau, meine Antwort ist …" brings a new answer
+  if (!all || all.split(' ').length > 8) return null;
+  const said = extractAnswer(text);
+  if (said !== null && /[\p{L}\p{N}]/u.test(said)) return null; // "Genau, meine Antwort ist …" brings a new answer
   const words = confirmWords(text);
-  if (!words.length) return null;
-  const own = new Set(speechNorm(pending).split(' ').filter(Boolean));
-  if (NO_FIRST.has(words[0]!) || words.some((w) => NO_ANYWHERE.has(w) && !own.has(w))) return 'no';
-  if (WAIT_FIRST.has(words[0]!)) return null;
+  if (!words.length || words.join(' ') === 'ja oder nein') return null;
+  const own = speechNorm(pending).split(' ').filter(Boolean);
+  const ownSet = new Set(own);
+  if (NO_FIRST.has(words[0]!) || words.some((w) => NO_ANYWHERE.has(w) && !ownSet.has(w))) return 'no';
+  if (words.some((w) => WAIT_WORDS.has(w) && !ownSet.has(w))) return null;
   const s = words.join(' ');
   const phrase = YES_PHRASES.find((p) => s === p || s.startsWith(`${p} `));
   const rest = phrase ? words.slice(phrase.split(' ').length) : YES_FIRST.has(words[0]!) ? words.slice(1) : null;
-  if (rest && rest.every((w) => YES_REST.has(w) || own.has(w))) return 'yes';
-  return null;
+  if (!rest) return null;
+  if (rest.some((w) => YES_BREAKERS.has(w) && !ownSet.has(w))) return null;
+  // Words that are neither harmless nor the answer's: only as part of the (misheard) answer – at least one of the
+  // answer's words is there, and there are no more of them than the answer has ("Ja, Herr Zimmer" for "Hans Zimmer").
+  const other = rest.filter((w) => !YES_REST.has(w) && !answerWord(w, own));
+  if (!other.length) return 'yes';
+  const hits = rest.filter((w) => !YES_REST.has(w) && answerWord(w, own)).length;
+  return hits > 0 && other.length + hits <= own.length ? 'yes' : null;
 }
 
-/** "Warte", "Moment", "Sekunde" in reply to "Paris?": the person wants time – the bot does not ask "Ja oder nein?". */
+/** "Warte", "Moment", "Ja, Moment" in reply to "Paris?": the person wants time – the bot does not ask "Ja oder nein?". */
 export function confirmWaits(text: string): boolean {
-  const first = confirmWords(text)[0];
-  return !!first && WAIT_FIRST.has(first);
+  return confirmWords(text).some((w) => WAIT_WORDS.has(w));
 }
 
 const ORDINALS: Record<string, number> = {

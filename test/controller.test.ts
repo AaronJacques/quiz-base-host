@@ -1044,6 +1044,15 @@ describe.concurrent('TafelquizController: grace for the spoken "Ja" (confirmGrac
     expect(v.ms).toBeLessThan(6700);
   }, 15000);
 
+  it('C-F3: an answer asked back early (before the last confirmGraceSec of the answer time) gets no grace; a late one does', async () => {
+    // Answer time 3 s, grace 2 s: only an answer asked back from 1 s on extends (6 s → 8 s).
+    const early = await graceRun({ answerTimeoutSec: 3, confirmGraceSec: 2 }, [{ at: 200 }], 6500);
+    expect(early.answer).toBe('(keine Antwort)');
+    expect(early.ms).toBeLessThan(6400);
+    const late = await graceRun({ answerTimeoutSec: 3, confirmGraceSec: 2 }, [{ at: 1500 }], 6500);
+    expect(late.answer).toBe('zehn');
+  }, 20000);
+
   it('someone else\'s pending answer gives the person asked no grace', async () => {
     const v = await graceRun({ confirmGraceSec: 2 }, [{ at: 800, player: 'Ben' }], 5000);
     expect(v.answer).toBe('(keine Antwort)');
