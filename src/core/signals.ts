@@ -50,3 +50,46 @@ export function onStopSignal(
     process.off('SIGTERM', handler);
   };
 }
+
+/**
+ * Last resort for an exception nobody caught (rule 10 should prevent it; without a handler Node ends at once and
+ * Playwright's exit hook kills Chromium, which can lose a token it renewed moments ago): report it, run
+ * `beforeExit` (close the browsers) for at most `timeoutMs`, then `exit(1)`. A second one while closing exits at once.
+ */
+export function fatalErrorHandler(
+  beforeExit: () => Promise<unknown>,
+  opts: { exit?: (code: number) => void; timeoutMs?: number; report?: (text: string) => void } = {},
+): (e: unknown) => void {
+  const exit = opts.exit ?? ((code: number) => process.exit(code));
+  const report = opts.report ?? ((text: string) => process.stderr.write(`${text}\n`));
+  const timeoutMs = opts.timeoutMs ?? 3000;
+  let closing = false;
+  return (e: unknown) => {
+    try {
+      report(`❌ Unerwarteter Fehler – schließe die Browser und beende: ${(e as Error)?.stack ?? String(e)}`);
+    } catch {
+      // Reporting must not stop the exit.
+    }
+    if (closing) return exit(1);
+    closing = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    void Promise.race([
+      Promise.resolve()
+        .then(beforeExit)
+        .catch(() => {}),
+      new Promise<void>((r) => {
+        timer = setTimeout(r, timeoutMs);
+      }),
+    ]).finally(() => {
+      clearTimeout(timer);
+      exit(1);
+    });
+  };
+}
+
+/** Installs fatalErrorHandler on 'uncaughtException'. Returns a function that removes it. */
+export function onFatalError(beforeExit: () => Promise<unknown>, opts: Parameters<typeof fatalErrorHandler>[1] = {}): () => void {
+  const handler = fatalErrorHandler(beforeExit, opts);
+  process.on('uncaughtException', handler);
+  return () => void process.off('uncaughtException', handler);
+}

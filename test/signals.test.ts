@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { onStopSignal } from '../src/core/signals.ts';
+import { fatalErrorHandler, onFatalError, onStopSignal } from '../src/core/signals.ts';
 
 let off: (() => void) | null = null;
 afterEach(() => {
@@ -96,5 +96,50 @@ describe('stop budget on the server', () => {
     const script = readFileSync(new URL('../tools/server-login.sh', import.meta.url), 'utf8');
     expect(script).toContain('d stop -t 60 "$bot"');
     expect(script).not.toContain('stop -t 40');
+  });
+});
+
+describe('fatalErrorHandler / onFatalError (uncaught exception)', () => {
+  it('reports, closes the browsers first, then exit(1)', async () => {
+    vi.useFakeTimers();
+    const order: string[] = [];
+    let closed = () => {};
+    const handler = fatalErrorHandler(() => new Promise<void>((r) => (closed = () => (order.push('browsers closed'), r()))), {
+      exit: (c) => void order.push(`exit ${c}`),
+      report: (t) => void order.push(t.split(':')[0]!),
+    });
+    handler(new Error('boom'));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(order).toEqual(['❌ Unerwarteter Fehler – schließe die Browser und beende']);
+    closed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(order).toEqual(['❌ Unerwarteter Fehler – schließe die Browser und beende', 'browsers closed', 'exit 1']);
+  });
+
+  it('a hanging close: exit after timeoutMs; a second exception exits at once', async () => {
+    vi.useFakeTimers();
+    const exit = vi.fn();
+    const handler = fatalErrorHandler(() => new Promise(() => {}), { exit, timeoutMs: 3000, report: () => {} });
+    handler(new Error('a'));
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(exit).not.toHaveBeenCalled();
+    handler(new Error('b'));
+    expect(exit).toHaveBeenCalledWith(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(exit).toHaveBeenCalledTimes(2);
+  });
+
+  it('onFatalError installs one uncaughtException listener and removes it again', () => {
+    const before = process.listenerCount('uncaughtException');
+    const off = onFatalError(async () => {}, { exit: vi.fn(), report: () => {} });
+    expect(process.listenerCount('uncaughtException')).toBe(before + 1);
+    off();
+    expect(process.listenerCount('uncaughtException')).toBe(before);
+  });
+
+  it('cli wires it for discord and host, closing the browsers', async () => {
+    const { readFileSync } = await import('node:fs');
+    const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+    expect(cli.match(/onFatalError\(\(\) => closeOpenBrowsers\(3000\)\)/g)?.length).toBe(2);
   });
 });
