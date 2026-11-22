@@ -57,7 +57,11 @@ export function numberHint(answer: string, reference: string | null, spoken = fa
     }
     return out;
   };
-  const a = values(spoken ? stripDialogueDash(answer) : answer);
+  // "- 5" spoken: a dialogue dash – or a minus, if the solution is negative: then both readings.
+  const plain = values(answer);
+  const undashed = spoken ? values(stripDialogueDash(answer)) : plain;
+  const negative = !!reference && numberParts(reference).numbers.some((t) => t.value < 0);
+  const a = undashed.join() === plain.join() || !negative ? undashed : [`${undashed.join(', ') || '–'} oder ${plain.join(', ')}`];
   const r = values(reference);
   if (!a.length && !r.length) return null;
   const show = (v: string[]) => (v.length ? v.join(', ') : '–');

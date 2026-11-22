@@ -244,3 +244,17 @@ describe('review fixes (B-F4, B-F7, B-F2)', () => {
     expect(v === null || v.value <= 999, `${w} → ${v?.value}`).toBe(true);
   });
 });
+
+describe('review V3 (B-F10): a small number right after "Millionen"', () => {
+  const tok = (s: string) => numberTokens(foldForNumbers(s));
+  it('is ambiguous with both readings', () => {
+    expect(tok('eine Million zwei')).toEqual([expect.objectContaining({ value: 1_000_002, ambiguous: true, readings: [[1_000_002], [1_200_000]] })]);
+    expect(tok('drei Millionen sieben')[0]).toMatchObject({ ambiguous: true, readings: [[3_000_007], [3_700_000]] });
+    expect(tok('eine Million fünfundzwanzig')[0]).toMatchObject({ ambiguous: true, readings: [[1_000_025], [1_250_000]] });
+    expect(tok('eine Million fünfhundert')[0]).toMatchObject({ ambiguous: true, readings: [[1_000_500], [1_500_000]] });
+  });
+  it('a thousands part is clear', () => {
+    expect(tok('eine Million fünfhunderttausend')[0]).toMatchObject({ value: 1_500_000, ambiguous: false });
+    expect(tok('eine Million fünfhunderttausend zwei')[0]).toMatchObject({ value: 1_500_002, ambiguous: false });
+  });
+});

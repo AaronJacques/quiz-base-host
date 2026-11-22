@@ -333,11 +333,21 @@ export function numberTokens(text: string): NumberToken[] {
         take(i + 1, textOf(n1));
         continue;
       }
-      // 7b. A smaller number after it is added: "eine Million fünfhunderttausend" = 1 500 000 (not "drei Millionen vier Millionen").
+      // 7b. A smaller number after it: "eine Million fünfhunderttausend" = 1 500 000 (not "drei Millionen vier Millionen").
+      // Small right after the magnitude ("eine Million zwei"), it may be 1 000 002 or the short form of 1,2 Millionen:
+      // ambiguous, both readings – the LLM decides.
       if (magFactor && Number.isInteger(value)) {
         const add = wordNumberAt(atoms, i + 1);
         const after = atoms[(add?.end ?? i) + 1];
         if (add && !add.article && !add.ordinal && plain(atoms[i + 1] as NumAtom) && add.value >= 1 && add.value < magFactor && !(after?.kind === 'word' && after.text in MAGNITUDES)) {
+          if (add.value < 1000 && last in MAGNITUDES) {
+            const short = value + (add.value * magFactor) / 10 ** String(add.value).length;
+            ambiguous = true;
+            readings = [[value + add.value], [short]];
+            value += add.value;
+            take(add.end, add.text);
+            break;
+          }
           value += add.value;
           magFactor = add.value;
           take(add.end, add.text);

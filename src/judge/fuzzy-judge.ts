@@ -46,9 +46,18 @@ const sameNumbers = (a: string, b: string) => {
 export class FuzzyJudge implements AnswerJudge {
   constructor(private opts: { acceptThreshold: number; rejectThreshold: number; rejectDissimilar: boolean }) {}
 
-  async judge({ question, reference, answer: raw, spoken, options }: JudgeInput): Promise<JudgeResult> {
-    // Speech recognition writes dialogue dashes ("- 1977") – no minus sign.
-    const answer = spoken ? stripDialogueDash(raw) : raw;
+  async judge(input: JudgeInput): Promise<JudgeResult> {
+    // Speech recognition writes dialogue dashes ("- 1977") – no minus sign. Unless the solution is negative: then "- 5"
+    // may be either – if both readings agree, fine, otherwise the LLM decides.
+    const { answer, spoken, reference } = input;
+    const stripped = spoken ? stripDialogueDash(answer) : answer;
+    if (stripped === answer) return this.judgeAnswer(input, answer);
+    if (!numbers(reference ?? '').some((n) => n < 0)) return this.judgeAnswer(input, stripped);
+    const [a, b] = await Promise.all([this.judgeAnswer(input, stripped), this.judgeAnswer(input, answer)]);
+    return a.verdict === b.verdict ? a : { verdict: 'unsure', method: 'fuzzy', confidence: 0.5, reason: 'Minus unklar' };
+  }
+
+  private async judgeAnswer({ question, reference, spoken, options }: JudgeInput, answer: string): Promise<JudgeResult> {
     if (isNonAnswer(answer)) return { verdict: 'wrong', method: 'rule', confidence: 1, reason: 'keine Antwort' };
     const choice = options?.length ? judgeChoice(answer, options, !!spoken) : null;
     if (choice) return choice;
@@ -237,6 +246,8 @@ interface NumberView {
   partial: boolean;
   /** The words the numbers were read from (`numberParts`). */
   words: string[];
+  /** An article was not counted although other numbers are there ("Finale 2014 ein Tor"): "ein" may be the answer. */
+  droppedArticle: boolean;
 }
 
 /** `asked`: words of the question – "acht Beine" for "Wie viele Beine …?" says only the number. */
@@ -261,7 +272,8 @@ function numberView(s: string, asked: ReadonlySet<string>): NumberView {
   // A lone article is a number only if nothing else is said ("eine" – not "Eine neue Hoffnung").
   const values = whole.every((t) => t.article) && whole.length === 1 && !content.size ? whole : whole.filter((t) => !t.article);
   const partial = found.some((t) => t.partial);
-  return { values, content, units, onlyNumber: !content.size && !partial && values.length > 0, partial, words };
+  const droppedArticle = values.length > 0 && values.length < whole.length;
+  return { values, content, units, onlyNumber: !content.size && !partial && values.length > 0, partial, words, droppedArticle };
 }
 
 const sameSet = (a: Set<string>, b: Set<string>) => a.size === b.size && [...a].every((x) => b.has(x));
@@ -335,7 +347,13 @@ export function judgeNumbers(question: string, reference: string, variants: stri
   /** Every number the solution names, in brackets as well – an answer with one of them is never wrong here. */
   const named = rFound.filter((t) => !t.partial && !t.article).map((t) => t.value);
   const isNamed = (x: number) => named.some((v) => sameValue(x, v));
-  const wrong = (xs: number[], reason: string) => (xs.some(isNamed) ? null : result('wrong', reason));
+  // "Finale 2014 ein Tor" for "Wie viele Tore fielen im Finale 2014?" (1): the article may be the answer – never wrong.
+  const wrong = (xs: number[], reason: string) => (xs.some(isNamed) || a.droppedArticle ? null : result('wrong', reason));
+  // "2" for "Welcher Film kam zuerst: Rocky 2 oder Rambo 2?" ("Rambo 2"): a bare number of a question with several
+  // numbers may mean either candidate – never right without the LLM.
+  const asks = numberParts(question).numbers.filter((t) => !t.partial && !t.article).map((t) => t.value);
+  const bare = asks.length >= 2 && !numberView(answer, new Set()).content.size; // nothing said but the number ("Rambo zwei" names the film)
+  const right = (x: number, reason: string) => (bare && asks.some((k) => sameValue(k, x)) ? result('unsure', 'Zahl aus der Frage') : result('correct', reason));
 
   // R1 – a solution that is only a number.
   const solutions = plainVariants.filter((v) => v.onlyNumber && v.values.length === 1).map((v) => v.values[0]!.value);
@@ -348,7 +366,7 @@ export function judgeNumbers(question: string, reference: string, variants: stri
       return wrong(values, 'falsche Zahlen');
     }
     const x = values[0]!;
-    if (solutions.some((v) => sameValue(x, v))) return result('correct', 'Zahl stimmt');
+    if (solutions.some((v) => sameValue(x, v))) return right(x, 'Zahl stimmt');
     const t = a.values[0]!;
     // "siebenundsiebzig" / "77" for 1977, when the question asks for the year.
     if (yearQuestion && Number.isInteger(x) && x >= 10 && x <= 99 && !t.ordinal && solutions.some((v) => Number.isInteger(v) && v >= 1000 && v <= 2099 && v % 100 === x))
@@ -363,7 +381,7 @@ export function judgeNumbers(question: string, reference: string, variants: stri
     const x = a.values[0]!.value;
     for (const v of plainVariants) {
       if (v.values.length !== 1 || !v.content.size || v.partial || !sameSet(v.content, a.content)) continue;
-      if (sameValue(v.values[0]!.value, x)) return result('correct', 'Zahl stimmt');
+      if (sameValue(v.values[0]!.value, x)) return right(x, 'Zahl stimmt');
       if (rounded(x, v.values[0]!.value)) return result('unsure', 'gerundet');
       return wrong([x], 'falsche Zahl');
     }
@@ -372,7 +390,7 @@ export function judgeNumbers(question: string, reference: string, variants: stri
   // R3 – the year in a longer solution ("25. Mai 1977"), when the question asks for the year.
   if (yearQuestion && a.onlyNumber && a.values.length === 1 && isYear(a.values[0]!)) {
     const years = numberParts(refRaw.replace(/\([^)]*\)/g, ' ')).numbers.filter((t) => !t.partial && isYear(t) && !t.words);
-    if (years.length === 1) return sameValue(years[0]!.value, a.values[0]!.value) ? result('correct', 'Jahr stimmt') : wrong([a.values[0]!.value], 'falsches Jahr');
+    if (years.length === 1) return sameValue(years[0]!.value, a.values[0]!.value) ? right(a.values[0]!.value, 'Jahr stimmt') : wrong([a.values[0]!.value], 'falsches Jahr');
   }
   return null;
 }
