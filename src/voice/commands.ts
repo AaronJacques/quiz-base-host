@@ -1,4 +1,4 @@
-import { colognePhonetic, levenshtein, normalize, vowelSkeleton } from '../judge/normalize.ts';
+import { colognePhonetic, levenshtein, normalize, numberParts, numbers, vowelSkeleton } from '../judge/normalize.ts';
 import type { BoardCell } from '../core/types.ts';
 
 /** Lowercase, no punctuation – the way spoken text is compared. */
@@ -205,7 +205,11 @@ export function isBuzz(text: string): boolean {
  * are covered word by word – "ach" and "oh" only with "nein": "Oh, die Antwort weiß ich nicht" is thinking aloud) and the default wake words ("Quizmaster, meine Antwort ist …" from the person
  * answering). Custom wake words from `voice.wakeWords` are not stripped here – accepted, they are rare.
  */
-const ANSWER_LEAD = String.raw`(?:(?:(?:hey\s+|hallo\s+)?quiz\s*(?:master|meister|host)|ich korrigiere(?:\s+mich)?|korrektur|quatsch|äh+m*|ähm|hm+|okay|ok|also|gut|na gut|ja|jap|jep|jo|genau|richtig|korrekt|stimmt|exakt|klar|passt|nein|ne|nee|nö|doch|warte|moment|sorry|dann|so|und|(?:ach|oh)[\s,.!…:–-]+nein|oder|halt)[\s,.!…:–-]*)*`;
+// Each lead word ends at a word boundary and no two alternatives match the same text – otherwise a long run of
+// fillers ("ähm ähm …") that ends without the keyword backtracks exponentially.
+const LEAD_WORDS = String.raw`(?:hey\s+|hallo\s+)?quiz\s*(?:master|meister|host)|ich korrigiere(?:\s+mich)?|korrektur|quatsch|äh+m*|hm+|okay|ok|also|gut|na gut|ja|jap|jep|jo|genau|richtig|korrekt|stimmt|exakt|klar|passt|nein|ne|nee|nö|doch|warte|moment|sorry|dann|so|und|oder|halt`;
+const LEAD_END = String.raw`(?![\p{L}\p{N}])[\s,.!…:–-]*`;
+const ANSWER_LEAD = String.raw`(?:(?:${LEAD_WORDS}|(?:ach|oh)[\s,.!…:–-]+nein)${LEAD_END})*`;
 /**
  * The possessive before "Antwort" as speech recognition writes it: "mein Antwort", "meiner Antwort", "Maine Antwort".
  * Never "eine" – "Eine Antwort ist schwer" is no answer.
@@ -223,10 +227,14 @@ const ANSWER_VERB = String.raw`(?:ist|is|isst|lautet|wäre|heißt|sei|es(?=[\s,.
 const ANSWER_KEY = String.raw`(?:(?:${ANSWER_POSS}|die)\s+)?(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort(?:\s+${ANSWER_VERB}|(?!\s+${NOT_ANSWER_VERB}(?![\p{L}\p{N}])))|ich antworte(?:\s+mit)?`;
 const ANSWER_RE = new RegExp(String.raw`^\s*${ANSWER_LEAD}(?:${ANSWER_KEY})(?=[\s,.:;!?…–-]|$)[\s,.:;!…–-]*(.*)$`, 'isu');
 /** The keyword with a verb ("… Antwort ist", "Ich antworte mit") – where a command could be meant too ("Quizmaster, Antwort bitte wiederholen"). */
-const ANSWER_STRONG_RE = new RegExp(
-  String.raw`^\s*${ANSWER_LEAD}(?:(?:(?:${ANSWER_POSS}|die)\s+)?(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort\s+${ANSWER_VERB}|ich antworte\s+mit)(?=[\s,.:;!?…–-]|$)`,
-  'isu',
-);
+const ANSWER_STRONG_KEY = String.raw`(?:(?:${ANSWER_POSS}|die)\s+)?(?:(?:end)?gültige\s+|finale\s+|letzte\s+)?antwort\s+${ANSWER_VERB}|ich antworte\s+mit`;
+/**
+ * The lead with exclamations: "Ach, quatsch, …", "Oh, …", "Ach so, …", "Oh Mann, …" – only in front of the keyword
+ * *with* a verb ("Oh, meine Antwort ist Rom"), so "Oh, die Antwort weiß ich nicht" stays thinking aloud.
+ */
+const ANSWER_SOFT_LEAD = String.raw`(?:(?:${LEAD_WORDS}|achso|ach|oh\s+mann|oh|ah)${LEAD_END})*`;
+const ANSWER_STRONG_RE = new RegExp(String.raw`^\s*${ANSWER_SOFT_LEAD}(?:${ANSWER_STRONG_KEY})(?=[\s,.:;!?…–-]|$)`, 'isu');
+const ANSWER_SOFT_RE = new RegExp(String.raw`^\s*${ANSWER_SOFT_LEAD}(?:${ANSWER_STRONG_KEY})(?=[\s,.:;!?…–-]|$)[\s,.:;!…–-]*(.*)$`, 'isu');
 
 /** Does the text bring the answer keyword *with* a verb ("Meine Antwort ist …", not "Antwort bitte wiederholen")? */
 export function hasStrongKeyword(text: string): boolean {
@@ -259,7 +267,7 @@ const AFTER_CORRECTION = /^[\s,.:;!…–-]*(?:(?:warte|moment|äh+m*|ähm|also|
  * The answer keeps its original spelling – it is repeated back word for word.
  */
 export function extractAnswer(text: string): string | null {
-  const m = text.match(ANSWER_RE);
+  const m = text.match(ANSWER_RE) ?? text.match(ANSWER_SOFT_RE);
   if (!m) return null;
   let answer = m[1]!;
   const last = [...answer.matchAll(ANSWER_AGAIN_RE)].at(-1);
@@ -303,62 +311,100 @@ const YES_FIRST = new Set(
 );
 const YES_PHRASES = ['so ist es', 'das ist es', 'das ist sie', 'das stimmt', 'das passt', 'auf jeden fall'];
 /**
- * Harmless words after the "Ja": "Ja, das ist meine endgültige Antwort", "Ja, einloggen", "Ja, ganz sicher",
- * "Ja, sag ich doch", "Ja, das war meine Antwort", "Ja, glaube schon". Anything else is either the waiting answer
- * (also misheard, by sound) or another answer ("Ja, Rom" while "Paris?" waits) – then it is no "Ja".
+ * Harmless words after the "Ja", anywhere: "Ja, das ist meine endgültige Antwort", "Ja, einloggen", "Ja, ganz sicher".
+ * No verbs and pronouns that start a new thought ("ich", "glaube", "war", "die") – those only in `YES_REST_PHRASES`.
  */
 const YES_REST = new Set(
-  ('ja jaja genau bitte klar richtig korrekt stimmt so ist es das sie die der meine meiner mein antwort final finale finaler ' +
+  ('ja jaja genau bitte klar richtig korrekt stimmt so ist es das sie meine meiner mein antwort final finale finaler ' +
     'endgültig endgültige endgültiger letzte absolut sicher ganz schon wirklich bestimmt hundertprozentig total sehr danke gerne ' +
-    'doch logo exakt jawohl passt auf jeden fall natürlich bestätigt bestätige einloggen eingeloggt einlocken ' +
-    'sag sage sagte gesagt ich war glaube glaub denke denk hab habe nehme nehm gut okay ok mhm jo yes').split(' '),
+    'doch logo exakt jawohl passt auf jeden fall natürlich bestätigt bestätige einloggen eingeloggt einlocken gut okay ok mhm jo yes').split(' '),
 );
+/** Whole harmless phrases with such words: "Ja, sag ich doch", "Ja, glaube schon", "Ja, das war meine Antwort". */
+const YES_REST_PHRASES = [
+  'hab ich doch gesagt', 'habe ich doch gesagt', 'hab ich gesagt', 'habe ich gesagt', 'sag ich doch', 'sage ich doch', 'sag ich ja',
+  'ich glaube schon', 'ich glaub schon', 'glaube schon', 'glaub schon', 'glaube ich', 'glaub ich', 'ich denke schon', 'denke schon',
+  'denke ich', 'ich bin mir sicher', 'bin mir sicher', 'ich bin sicher', 'war meine antwort', 'war meine endgültige antwort', 'nehme ich',
+].sort((x, y) => y.length - x.length);
+/**
+ * A reply that stops on one of these was cut off at a pause ("Ja, das ist …", "Ja, ich glaube …" – the rest comes
+ * as the next utterance): no "Ja" yet, and no asking back.
+ */
+const DANGLING = new Set(['ist', 'das', 'die', 'der', 'den', 'dem', 'ich', 'mein', 'meine', 'meiner', 'auf', 'jeden', 'ganz', 'sehr', 'glaube', 'glaub', 'denke', 'denk', 'hab', 'habe', 'war', 'nehme', 'sag', 'sage', 'bin']);
 
 /** The reply to "Paris?" as words, without fillers and wake word in front; [] if nothing is left. */
 function confirmWords(text: string): string[] {
   return speechNorm(text).replace(CONFIRM_LEAD, '').split(' ').filter(Boolean);
 }
 
-/** A word of the reply that is a word of the waiting answer – also misheard ("Zimmer" / "Zimma", same sound). */
-function answerWord(w: string, own: string[]): boolean {
-  return own.some((o) => o === w || (w.length >= 3 && o.length >= 3 && (colognePhonetic(o) === colognePhonetic(w) || (Math.min(o.length, w.length) >= 5 && levenshtein(o, w) <= 1))));
+/**
+ * Do the content words after the "Ja" repeat (part of) the waiting answer? Words compare after `normalize`,
+ * numbers by value (`numbers`: "zehn" = "10", "1979" ≠ "1977", "Rot drei" ≠ "Rot vier"). No sound-alike matching:
+ * a word the answer does not have might be another answer ("Ja, Rom", "Ja, Homburg" for "Hamburg").
+ */
+function repeatsAnswer(content: string[], pending: string): boolean {
+  const ownWords = new Set(normalize(pending).split(' ').filter(Boolean));
+  const ownNumbers = numbers(pending);
+  const { words, numbers: tokens } = numberParts(content.join(' '));
+  const covered = new Set<number>();
+  for (const t of tokens) {
+    if (t.article) continue; // "ein" as a word
+    if (!ownNumbers.includes(t.value)) return false;
+    for (let i = t.from; i <= t.to; i++) covered.add(i);
+  }
+  return words.every((w, i) => covered.has(i) || normalize(w).split(' ').every((n) => !n || ownWords.has(n)));
 }
 
 /**
- * The reply to "Paris?" – yes, no, or something else (null). `pending` is the answer waiting for "Ja":
- * its words may come along ("Ja, Paris", misheard "Ja, Herr Zimmer" for "Hans Zimmer"). After the "Ja" harmless
- * words are fine ("Ja, das ist meine endgültige Antwort", "Ja, ganz sicher"); a wait word, a doubt or another
- * answer make it null ("Ja, warte", "Ja, aber …", "Ja oder Rom", "Ja, Rom"). A new answer with the keyword is
- * null – it is handled as an answer; the keyword without anything after it ("Ja, meine finale Antwort") is a "Ja".
+ * The reply to "Paris?" – yes, no, or something else (null). One rule: a "Ja" (or "Das stimmt" …) confirms when
+ * what follows is only harmless ("Ja, das ist meine endgültige Antwort", "Ja, einloggen", "Ja, sag ich doch") or
+ * repeats the waiting answer `pending` ("Ja, Paris", "Ja, zehn" for "10"). Anything else after it is null: a wait
+ * word or doubt ("Ja, warte", "Ja, aber …", "Ja oder Rom"), another answer ("Ja, Rom", "Ja, 1979" for "1977"), a
+ * cut-off rest ("Ja, ich glaube …") or a question ("Ja, war das richtig?"). A new answer with the keyword is null –
+ * it is handled as an answer, as is the keyword with its verb and nothing after it ("Genau, meine Antwort ist …" +
+ * pause: keep listening); only the bare keyword without verb is a "Ja" ("Ja, meine finale Antwort").
  * "Okay", "Mhm", "Doch" alone are no "Ja"; the bot's own "Ja oder nein?" said back is null.
  */
 export function confirmReply(text: string, pending = ''): 'yes' | 'no' | null {
   const all = speechNorm(text);
   if (!all || all.split(' ').length > 8) return null;
   const said = extractAnswer(text);
-  if (said !== null && /[\p{L}\p{N}]/u.test(said)) return null; // "Genau, meine Antwort ist …" brings a new answer
+  if (said !== null && (/[\p{L}\p{N}]/u.test(said) || hasStrongKeyword(text))) return null;
   const words = confirmWords(text);
   if (!words.length || words.join(' ') === 'ja oder nein') return null;
-  const own = speechNorm(pending).split(' ').filter(Boolean);
-  const ownSet = new Set(own);
+  const ownSet = new Set(speechNorm(pending).split(' ').filter(Boolean));
   if (NO_FIRST.has(words[0]!) || words.some((w) => NO_ANYWHERE.has(w) && !ownSet.has(w))) return 'no';
   if (words.some((w) => WAIT_WORDS.has(w) && !ownSet.has(w))) return null;
+  if (words.length > 1 && /\?\s*$/.test(text.trim())) return null; // "Ja, war das richtig?" asks back
   const s = words.join(' ');
   const phrase = YES_PHRASES.find((p) => s === p || s.startsWith(`${p} `));
   const rest = phrase ? words.slice(phrase.split(' ').length) : YES_FIRST.has(words[0]!) ? words.slice(1) : null;
   if (!rest) return null;
   if (rest.some((w) => YES_BREAKERS.has(w) && !ownSet.has(w))) return null;
-  // Words that are neither harmless nor the answer's: only as part of the (misheard) answer – at least one of the
-  // answer's words is there, and there are no more of them than the answer has ("Ja, Herr Zimmer" for "Hans Zimmer").
-  const other = rest.filter((w) => !YES_REST.has(w) && !answerWord(w, own));
-  if (!other.length) return 'yes';
-  const hits = rest.filter((w) => !YES_REST.has(w) && answerWord(w, own)).length;
-  return hits > 0 && other.length + hits <= own.length ? 'yes' : null;
+  if (dangles(rest) && !ownSet.has(rest.at(-1)!)) return null;
+  const content = withoutPhrases(rest).filter((w) => !YES_REST.has(w));
+  return !content.length || repeatsAnswer(content, pending) ? 'yes' : null;
 }
 
-/** "Warte", "Moment", "Ja, Moment" in reply to "Paris?": the person wants time – the bot does not ask "Ja oder nein?". */
+/**
+ * "Warte", "Moment", "Ja, Moment", or a reply cut off at a pause ("Ja, ich glaube …"): the person wants time –
+ * the bot does not ask "Ja oder nein?".
+ */
 export function confirmWaits(text: string): boolean {
-  return confirmWords(text).some((w) => WAIT_WORDS.has(w));
+  const words = confirmWords(text);
+  return words.some((w) => WAIT_WORDS.has(w)) || (words.length > 1 && dangles(words));
+}
+
+/** Does the reply stop on a word that starts a thought ("… ich glaube", "… das ist"), not at the end of a whole phrase ("… glaube ich")? */
+function dangles(words: string[]): boolean {
+  const s = ` ${words.join(' ')}`;
+  return words.length > 0 && DANGLING.has(words.at(-1)!) && !YES_REST_PHRASES.some((p) => s.endsWith(` ${p}`));
+}
+
+/** The words without the harmless whole phrases ("sag ich doch", "glaube ich"). */
+function withoutPhrases(words: string[]): string[] {
+  let joined = ` ${words.join(' ')} `;
+  for (const p of YES_REST_PHRASES) joined = joined.split(` ${p} `).join(' ');
+  return joined.split(' ').filter(Boolean);
 }
 
 const ORDINALS: Record<string, number> = {

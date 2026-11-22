@@ -110,6 +110,8 @@ const PENDING_SUBMIT_MS = 1500;
 const CONFIRM_AGAIN_MAX_WORDS = 4;
 /** Without keyword and without an answer waiting, utterances up to this many words are logged (no text, rule 8). */
 const NO_KEYWORD_LOG_WORDS = 6;
+/** After a keyword without an answer ("Meine Antwort ist …" + pause), the next utterance within this time completes it. */
+const OPEN_KEYWORD_MS = 8000;
 /** A loss DM that reached nobody is tried again this often, this far apart (and at the next start). */
 const LOGIN_DM_RETRIES = 3;
 const LOGIN_DM_RETRY_MS = 60 * 60_000;
@@ -155,6 +157,11 @@ interface ActiveGame {
    * `reasked` once "Ja oder nein?" followed an unclear reply.
    */
   pending: { player: string; answer: string; at: number; reasked: boolean } | null;
+  /**
+   * The keyword was said without an answer ("Meine Antwort ist …" + pause): until `until` (epoch ms) the next
+   * utterance of `player` is what follows it.
+   */
+  openKeyword: { player: string; until: number } | null;
   /** Submits a pending answer unconfirmed (or drops it, `confirmAtDeadline` off) just before the time for "Ja" runs out. */
   pendingTimer?: NodeJS.Timeout;
   /** An answer was handed in and the verdict is not there yet. */
@@ -422,7 +429,7 @@ export class QuizBot {
     const g: ActiveGame = {
       guildId: msg.guildId!, channelId: msg.channelId, leaderId: msg.author.id, board, session, lobby: null, phase: 'creating',
       lobbyPlayers: [], canStart: false, startRequested: false, players: [], turn: null, lastTurnSig: '', questionOpen: false,
-      awaiting: null, answerDeadline: 0, confirmUntil: 0, pending: null, judging: false, operatorNeeded: false, lastQuestion: null, lastAsk: null, lastVerdict: null, buzzerOpen: false, answered: new Set(), closeBuzzer: false,
+      awaiting: null, answerDeadline: 0, confirmUntil: 0, pending: null, openKeyword: null, judging: false, operatorNeeded: false, lastQuestion: null, lastAsk: null, lastVerdict: null, buzzerOpen: false, answered: new Set(), closeBuzzer: false,
       seen: new Map([[msg.author.id, { username: msg.author.username, displayName: msg.author.displayName }]]),
       hinted: new Set(), endAsk: null, pickContext: null, reasons: [], lobbyStatusSig: '', offs: [],
     };
@@ -696,12 +703,22 @@ export class QuizBot {
    * then the answer counts as said (`game.confirmAtDeadline`) or lapses.
    */
   private onSpokenAnswer(game: ActiveGame, name: string, text: string, used?: () => void): void {
-    const said = extractAnswer(text);
     const waiting = game.pending?.player === name ? game.pending : null;
-    // The bare keyword while "Paris?" waits ("Ja, meine finale Antwort") is a reply to it, below.
-    if (said !== null && (said.trim() || !waiting)) {
+    const open = game.openKeyword?.player === name && Date.now() <= game.openKeyword.until;
+    game.openKeyword = null;
+    let said = extractAnswer(text);
+    // "Meine Antwort ist" + pause + "Paris": the cut-off keyword's answer comes as its own utterance – unless that is
+    // a plain "Ja"/"Nein" to the answer still waiting.
+    if (said === null && open && !(waiting && confirmReply(text, waiting.answer))) said = extractAnswer(`Meine Antwort ist ${text}`);
+    // The bare keyword without verb while "Paris?" waits ("Ja, meine finale Antwort") is a reply to it, below.
+    // With its verb ("Genau, meine Antwort ist …") the answer is still to come: keep listening, never a "Ja".
+    if (said !== null && (said.trim() || !waiting || hasStrongKeyword(text))) {
       const answer = cleanSpokenAnswer(said);
-      if (!answer) return; // "Meine Antwort ist … ähm" – keep listening
+      if (!answer) {
+        // "Meine Antwort ist … ähm" – keep listening; the next utterance completes it.
+        game.openKeyword = { player: name, until: Date.now() + OPEN_KEYWORD_MS };
+        return log.debug(`🎙 ${name}: Schlüsselwort ohne Antwort – höre weiter`);
+      }
       game.endAsk = null; // a new answer: the game goes on
       used?.();
       this.transcript(name, text);
@@ -773,6 +790,7 @@ export class QuizBot {
   private submitAnswer(game: ActiveGame, name: string, answer: string, spoken: boolean): void {
     clearTimeout(game.pendingTimer);
     game.pending = null;
+    game.openKeyword = null;
     game.awaiting = null;
     game.judging = true;
     game.session.bus.emit('player:answer', { player: name, answer: answer.slice(0, 200), spoken });
@@ -930,6 +948,11 @@ export class QuizBot {
     on('host:reveal', ({ answer }) => {
       g.buzzerOpen = false;
       g.questionOpen = false;
+      // The question is over – also when it was skipped while "Paris?" waited for "Ja" (`!quiz skip`, the page moved
+      // on): that answer lapses, no answer is expected any more, and nothing is being judged.
+      this.dropPending(g);
+      g.awaiting = null;
+      g.judging = false;
       const why = g.reasons.splice(0).map((r) => `-# ${r}`).join('\n');
       this.queue(ch, `${answer ? `💡 Lösung: **${answer}**\n` : ''}${why ? `${why}\n` : ''}📊 ${this.scoreLine(g)}`);
     });
@@ -1023,6 +1046,7 @@ export class QuizBot {
   private dropPending(g: ActiveGame): void {
     clearTimeout(g.pendingTimer);
     g.pending = null;
+    g.openKeyword = null;
   }
 
   private nameFor(g: ActiveGame, userId: string): string | null {
@@ -1533,7 +1557,8 @@ export class QuizBot {
     if (this.voice?.bridge.buzzerOpen) return 'full';
     if (now !== name) return 'wake';
     // The answerer needs the precise model – except for "Ja"/"Nein" after "Paris?" (the host checks for a new answer).
-    if (g.awaiting?.player === name) return g.pending?.player === name ? 'confirm' : 'answer';
+    // … and for the rest of a keyword cut off at a pause ("Meine Antwort ist" + "Paris") – that is an answer.
+    if (g.awaiting?.player === name) return g.pending?.player === name && g.openKeyword?.player !== name ? 'confirm' : 'answer';
     return 'full'; // picking a card
   }
 
