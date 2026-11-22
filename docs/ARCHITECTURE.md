@@ -150,7 +150,7 @@ qbhost login ┤                         └─ Keep-alive: verdrängbar, wartet
 AccountKeeper┘
      │ watch: quizBaseAuthWatch ── Seite → *.supabase.co/auth/v1/… (nur Statuscode + error_code bei ≥ 400)
      ▼
-LoginStatusStore ── .qbhost/login-status.json ── qbhost doctor (ohne Browser), Discord (A2)
+LoginStatusStore ── .qbhost/login-status.json ── qbhost doctor (ohne Browser), Discord (`!quiz status`, DM an die Besitzer)
 ```
 
 - Jeder `PlaywrightDriver` hält die Sperre von `open()` bis zum Ende von `close()` und gibt sie in jedem Pfad frei (Startfehler, Ladefehler, `close()` wirft; hängt Chromium beim Schließen länger als 15 s, wird die Sperre trotzdem frei, ein zweiter Start scheitert dann an Chromiums `SingletonLock`). `close()` während `open()` bricht das Öffnen ab (auch das Warten auf die Sperre) und kehrt erst zurück, wenn der Browser zu ist. `closeOpenBrowsers(ms)` schließt beim Herunterfahren alle offenen und gerade startenden Browser parallel.
@@ -158,7 +158,7 @@ LoginStatusStore ── .qbhost/login-status.json ── qbhost doctor (ohne Bro
 - Zustandswechsel: „angemeldet“ setzen nur das Menü, `report(true)` und eine Anmeldung mit Passwort. Eine Erneuerung mit 2xx bestätigt nur ein bestehendes „angemeldet“ (auch eine anonyme Sitzung erneuert sich so). Eine abgelehnte Erneuerung (400/401/403) gilt als Verlust, außer das Menü desselben Besuchs zeigt das Konto – dann „unklar“ und Nachprüfung nach 15 min.
 - Zwischen Prozessen schützt Chromiums `SingletonLock`; ein Start scheitert dann (Ergebnis `error` der Prüfung).
 - Der Such-Browser (`profileDir-search`) hat eine eigene Sperre und blockiert nichts.
-- `AccountKeeper` prüft nur, wenn `isIdle()` stimmt (Spiel, Board-Anlage und Voice-Raum liefert der Bot, A2). Im Polling-Pfad läuft nichts davon: ein Zeitgeber (unref) schaut höchstens alle 5 min auf den Plan.
+- `AccountKeeper` prüft nur, wenn `isIdle()` stimmt (`QuizBot.isIdleForMaintenance()`: kein Spiel, keine Board-Erzeugung oder -Anlage, kein Voice-Raum; der Bot ruft `interrupt()` vor jeder dieser Phasen und `gameEnded()` danach). Im Polling-Pfad läuft nichts davon: ein Zeitgeber (unref) schaut höchstens alle 5 min auf den Plan.
 
 ## Erweiterungspunkte
 

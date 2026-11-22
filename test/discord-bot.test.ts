@@ -18,6 +18,7 @@ import type { Pcm } from '../src/voice/audio.ts';
 import type { Speaker, Utterance, VoiceTransport } from '../src/voice/transport.ts';
 import type { BoardStudio } from '../src/board-studio.ts';
 import { BoardStore, buildBoard, defaultSpec, fingerprint, type BoardOut, type BoardSpec, type CostEstimate } from '../src/boardgen/index.ts';
+import { OwnBoardsUnavailableError } from '../src/site/errors.ts';
 import { FakeTafelquizPage } from './fake-page.ts';
 
 setLogLevel('error');
@@ -917,24 +918,62 @@ describe('QuizBot: quiz-base-Anmeldung (DM, Status, Leerlauf)', () => {
 
   it('kein Flattern: eine Erneuerung im Spiel-Browser (evtl. anonyme Sitzung) bringt keine „wieder da“-DM und keine zweite Verlust-DM', async () => {
     const { gw, keeper } = accountSetup();
-    const refresh = (status: number) =>
-      keeper.authWatch('game').onResponse({ url: 'https://ref.supabase.co/auth/v1/token?grant_type=refresh_token', status, ...(status >= 400 ? { errorCode: 'session_expired' } : {}) });
+    const changes = vi.fn();
+    keeper.onChange(changes);
+    const page = (endpoint: string, status: number) =>
+      keeper.authWatch('game').onResponse({ url: `https://ref.supabase.co/auth/v1/${endpoint}`, status, ...(status >= 400 ? { errorCode: 'session_expired' } : {}) });
     keeper.report(true, 'keepalive');
     keeper.report(false, 'keepalive');
     await until(() => gw.dmTo.length === 1 && keeper.status().notifiedLostAt !== null);
-    refresh(200); // lost → ok, but only the page's renewal
-    expect(keeper.status().state).toBe('ok');
-    refresh(400); // ok → lost again
-    expect(keeper.status().state).toBe('lost');
+    changes.mockClear();
+    // The page works anonymously: a new anonymous session, its renewal, a refused renewal, an unclear own-board lobby.
+    page('signup', 200);
+    page('token?grant_type=refresh_token', 200);
+    page('token?grant_type=refresh_token', 400);
+    keeper.report(null, 'lobby');
     await sleep(50);
-    expect(gw.dmTo).toHaveLength(1);
-    expect(keeper.status().notifiedLostAt).not.toBeNull(); // marked: a restart does not report it again
+    expect(keeper.status().state).toBe('lost');
+    expect(changes).not.toHaveBeenCalled();
+    expect(gw.dmTo).toHaveLength(1); // no "wieder da", no second loss DM
+    expect(keeper.status().notifiedLostAt).not.toBeNull(); // still marked: a restart does not report it again
     keeper.report(true, 'keepalive'); // confirmed by the user menu
     await until(() => gw.dmTo.length === 2);
     expect(gw.dmTo[1]!.text).toContain('quiz-base-Anmeldung wieder da');
+    page('token?grant_type=refresh_token', 200); // ok → ok: nothing
+    keeper.report(true, 'board-create');
+    await sleep(50);
+    expect(gw.dmTo).toHaveLength(2);
     keeper.report(false, 'keepalive'); // a real new loss after a confirmed "back" → a new DM
     await until(() => gw.dmTo.length === 3);
     expect(gw.dmTo[2]!.text).toContain('quiz-base-Anmeldung verloren');
+  });
+
+  it('Lobby mit eigenem Board, „Eigenes Board verwenden“ fehlt, Anmeldung nicht als verloren erkannt: Fehlermeldung ohne Login-Hinweis, keine DM', async () => {
+    const studio = new FakeStudio();
+    const { gw, keeper } = accountSetup(undefined, {}, {
+      boards: studio,
+      createSession: (cfg) =>
+        Object.assign(new FakeSession(cfg), {
+          createLobby: async () => {
+            keeper.report(null, 'lobby'); // what GameSession does for OwnBoardsUnavailableError(loggedIn null)
+            throw new OwnBoardsUnavailableError('„Eigenes Board verwenden“ fehlt, und die Anmeldung ist gerade nicht sicher erkennbar. Gleich noch einmal versuchen.', null);
+          },
+        }),
+    });
+    keeper.report(true, 'keepalive');
+    await gw.write(admin, '!quiz erstellen Weltraum 2x2');
+    await gw.write(admin, 'ja');
+    await until(() => gw.all().includes('Schreib `anlegen`'));
+    await gw.write(admin, 'anlegen');
+    await until(() => gw.all().includes('ist auf quiz-base angelegt'));
+    gw.sent = [];
+    await gw.write(anna, '!quiz neu weltraum quiz');
+    await until(() => gw.all().includes('Lobby konnte nicht erstellt werden'));
+    expect(gw.all()).toContain('„Eigenes Board verwenden“ fehlt, und die Anmeldung ist gerade nicht sicher erkennbar. Gleich noch einmal versuchen.');
+    expect(gw.all()).not.toContain('nicht angemeldet');
+    expect(gw.all()).not.toContain('qbhost login');
+    expect(keeper.status().state).toBe('ok');
+    expect(gw.dmTo.filter((d) => d.userId === 'owner1')).toHaveLength(0);
   });
 
   it('ohne discord.ownerIds geht die DM an den Besitzer der Discord-App', async () => {
