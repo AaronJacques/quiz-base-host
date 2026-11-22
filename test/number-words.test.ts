@@ -273,9 +273,33 @@ describe('referenceCore: the short solution before an explanation', () => {
     expect(referenceCore(note)).toBe(core);
   });
 
-  it('the short solution is an answer variant', async () => {
+  // B-F14: the short solution is never an answer variant of its own ("Bonnie Tyler" for "Bonnie Tyler - Total Eclipse …").
+  it('the short solution is no answer variant (text comparison as on main)', async () => {
     const { referenceVariants } = await import('../src/judge/normalize.ts');
-    expect(referenceVariants('Polen - Am 1. September 1939 überfiel die Wehrmacht Polen.')).toContain('Polen');
+    expect(referenceVariants('Polen - Am 1. September 1939 überfiel die Wehrmacht Polen.')).not.toContain('Polen');
+    expect(referenceVariants('Bonnie Tyler - Total Eclipse of the Heart')).not.toContain('Bonnie Tyler');
     expect(referenceVariants('Bryan Adams - Summer Of 69')).not.toContain('Bryan Adams');
+  });
+
+  it.each([
+    ['Merkur - Venus - Erde - Mars', 'Merkur - Venus - Erde - Mars'], // a list: dashes are no words
+    ['Rot - Orange - Gelb - Grün - Blau - Violett', 'Rot - Orange - Gelb - Grün - Blau - Violett'],
+    ['1939 - Der Krieg - in Europa - dauerte bis 1945 und länger', '1939 - Der Krieg - in Europa - dauerte bis 1945 und länger'],
+  ])('B-F14: %j has no short solution', async (note, core) => {
+    const { referenceCore } = await import('../src/judge/normalize.ts');
+    expect(referenceCore(note)).toBe(core);
+  });
+
+  it.each([
+    ['1. September 1939 - In Europa begann der Zweite Weltkrieg am 1. September 1939 mit dem Überfall auf Polen.', '1. September 1939'],
+    ['1939 - Der Krieg in Europa dauerte bis 1945 und kostete viele Leben.', '1939'],
+    ['42,195 km - So lang ist die Marathonstrecke seit den Spielen von 1908.', '42,195 km'],
+    ['Polen - Am 1. September 1939 überfiel die Wehrmacht Polen.', 'Polen - Am 1. September 1939 überfiel die Wehrmacht Polen.'], // no number: whole note
+    ['Bonnie Tyler - Total Eclipse of the Heart', 'Bonnie Tyler - Total Eclipse of the Heart'],
+    ['um 1450 - Johannes Gutenberg erfand den Buchdruck in Mainz', 'um 1450 - Johannes Gutenberg erfand den Buchdruck in Mainz'], // "um": no plain date
+    ['Lösung:\nTatooine ist die Heimat von Luke Skywalker', 'Lösung:\nTatooine ist die Heimat von Luke Skywalker'],
+  ])('numberReference(%j) → %j', async (note, ref) => {
+    const { numberReference } = await import('../src/judge/normalize.ts');
+    expect(numberReference(note)).toBe(ref);
   });
 });

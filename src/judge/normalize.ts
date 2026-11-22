@@ -354,8 +354,47 @@ export function isFormula(s: string): boolean {
 export function referenceCore(note: string): string {
   const text = stripUrls(note).trim();
   const m = /^(.+?)(?:\s+[-–—]\s+|[ \t]*\n\s*)(?=\p{L})(.+)$/su.exec(text);
-  if (m && /[\p{L}\d]/u.test(m[1]!) && m[2]!.trim().split(/\s+/).length >= 5) return m[1]!.trim();
-  return text;
+  if (!m || !/[\p{L}\d]/u.test(m[1]!)) return text;
+  const tail = m[2]!.trim();
+  // "Merkur - Venus - Erde - Mars": a list, no explanation. Dashes are no words.
+  if (/\s[-–—]\s/.test(tail)) return text;
+  return tail.split(/\s+/).filter((w) => /[\p{L}\d]/u.test(w)).length >= 5 ? m[1]!.trim() : text;
+}
+
+/**
+ * Units: "42 km", "4 Mal", "1977 Einwohner" – no content of their own, but they have to agree when both sides name one
+ * ("6 Tage" is not "6 Wochen"). Spellings of the same unit map to one name.
+ */
+export const UNIT_NAMES: Readonly<Record<string, string>> = {
+  km: 'km', kilometer: 'km', m: 'm', meter: 'm', cm: 'cm', zentimeter: 'cm', mm: 'mm', millimeter: 'mm',
+  kg: 'kg', kilogramm: 'kg', g: 'g', gramm: 'g', t: 't', tonne: 't', tonnen: 't', l: 'l', liter: 'l', ml: 'ml', milliliter: 'ml',
+  jahr: 'jahr', jahre: 'jahr', jahren: 'jahr', mal: 'mal', prozent: 'prozent', grad: 'grad',
+  euro: 'euro', eur: 'euro', dollar: 'dollar', usd: 'dollar',
+  sekunde: 's', sekunden: 's', s: 's', sek: 's', minute: 'min', minuten: 'min', min: 'min', stunde: 'h', stunden: 'h', h: 'h', std: 'h',
+  tag: 'tag', tage: 'tag', tagen: 'tag', woche: 'woche', wochen: 'woche', monat: 'monat', monate: 'monat', monaten: 'monat',
+  punkte: 'punkte', stueck: 'stueck', stk: 'stueck', einwohner: 'einwohner', menschen: 'menschen', personen: 'personen', spieler: 'spieler',
+  folgen: 'folgen', episoden: 'episoden', staffeln: 'staffeln', filme: 'filme',
+};
+
+/**
+ * The part of a note whose numbers count for the number rules: its short solution (`referenceCore`) if that is only a
+ * number or a date ("1939", "1. September 1939", "42,195 km"), else the whole note. Only the number rules use it – the
+ * text comparison always sees the whole note ("Bonnie Tyler" is not "Bonnie Tyler - Total Eclipse of the Heart").
+ */
+export function numberReference(note: string): string {
+  const core = referenceCore(note);
+  if (core === stripUrls(note).trim()) return note;
+  const folded = foldForNumbers(core);
+  const words = folded.split(' ');
+  const found = numberTokens(folded).filter((t) => !t.partial && !t.article);
+  if (!found.length) return note;
+  const covered = new Set<number>();
+  for (const t of found) for (let i = t.from; i <= t.to; i++) covered.add(i);
+  const onlyDate = words.every((w, i) => {
+    const t = w.replace(/^\.+|\.+$/g, '');
+    return !t || covered.has(i) || DATE_WORDS.has(t) || t in UNIT_NAMES || STOPWORDS.has(t) || t === 'am' || t === 'anno';
+  });
+  return onlyDate ? core : note;
 }
 
 /** Months and seasons – parts of a date ("1. September 1939", "Sommer 1961"). */
@@ -374,13 +413,6 @@ export function referenceVariants(note: string): string[] {
   const clean = stripUrls(note).replace(/\s+/g, ' ').trim();
   if (!clean) return [];
   const variants = new Set<string>([clean]);
-  // "Polen - Am 1. September 1939 überfiel …": the short solution before the explanation is an answer of its own.
-  const core = referenceCore(note).replace(/\s+/g, ' ');
-  if (core !== clean) {
-    variants.add(core);
-    const coreBare = isFormula(core) ? core : core.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
-    if (coreBare) variants.add(coreBare);
-  }
   const formula = isFormula(clean);
   const withoutParens = formula ? clean : clean.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
   if (withoutParens) variants.add(withoutParens);
