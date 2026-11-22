@@ -219,11 +219,6 @@ export class QuizBot {
   /** The loss DM: one delivery at a time, retries while nobody got it. */
   private lossNotice: { sending: Promise<void> | null; timer?: NodeJS.Timeout; tries: number } = { sending: null, tries: 0 };
   private ownersWarned = false;
-  /**
-   * A loss DM reached the owner and no login check confirmed the login since. Until then a further loss gets no
-   * DM (it is only marked as reported): a renewal seen in a game browser may be an anonymous session (A1 review F2).
-   */
-  private lossReported = false;
   private accountOff: (() => void) | null = null;
 
   constructor(private d: BotDeps) {
@@ -1182,7 +1177,6 @@ export class QuizBot {
    */
   reportPendingLoss(): void {
     const s = this.accountStatus();
-    if (s?.state === 'lost' && s.notifiedLostAt !== null) this.lossReported = true;
     if (s?.state === 'lost' && s.notifiedLostAt === null) this.sendLossNotice(lossSource(s));
   }
 
@@ -1205,24 +1199,15 @@ export class QuizBot {
   private onLoginChange(status: LoginStatus, change: LoginChange): void {
     try {
       if (this.shuttingDown) return;
-      if (change.after === 'lost' && status.notifiedLostAt === null) {
-        if (!this.lossReported) return this.sendLossNotice(change.source);
-        // Lost again after an unconfirmed "back": the owner knows already – no second DM.
-        log.info('🔐 quiz-base-Anmeldung wieder verloren – schon per DM gemeldet, keine neue DM');
-        this.d.account?.markNotified(Date.now());
-      } else if (change.before === 'lost' && change.after === 'ok') {
+      // No flapping by construction: the store turns lost → ok only on a confirmation (user menu, own-board lobby,
+      // board saved, password login) – never on a mere renewal of the page, which may be an anonymous session.
+      if (change.after === 'lost' && status.notifiedLostAt === null) this.sendLossNotice(change.source);
+      else if (change.before === 'lost' && change.after === 'ok') {
         this.lossNotice.tries = 0;
         clearTimeout(this.lossNotice.timer);
         this.lossNotice.timer = undefined;
-        const heard = change.notifiedLostAt !== null || this.lossReported;
-        if (!confirmedOk(status, change.source)) {
-          // Only a renewal of the page (maybe an anonymous session): wait for a check of the user menu or a board/lobby that worked.
-          if (heard) log.info('🔐 quiz-base-Anmeldung laut Seite wieder da, aber nicht bestätigt – „wieder da“-DM erst nach einer Prüfung');
-          return;
-        }
-        this.lossReported = false;
         // "wieder da" only if the owner heard about the loss.
-        if (heard) void this.sendBackNotice(status);
+        if (change.notifiedLostAt !== null) void this.sendBackNotice(status);
       }
     } catch (e) {
       log.warn(`Anmeldestatus-Meldung: ${(e as Error).message}`);
@@ -1247,7 +1232,6 @@ export class QuizBot {
     const n = this.lossNotice;
     if (delivered > 0) {
       n.tries = 0;
-      this.lossReported = true;
       log.info(`🔐 Verlust der quiz-base-Anmeldung per DM gemeldet (${delivered} Empfänger)`);
       // Back meanwhile: no mark (it would stick to the next loss), but say so.
       if (this.accountStatus()?.state === 'lost') acc.markNotified(Date.now());
@@ -1755,15 +1739,6 @@ function within(p: Promise<unknown>, ms: number): Promise<boolean> {
 }
 
 const REFUSED = new Set([400, 401, 403]);
-
-/**
- * "ok" confirmed by a check (user menu) or by something that only works logged in (own-board lobby, board saved) –
- * not just a renewal the page did in a game browser (`game`/`board`: that may be an anonymous session).
- */
-function confirmedOk(s: LoginStatus, source: string): boolean {
-  const last = s.history[s.history.length - 1];
-  return !!last && last.source === source && last.result === 'ok';
-}
 
 /** Where the current loss was seen: the latest lost check, else the latest refused renewal or logout of the page. */
 function lossSource(s: LoginStatus): string {
