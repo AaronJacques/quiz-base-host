@@ -13,7 +13,7 @@ import { mention, type ChatGateway, type ChatMessage } from './gateway.ts';
 import { formatBoard, parsePick, parsePickWithContext } from './pick-parser.ts';
 import type { GuildStore } from './store.ts';
 import { VoiceBridge } from './voice-bridge.ts';
-import { confirmReply, confirmWaits, endAskReply, extractAnswer, isBuzz, mentionsCard, speechNorm, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
+import { confirmReply, confirmWaits, endAskReply, extractAnswer, hasStrongKeyword, isBuzz, mentionsCard, speechNorm, spokenNumber, spokenToDigits, stripWakeWord, voiceCommand } from '../voice/commands.ts';
 import { ANSWER_KEYWORD_LINE, CONFIRM_AGAIN_LINE, END_ASK_LINE, END_KEEP_LINE, gameOverLine, GOODBYE_LINE, pickHintLine, START_LINE, startMissingLine, VOICE_HELP } from '../voice/narration.ts';
 import type { LocalStt, SpeechToText } from '../voice/stt.ts';
 import type { Speaker } from '../voice/transport.ts';
@@ -696,7 +696,9 @@ export class QuizBot {
    */
   private onSpokenAnswer(game: ActiveGame, name: string, text: string, used?: () => void): void {
     const said = extractAnswer(text);
-    if (said !== null) {
+    const waiting = game.pending?.player === name ? game.pending : null;
+    // The bare keyword while "Paris?" waits ("Ja, meine finale Antwort") is a reply to it, below.
+    if (said !== null && (said.trim() || !waiting)) {
       const answer = cleanSpokenAnswer(said);
       if (!answer) return; // "Meine Antwort ist … ähm" – keep listening
       game.endAsk = null; // a new answer: the game goes on
@@ -717,7 +719,7 @@ export class QuizBot {
       game.session.bus.emit('player:answer-pending', { player: name, answer: pending.answer });
       return;
     }
-    const pending = game.pending?.player === name ? game.pending : null;
+    const pending = waiting;
     const reply = pending ? confirmReply(text, pending.answer) : null;
     if (pending && reply) {
       used?.();
@@ -728,8 +730,9 @@ export class QuizBot {
     }
     const words = speechNorm(text).split(' ').filter(Boolean).length;
     if (pending) {
-      // Neither yes nor no ("Hä", "Paris?"): ask once – not after "Moment" (they want time) or a question.
-      if (!pending.reasked && words <= CONFIRM_AGAIN_MAX_WORDS && !text.trim().endsWith('?') && !confirmWaits(text)) {
+      // Neither yes nor no ("Hä", "Hä?", "Was?"): ask once – not after "Ja, Moment" (they want time) or a longer question.
+      const question = text.trim().endsWith('?') && words > 1;
+      if (!pending.reasked && words <= CONFIRM_AGAIN_MAX_WORDS && !question && !confirmWaits(text)) {
         pending.reasked = true;
         used?.();
         log.info(`🎙 ${name}: Rückfrage unklar (${words} Wörter) – frage nach`);
@@ -747,14 +750,17 @@ export class QuizBot {
   }
 
   /**
-   * The time for "Ja" to `p`: at least the grace after it was said, at least the answer time, never past
-   * `confirmUntil` – minus `PENDING_SUBMIT_MS`. With grace 0 that is the answer time, as before.
+   * The time for "Ja" to `p`: the full grace after the answer was heard, at least until `PENDING_SUBMIT_MS` before the
+   * answer time ends, never past `confirmUntil` (the controller waits 3 s longer). With grace 0: `PENDING_SUBMIT_MS`
+   * before the answer time ends, as before.
    */
   private armPending(g: ActiveGame, p: NonNullable<ActiveGame['pending']>): void {
     clearTimeout(g.pendingTimer);
     const a = g.awaiting;
     const graceMs = g.confirmUntil - g.answerDeadline;
-    const due = Math.min(g.confirmUntil, Math.max(g.answerDeadline, p.at + graceMs)) - PENDING_SUBMIT_MS;
+    const due = graceMs > 0
+      ? Math.min(g.confirmUntil, Math.max(g.answerDeadline - PENDING_SUBMIT_MS, p.at + graceMs))
+      : g.answerDeadline - PENDING_SUBMIT_MS;
     g.pendingTimer = setTimeout(() => {
       if (g.pending !== p || g.awaiting !== a) return;
       // Off: the answer lapses silently – the controller's timeout gives the verdict.
@@ -1639,15 +1645,18 @@ export class QuizBot {
     }
 
     // "Quizmaster, meine Antwort ist Paris" / "Quizmaster, ja" from the person answering is the answer, not a command.
-    // A "no" only when it is no command as well: "Quizmaster, stopp" still asks "Spiel beenden?" (the answer stays open).
+    // The keyword without a verb and a "no" only when they are no command as well: "Quizmaster, Antwort bitte
+    // wiederholen" repeats, "Quizmaster, stopp" still asks "Spiel beenden?" (the answer stays open). "richtig"/"falsch"
+    // are a "Ja"/"Nein" to the own waiting answer, never the leader's verdict on it.
     // Everybody else keeps the command ("Quizmaster, wiederhole die Frage" stays one: no keyword, no yes/no).
     const answerer = g?.phase === 'running' && g.awaiting ? this.nameFor(g, speaker.id) : null;
     let asAnswer = false;
     if (rest !== null && g && answerer && answerer === g.awaiting?.player) {
       const pend = g.pending?.player === answerer ? g.pending.answer : null;
-      const isCommand = voiceCommand(rest, { question, categories: g.turn?.categories }) !== null;
+      const cmd = voiceCommand(rest, { question, categories: g.turn?.categories });
+      const isCommand = cmd !== null && !(pend !== null && (cmd.name === 'richtig' || cmd.name === 'falsch'));
       const answers = (t: string) => {
-        if (extractAnswer(t) !== null) return true;
+        if (hasStrongKeyword(t) || (extractAnswer(t) !== null && !isCommand)) return true;
         const reply = pend === null ? null : confirmReply(t, pend);
         return reply === 'yes' || (reply === 'no' && !isCommand);
       };

@@ -309,6 +309,7 @@ export class TafelquizController implements GameMode {
     viaBuzzer: boolean,
   ): Promise<boolean> {
     const timeoutSec = viaBuzzer ? this.d.game.buzzAnswerTimeoutSec + Math.round(this.bonusSec / 2) : this.d.game.answerTimeoutSec + this.bonusSec;
+    const askedAt = Date.now();
     this.d.bus.emit('host:await-answer', { player, timeoutSec, viaBuzzer });
     this.status('question', `${player}, deine Antwort? (${timeoutSec}s)`);
     await this.d.page.startTimer(timeoutSec);
@@ -316,8 +317,10 @@ export class TafelquizController implements GameMode {
     // A spoken answer waiting for "Ja" is judged already (no operator stage, nothing public) – "Ja" then takes the result.
     const scope = `${this.questionId}|${player}`;
     const prejudging = this.judgeEarly(scope, q, referencePromise, hints, media);
-    // Speech: an answer asked back ("Paris?") gets up to `confirmGraceSec` more for its "Ja" – once per ask, never more.
-    // The bot submits it before this deadline (`confirmAtDeadline`); the clock on quiz-base is already at 0 then.
+    // Speech: an answer asked back ("Paris?") in the last `confirmGraceSec` of the answer time gets up to that much more
+    // for its "Ja" – once per ask, never more. An earlier one has its time for "Ja" within the answer time (the bot's
+    // `armPending` does the same sum), so it gets nothing. The bot submits it before this deadline (`confirmAtDeadline`);
+    // the clock on quiz-base is already at 0 then.
     const baseMs = timeoutSec * 1000 + 3000;
     const graceMs = this.d.game.confirmGraceSec * 1000;
     let extendTo: ((ms: number) => void) | null = null;
@@ -325,7 +328,7 @@ export class TafelquizController implements GameMode {
     const offPending = this.d.bus.on('player:answer-pending', (p) => {
       if (p.player !== player) return;
       prejudging.pending(p.answer);
-      if (graceMs > 0) extendTo?.(baseMs + graceMs);
+      if (graceMs > 0 && Date.now() >= askedAt + timeoutSec * 1000 - graceMs) extendTo?.(baseMs + graceMs);
     });
     let outcome: AnswerOutcome;
     try {

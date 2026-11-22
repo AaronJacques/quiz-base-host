@@ -66,8 +66,9 @@ export const ConfigSchema = z.object({
       /** Am Ende das Spiel auf der Seite automatisch beenden. */
       autoEnd: z.boolean().default(true),
       /**
-       * Sprache: mindestens so viele Sekunden nach der Rückfrage „X?“ bleiben für das „Ja“; verlängert die Antwortzeit
-       * bei Bedarf (die Uhr auf quiz-base steht dann schon auf 0). 0 = aus. Per Discord: `!quiz regel nachfrist 5`.
+       * Sprache: So viele Sekunden ab der erkannten Antwort (Rückfrage „X?“) bleiben für das „Ja“, höchstens bis Antwortzeit
+       * plus diesem Wert. Kommt die Rückfrage in den letzten so vielen Sekunden der Antwortzeit, verlängert sie sich einmal
+       * (die Uhr auf quiz-base steht dann schon auf 0). 0 = aus. Per Discord: `!quiz regel nachfrist 5`.
        */
       confirmGraceSec: z.number().int().min(0).max(20).default(8),
       /** Sprache: Eine Antwort, die bei Fristende (plus Nachfrist) noch auf „Ja“ wartet, zählt wie gesagt. Aus = sie verfällt (Zeit abgelaufen). */
