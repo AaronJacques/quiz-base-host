@@ -140,6 +140,45 @@ describe('fatalErrorHandler / onFatalError (uncaught exception)', () => {
   it('cli wires it for discord and host, closing the browsers', async () => {
     const { readFileSync } = await import('node:fs');
     const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
-    expect(cli.match(/onFatalError\(\(\) => closeOpenBrowsers\(3000\)\)/g)?.length).toBe(2);
+    expect(cli.match(/onFatalError\(\(\) => closeOpenBrowsers\(3000\)/g)?.length).toBe(2);
+  });
+});
+
+describe('fatalErrorHandler keeps secrets out of the log (A1-F11)', () => {
+  const TOKEN = 'MTA5ODc2NTQzMjEw.GaBcDe.discord-token-xyz';
+
+  it('by default blanks out secret environment variables in message and stack', () => {
+    const before = process.env.DISCORD_TOKEN;
+    process.env.DISCORD_TOKEN = TOKEN;
+    try {
+      const lines: string[] = [];
+      const handler = fatalErrorHandler(async () => {}, { exit: () => {}, report: (t) => void lines.push(t) });
+      const e = new Error(`401 for ${TOKEN}`);
+      e.stack = `Error: 401 for ${TOKEN}\n    at login (ws.js:1:1) Bot ${TOKEN}`;
+      handler(e);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).not.toContain(TOKEN);
+      expect(lines[0]).toContain('401 for ***');
+      expect(lines[0]).toContain('at login');
+    } finally {
+      if (before === undefined) delete process.env.DISCORD_TOKEN;
+      else process.env.DISCORD_TOKEN = before;
+    }
+  });
+
+  it('uses the secrets it is given (cli passes the config-aware list)', () => {
+    const lines: string[] = [];
+    const handler = fatalErrorHandler(async () => {}, { exit: () => {}, report: (t) => void lines.push(t), secrets: () => ['custom-secret-value'] });
+    handler(new Error('oops custom-secret-value'));
+    expect(lines[0]).toContain('oops ***');
+  });
+
+  it('cli and the Discord bot use the shared helper (no own redaction)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+    expect(cli.match(/secrets: \(\) => secretValues\(config\)/g)?.length).toBe(2);
+    const bot = readFileSync(new URL('../src/discord/index.ts', import.meta.url), 'utf8');
+    expect(bot).toContain('redactedError(e, [token, ...secretValues(config)])');
+    expect(bot).not.toMatch(/function redact\(/);
   });
 });
