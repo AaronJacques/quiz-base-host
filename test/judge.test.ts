@@ -753,9 +753,10 @@ describe('FuzzyJudge – year in a note with date and explanation (L-F1)', () =>
       await cascadeUnsure(q, war, '1945');
       await notCorrect(q, war, '60 Millionen');
     });
-    it('a text short solution: exact without the LLM; a year of its explanation is not a solution', async () => {
+    // B-F14: a text short solution changes nothing – "Polen" goes the usual way (LLM), as on main.
+    it('a text short solution is no variant; a year of its explanation is not a solution', async () => {
       const poland = 'Polen - Am 1. September 1939 überfiel die Wehrmacht Polen ohne Kriegserklärung.';
-      await expectAll('Welches Land wurde zuerst überfallen?', poland, 'Polen', 'correct');
+      await cascadeUnsure('Welches Land wurde zuerst überfallen?', poland, 'Polen');
       await notCorrect('Welches Land wurde zuerst überfallen?', poland, '1939');
       await cascadeUnsure('Welches Land wurde zuerst überfallen?', poland, '1939');
     });
@@ -768,5 +769,130 @@ describe('FuzzyJudge – year in a note with date and explanation (L-F1)', () =>
       await expectAll(q, '1. September 1939\nIn Europa begann der Krieg mit dem Überfall auf Polen.', '1939', 'correct');
       await expectAll(q, '1. September 1939\nIn Europa begann der Krieg mit dem Überfall auf Polen.', '1940', 'wrong');
     });
+  });
+});
+
+// V6 B-F14: nothing may become right without the LLM that was not right on main (41bfd4a) – except by a number rule
+// with the same value. Main's verdicts (cascade, cascade/spoken, strict, strict/spoken; "C:" = correct) were recorded
+// once with main's FuzzyJudge. Cases: the examples of review V6 and the real notes of the server log and the live test.
+describe('FuzzyJudge – no new "correct" against main except by a matching number (V6 B-F14)', () => {
+  const cases: [question: string, reference: string, answer: string, main: string][] = [
+    ["Wie heißt der Song?", "Bonnie Tyler - Total Eclipse of the Heart", "Bonnie Tyler", "unsure unsure unsure unsure"],
+    ["Interpret und Titel?", "Elton John - Can You Feel the Love Tonight", "Elton John", "unsure unsure wrong wrong"],
+    ["Wie heißt der Song?", "Whitney Houston - I Will Always Love You", "Whitney Houston", "unsure unsure unsure unsure"],
+    ["Wie heißt der Song?", "U2 - I Still Haven't Found What I'm Looking For", "U2", "unsure unsure wrong wrong"],
+    ["Wie heißt der Film?", "Harry Potter - und der Stein der Weisen", "Harry Potter", "unsure unsure unsure unsure"],
+    ["Wie heißt der Film?", "Star Wars - Episode V: Das Imperium schlägt zurück", "Star Wars", "unsure unsure wrong wrong"],
+    ["Wie heißt der Film?", "Der Pate - Teil II, mit Al Pacino und Robert De Niro", "Der Pate", "unsure unsure wrong wrong"],
+    ["Welche Farben hat der Regenbogen?", "Rot - Orange - Gelb - Grün - Blau - Violett", "Rot", "unsure unsure wrong wrong"],
+    ["Nenne die inneren Planeten", "Merkur - Venus - Erde - Mars", "Merkur", "unsure unsure wrong wrong"],
+    ["Wie heißt der Planet?", "Lösung:\nTatooine ist die Heimat von Luke Skywalker", "Lösung", "unsure unsure wrong wrong"],
+    ["Wie heißt der Planet?", "Lösung:\nTatooine ist die Heimat von Luke Skywalker", "Tatooine", "unsure unsure wrong wrong"],
+    ["Wie heißt der Film?", "Fluch der Karibik – Am Ende der Welt", "Fluch der Karibik", "unsure unsure unsure unsure"],
+    ["Wie heißt der Film?", "Herr der Ringe - Die Rückkehr des Königs", "Herr der Ringe", "unsure unsure unsure unsure"],
+    ["Welche Band?", "AC/DC – Highway to Hell ist ihr bekanntester Song", "AC/DC", "C:enthält_Lösung C:enthält_Lösung C:enthält_Lösung C:enthält_Lösung"],
+    ["Wann erschien das Album?", "Bryan Adams - Summer Of 69 (aus dem Album Reckless von 1984)", "1984", "unsure unsure wrong wrong"],
+    ["Wann schrieb er es?", "Jean-Paul Sartre - der französische Philosoph schrieb es 1943", "1943", "unsure unsure wrong wrong"],
+    ["Wer schrieb es?", "Jean-Paul Sartre - der französische Philosoph schrieb es 1943", "Sartre", "unsure unsure wrong wrong"],
+    ["Wann erfand Gutenberg den Buchdruck?", "um 1450", "1455", "unsure unsure wrong unsure"],
+    ["Wann erfand Gutenberg den Buchdruck?", "um 1450 - Johannes Gutenberg erfand den Buchdruck in Mainz", "1455", "unsure unsure wrong wrong"],
+    ["Wann entdeckte Kolumbus Amerika?", "gegen 1492", "1493", "unsure unsure wrong wrong"],
+    ["Wann erfand Gutenberg den Buchdruck?", "ca. 1450", "1455", "unsure unsure wrong unsure"],
+    ["Wann begann der 2. Weltkrieg?", "1. September 1939 - In Europa begann der Zweite Weltkrieg am 1. September 1939 mit dem von Adolf Hitler befohlenen Überfall auf Polen.", "1939", "unsure unsure wrong wrong"],
+    ["Wann begann der 2. Weltkrieg?", "1. September 1939 - In Europa begann der Zweite Weltkrieg am 1. September 1939 mit dem von Adolf Hitler befohlenen Überfall auf Polen.", "1940", "unsure unsure wrong wrong"],
+    ["Wann begann der 2. Weltkrieg?", "1. September 1939 - In Europa begann der Zweite Weltkrieg am 1. September 1939 mit dem von Adolf Hitler befohlenen Überfall auf Polen.", "1. September", "unsure unsure wrong wrong"],
+    ["Wann begann der 2. Weltkrieg?", "1. September 1939 - In Europa begann der Zweite Weltkrieg am 1. September 1939 mit dem von Adolf Hitler befohlenen Überfall auf Polen.", "Polen", "unsure unsure wrong wrong"],
+    ["Welches Land überfiel Deutschland 1939 zuerst?", "Polen", "Polen", "C:exakt C:exakt C:exakt C:exakt"],
+    ["Welches Land wurde zuerst überfallen?", "Polen - Am 1. September 1939 überfiel die Wehrmacht Polen ohne Kriegserklärung.", "Polen", "unsure unsure wrong wrong"],
+    ["Womit spielt man Fußball?", "Ein Fußball", "Fußball", "C:enthält_Lösung C:enthält_Lösung C:enthält_Lösung C:enthält_Lösung"],
+    ["Womit spielt man Fußball?", "Ein Fußball", "Basketball", "unsure unsure unsure unsure"],
+    ["Welche Serie?", "Game of Thrones", "Game of Thrones", "C:exakt C:exakt C:exakt C:exakt"],
+    ["Welche Serie?", "Game of Thrones", "Games of Thrones", "C:ähnlich_(0.92) C:ähnlich_(0.92) C:ähnlich_(0.92) C:ähnlich_(0.92)"],
+    ["Wer war der erste US-Präsident?", "George Washington", "Washington", "unsure unsure unsure unsure"],
+    ["Wer war der erste US-Präsident?", "George Washington", "Lincoln", "unsure unsure wrong wrong"],
+    ["Welches Land?", "Vereinigten Staaten von Amerika / USA", "USA", "C:exakt C:exakt C:exakt C:exakt"],
+    ["Welches Land?", "Vereinigten Staaten von Amerika / USA", "Amerika", "unsure unsure wrong wrong"],
+    ["In welchem Jahr kam der erste Star-Wars-Film, Eine neue Hoffnung, in die US-Kinos?", "1977", "neunzehnhundertneunundsiebzig", "unsure unsure wrong wrong"],
+    ["In welchem Jahr kam der erste Star-Wars-Film, Eine neue Hoffnung, in die US-Kinos?", "1977", "neunzehnhundertsiebenundsiebzig", "unsure unsure wrong wrong"],
+    ["Wer führte Regie?", "Irvin Kershner / Kershner", "Deutsch, Lukas", "unsure unsure wrong wrong"],
+    ["Welches Rufzeichen hatte Wedge?", "Rot 2 / Red Two / Red 2 / Rot Zwei", "Rot 3", "unsure unsure wrong unsure"],
+    ["Welches Rufzeichen hatte Wedge?", "Rot 2 / Red Two / Red 2 / Rot Zwei", "Rot Vier", "unsure unsure wrong unsure"],
+    ["Welches Rufzeichen hatte Wedge?", "Rot 2 / Red Two / Red 2 / Rot Zwei", "Rot zwei", "C:exakt C:exakt C:exakt C:exakt"],
+    ["Wie hieß Vaders Flaggschiff?", "Exekutor / Executor", "Destroyer", "unsure unsure wrong wrong"],
+    ["Wer sprach Yoda?", "Frank Oz / Oz", "Thomas Jackson", "unsure unsure wrong wrong"],
+    ["Welche Zellennummer?", "2187 / Zelle 2187", "603", "unsure unsure wrong wrong"],
+    ["Welche Zellennummer?", "2187 / Zelle 2187", "Zelle 2187", "C:exakt C:exakt C:exakt C:exakt"],
+    ["Welche Kampfform?", "Vaapad", "Kampfforn fünf", "unsure unsure wrong wrong"],
+    ["Wer spielte die Musik ein?", "London Symphony Orchestra / LSO", "Hans Zimmer", "unsure unsure wrong wrong"],
+    ["Wer spielte Lando?", "Billy Dee Williams / Billy Dee", "Harrison Ford", "unsure unsure wrong wrong"],
+    ["Wie heißt Boba Fetts Schiff?", "Slave I", "Slave One", "unsure unsure wrong unsure"],
+    ["Wie heißt der Jedi?", "Qui-Gon Jinn", "Qui Gon Jin", "C:ähnlich_(0.92) C:klingt_gleich C:ähnlich_(0.92) C:klingt_gleich"],
+    ["Wie heißt der Planet?", "Kashyyyk", "Kaschik", "unsure unsure unsure unsure"],
+    ["Wie heißt der Planet?", "Mustafar", "Mustafa", "C:ähnlich_(0.88) C:ähnlich_(0.88) C:ähnlich_(0.88) C:ähnlich_(0.88)"],
+    ["Wie heißt der Planet?", "Hoth", "hoh", "unsure unsure unsure unsure"],
+    ["Wie heißt der Planet?", "Tatooine", "Tatooin", "C:ähnlich_(0.88) C:ähnlich_(0.88) C:ähnlich_(0.88) C:ähnlich_(0.88)"],
+    ["Wie viele Filme bis 1999?", "4", "4", "C:exakt C:exakt C:exakt C:exakt"],
+    ["Wann?", "1939 - Der Krieg in Europa dauerte bis 1945 und kostete rund 60 Millionen Menschen das Leben.", "1939", "unsure unsure wrong wrong"],
+    ["Wann?", "1939 - Der Krieg in Europa dauerte bis 1945 und kostete rund 60 Millionen Menschen das Leben.", "1945", "unsure unsure wrong wrong"],
+    ["Wie lang ist ein Marathon?", "42,195 km - So lang ist die Marathonstrecke seit den Spielen von 1908.", "42,195 km", "unsure unsure wrong wrong"],
+    ["Wie lang ist ein Marathon?", "42,195 km - So lang ist die Marathonstrecke seit den Spielen von 1908.", "1908", "unsure unsure wrong wrong"],
+  ];
+  const NUMBER_REASONS = ['Zahl stimmt', 'Jahr stimmt', 'Kurzform des Jahres'];
+  it.each(cases)('%s | %j ← %j', async (question, reference, answer, main) => {
+    const before = main.split(' ');
+    let k = 0;
+    for (const rejectDissimilar of [false, true]) {
+      for (const spoken of [false, true]) {
+        const r = await new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar }).judge({ question, reference, answer, spoken });
+        const was = before[k++]!;
+        if (r.verdict === 'correct' && !was.startsWith('C:')) expect(NUMBER_REASONS, `${answer} (${rejectDissimilar ? 'strict' : 'cascade'}${spoken ? '/spoken' : ''}): ${r.reason}`).toContain(r.reason);
+      }
+    }
+  });
+
+  it.each([
+    ['Wie heißt der Song?', 'Bonnie Tyler - Total Eclipse of the Heart', 'Bonnie Tyler'],
+    ['Interpret und Titel?', 'Elton John - Can You Feel the Love Tonight', 'Elton John'],
+    ['Wie heißt der Song?', 'Whitney Houston - I Will Always Love You', 'Whitney Houston'],
+    ['Wie heißt der Song?', "U2 - I Still Haven't Found What I'm Looking For", 'U2'],
+    ['Wie heißt der Film?', 'Harry Potter - und der Stein der Weisen', 'Harry Potter'],
+    ['Wie heißt der Film?', 'Star Wars - Episode V: Das Imperium schlägt zurück', 'Star Wars'],
+    ['Wie heißt der Film?', 'Der Pate - Teil II, mit Al Pacino und Robert De Niro', 'Der Pate'],
+    ['Welche Farben hat der Regenbogen?', 'Rot - Orange - Gelb - Grün - Blau - Violett', 'Rot'],
+    ['Nenne die inneren Planeten', 'Merkur - Venus - Erde - Mars', 'Merkur'],
+    ['Wie heißt der Planet?', 'Lösung:\nTatooine ist die Heimat von Luke Skywalker', 'Lösung'],
+  ])('B-F14: %s %j ← %j is not correct', async (question, reference, answer) => {
+    for (const rejectDissimilar of [false, true]) {
+      for (const spoken of [false, true]) {
+        const r = await new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar }).judge({ question, reference, answer, spoken });
+        expect(r.verdict, `${answer}: ${r.reason}`).not.toBe('correct');
+      }
+    }
+  });
+});
+
+// V6 B-F15: a solution that names a time only roughly is no exact year – a different year is never wrong by the rules.
+describe('FuzzyJudge – rough years in the solution (V6 B-F15)', () => {
+  it.each([
+    ['Wann erfand Gutenberg den Buchdruck?', 'um 1450', '1455'],
+    ['Wann erfand Gutenberg den Buchdruck?', 'um 1450 - Johannes Gutenberg erfand den Buchdruck in Mainz', '1455'],
+    ['Wann entdeckte Kolumbus Amerika?', 'gegen 1492', '1493'],
+    ['Wann erfand Gutenberg den Buchdruck?', 'ca. 1450', '1455'],
+    ['Wann begann der Krieg?', 'Anfang 1939', '1940'],
+    ['Wann wurde die Burg gebaut?', 'vor 1200', '1150'],
+    ['Wann erfand Gutenberg den Buchdruck?', '~1450', '1455'],
+  ])('%s %j ← %j is never wrong by a number rule', async (question, reference, answer) => {
+    for (const rejectDissimilar of [false, true]) {
+      const r = await new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar }).judge({ question, reference, answer });
+      expect(r.reason ?? '', `${reference} ← ${answer}: ${r.verdict}`).not.toMatch(/^falsche/);
+      if (!rejectDissimilar) expect(r.verdict, r.reason).toBe('unsure');
+    }
+  });
+
+  it('an exact year in the solution still decides', async () => {
+    const j = new FuzzyJudge({ acceptThreshold: 0.86, rejectThreshold: 0.35, rejectDissimilar: false });
+    expect((await j.judge({ question: 'Wann erfand Gutenberg den Buchdruck?', reference: '1450', answer: '1455' })).verdict).toBe('wrong');
+    expect((await j.judge({ question: 'Wann erschien der Film?', reference: 'im Jahr 1977', answer: '1978' })).verdict).toBe('wrong');
+    expect((await j.judge({ question: 'Wann erfand Gutenberg den Buchdruck?', reference: 'um 1450', answer: '1450' })).verdict).not.toBe('wrong');
   });
 });

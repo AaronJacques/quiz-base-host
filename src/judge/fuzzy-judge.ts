@@ -16,7 +16,8 @@ import {
   similarity,
   spellingSimilarity,
   STOPWORDS,
-  referenceCore,
+  numberReference,
+  UNIT_NAMES,
   DATE_WORDS,
   stripDialogueDash,
   stripUrls,
@@ -206,20 +207,6 @@ function judgeMath(question: string, variants: string[], answer: string): JudgeR
 
 // ───────────────────────────── numbers ─────────────────────────────
 
-/**
- * Units: "42 km", "4 Mal", "1977 Einwohner" – no content of their own, but they have to agree when both sides name one
- * ("6 Tage" is not "6 Wochen"). Spellings of the same unit map to one name.
- */
-const UNIT_NAMES: Record<string, string> = {
-  km: 'km', kilometer: 'km', m: 'm', meter: 'm', cm: 'cm', zentimeter: 'cm', mm: 'mm', millimeter: 'mm',
-  kg: 'kg', kilogramm: 'kg', g: 'g', gramm: 'g', t: 't', tonne: 't', tonnen: 't', l: 'l', liter: 'l', ml: 'ml', milliliter: 'ml',
-  jahr: 'jahr', jahre: 'jahr', jahren: 'jahr', mal: 'mal', prozent: 'prozent', grad: 'grad',
-  euro: 'euro', eur: 'euro', dollar: 'dollar', usd: 'dollar',
-  sekunde: 's', sekunden: 's', s: 's', sek: 's', minute: 'min', minuten: 'min', min: 'min', stunde: 'h', stunden: 'h', h: 'h', std: 'h',
-  tag: 'tag', tage: 'tag', tagen: 'tag', woche: 'woche', wochen: 'woche', monat: 'monat', monate: 'monat', monaten: 'monat',
-  punkte: 'punkte', stueck: 'stueck', stk: 'stueck', einwohner: 'einwohner', menschen: 'menschen', personen: 'personen', spieler: 'spieler',
-  folgen: 'folgen', episoden: 'episoden', staffeln: 'staffeln', filme: 'filme',
-};
 /** Words around a number that add nothing ("im Jahr 1977", "1979 glaube ich", "meine Antwort lautet 4"). */
 const NUMBER_FILLER = new Set([...FILLER, 'im', 'jahr', 'anno', 'denke', 'so', 'es', 'ist', 'das', 'war', 'sind', 'und', 'minus']);
 
@@ -228,6 +215,8 @@ const YEAR_FILLER = DATE_WORDS;
 
 /** Estimates and limits: then a close number may count – the LLM decides. */
 const ESTIMATE = /\b(?:ca|circa|zirka|etwa|ungefaehr|rund|mehr als|ueber|bis zu|mindestens|hoechstens|knapp)\b|schaetz/;
+/** A solution that names a time only roughly ("um 1450", "gegen 1492", "Anfang 1939", "vor 1500") – no exact year. */
+const NEAR = /\b(?:um|gegen|anfang|mitte|ende|frueh|spaet|vor|nach|seit)\s+(?:des\s+|der\s+|dem\s+)?\d/;
 const ROMAN = /^(?=[IVXLCDM]{1,6}$)M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/;
 /** The question asks for a year (a short list on purpose – "wann" is enough). */
 const YEAR_QUESTION = /in welchem jahr|welches jahr|\bwann\b|im jahr|jahreszahl|\berschien|\bkam\b.*\braus\b/;
@@ -322,13 +311,14 @@ function joinedReadings(view: NumberView): number[] {
 export function judgeNumbers(question: string, reference: string, variants: string[], answer: string): JudgeResult | null {
   if (hasMathValue(answer)) return null;
   const q = normalize(question);
-  // "<short solution> - <explanation>": the rules judge against the short solution. Numbers of the explanation can only
-  // keep an answer from being wrong (`named`), never make one right or wrong.
-  const core = referenceCore(reference);
+  // "1. September 1939 - <explanation>": a short solution that is only a number or a date decides which numbers count
+  // (`numberReference`); numbers of the explanation can only keep an answer from being wrong (`named`). Otherwise the
+  // whole note counts.
+  const core = numberReference(reference);
   const ref = normalize(core);
   const refRaw = stripUrls(core);
   // R0 – special cases.
-  if (ESTIMATE.test(q) || ESTIMATE.test(ref) || /[~±≈]/.test(refRaw + question)) return null;
+  if (ESTIMATE.test(q) || ESTIMATE.test(ref) || NEAR.test(ref) || /[~±≈]/.test(refRaw + question)) return null;
   if (/\d\s*[–-]\s*\d/.test(refRaw) || /\b(?:bis|zwischen)\b/.test(ref)) return null;
   if (refRaw.split(/[^A-Za-z]+/).some((t) => ROMAN.test(t))) return null;
   const aFound = numberParts(answer).numbers;
@@ -347,7 +337,9 @@ export function judgeNumbers(question: string, reference: string, variants: stri
   const r = numberView(core, asked);
   // "6 Wochen" for "6 Tage", "1,5 Stunden" for "90 Minuten": units differ – maybe a conversion, the LLM decides.
   if (a.units.size && r.units.size && !sameSet(a.units, r.units)) return null;
-  const plainVariants = variants.filter((v) => !isFormula(v) && !hasMathValue(v)).map((v) => numberView(v, asked));
+  // The short solution of a number/date ("1939 - Der Krieg …") is a solution for the number rules – only for them.
+  const numberVariants = core === reference ? variants : [...variants, core];
+  const plainVariants = numberVariants.filter((v) => !isFormula(v) && !hasMathValue(v)).map((v) => numberView(v, asked));
   /** Every number the note names, in brackets and explanations as well – an answer with one of them is never wrong here. */
   const named = numberParts(reference).numbers.filter((t) => !t.partial && !t.article).map((t) => t.value);
   const isNamed = (x: number) => named.some((v) => sameValue(x, v));

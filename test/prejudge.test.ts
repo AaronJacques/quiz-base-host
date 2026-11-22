@@ -415,7 +415,7 @@ describe('TafelquizController: judging starts while "Paris?" waits for "Ja"', ()
   });
 });
 
-// Numbers decide without the LLM; the LLM gets the parsed values for the cases left to it (rules R0–R3, cache v5).
+// Numbers decide without the LLM; the LLM gets the parsed values for the cases left to it (rules R0–R3, cache v6).
 describe('judging numbers in the cascade', () => {
   const year = 'In welchem Jahr kam der erste Star-Wars-Film, Eine neue Hoffnung, in die US-Kinos?';
   function kit(cacheContent?: object) {
@@ -488,8 +488,8 @@ describe('judging numbers in the cascade', () => {
     expect(numberHint('der 4. Platz', '4')).toBe('Zahlenwerte (automatisch gelesen): Antwort 4 | Lösung 4'); // an ordinal that is no day stays
   });
 
-  it('L-F1: the prompt says the year is enough for "Wann"/"In welchem Jahr" – rules version 5', async () => {
-    expect(JUDGE_RULES_VERSION).toBe(5);
+  it('L-F1: the prompt says the year is enough for "Wann"/"In welchem Jahr" – rules version 6 (hint B-F16)', async () => {
+    expect(JUDGE_RULES_VERSION).toBe(6);
     const { kit: k, llm } = kit();
     // A note fuzzy leaves open (two years) – the LLM gets the rule with it.
     const p = k.judge.judge({ question: 'Wann begann der Krieg?', reference: '1939 in Europa, 1937 in Asien', answer: '1939' });
@@ -513,30 +513,31 @@ describe('judging numbers in the cascade', () => {
     expect(numberHint('-5', '5', true)).toBe('Zahlenwerte (automatisch gelesen): Antwort -5 | Lösung 5');
   });
 
-  it('verdict keys carry rule version 5; createJudge removes older verdicts once and keeps the solutions', async () => {
-    expect(JUDGE_RULES_VERSION).toBe(5);
+  it('verdict keys carry rule version 6; createJudge removes older verdicts once and keeps the solutions', async () => {
+    expect(JUDGE_RULES_VERSION).toBe(6);
     const old = {
       verdicts: {
         'v3s␟in welchem jahr␟1977␟neunzehnhundertneunundsiebzig': { verdict: 'correct', method: 'llm', confidence: 0.9 },
         'v3␟frage␟paris␟paris': { verdict: 'correct', method: 'llm', confidence: 0.9 },
-        // live 2026-11-22 (rules v4): "1939" for the WW2 note judged wrong by the LLM – removed with v5
+        // live 2026-11-22 (rules v4): "1939" for the WW2 note judged wrong by the LLM – removed with v5 and later
+        'v5␟frage␟paris␟rom': { verdict: 'wrong', method: 'llm', confidence: 0.9 },
         'v4s␟wann begann der 2. weltkrieg␟1. september 1939␟1939': { verdict: 'wrong', method: 'llm', confidence: 0.9 },
-        'v5␟frage␟paris␟pariss': { verdict: 'correct', method: 'llm', confidence: 0.9 },
-        'v5s␟frage␟paris␟parie': { verdict: 'correct', method: 'llm', confidence: 0.9 },
+        'v6␟frage␟paris␟pariss': { verdict: 'correct', method: 'llm', confidence: 0.9 },
+        'v6s␟frage␟paris␟parie': { verdict: 'correct', method: 'llm', confidence: 0.9 },
       },
       solutions: { 's2␟bildfrage␟img:https://x/y.png': { answer: 'Paris', confidence: 0.9 } },
     };
     const { kit: k, llm, cacheFile } = kit(old);
     const saved = JSON.parse(readFileSync(cacheFile, 'utf8'));
-    expect(Object.keys(saved.verdicts)).toEqual(['v5␟frage␟paris␟pariss', 'v5s␟frage␟paris␟parie']);
+    expect(Object.keys(saved.verdicts)).toEqual(['v6␟frage␟paris␟pariss', 'v6s␟frage␟paris␟parie']);
     expect(saved.solutions).toEqual(old.solutions);
-    // A new verdict is stored under v5.
+    // A new verdict is stored under v6.
     const p = k.judge.judge({ question: 'Hauptstadt?', reference: 'Paris', answer: 'Lutetia' });
     await until(() => llm.calls.length === 1);
     llm.calls[0]!.resolve(true);
     await p;
     const keys = Object.keys(JSON.parse(readFileSync(cacheFile, 'utf8')).verdicts);
-    expect(keys.filter((key) => key.includes('lutetia'))).toEqual(['v5␟hauptstadt␟paris␟lutetia']);
+    expect(keys.filter((key) => key.includes('lutetia'))).toEqual(['v6␟hauptstadt␟paris␟lutetia']);
   });
 
   it('B-F8: prune keeps the verdicts of the game master (operator) – they do not depend on the judging rules', () => {
@@ -554,7 +555,7 @@ describe('judging numbers in the cascade', () => {
     const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => (lines.push(String(chunk)), true));
     setLogLevel('info');
     try {
-      kit({ verdicts: { 'v6␟q␟a␟b': { verdict: 'correct', method: 'llm', confidence: 0.9 } }, solutions: {} });
+      kit({ verdicts: { 'v7␟q␟a␟b': { verdict: 'correct', method: 'llm', confidence: 0.9 } }, solutions: {} });
       expect(lines.join('')).toContain(`Bewertungs-Cache: 1 alte Urteile (andere Regelversion als ${JUDGE_RULES_VERSION}) entfernt`);
     } finally {
       spy.mockRestore();
@@ -576,5 +577,26 @@ describe('judging numbers in the cascade', () => {
     expect(cache.getVerdict('v4s␟q␟1977␟neunzehnhundertneunundsiebzig')?.verdict).toBe('wrong');
     expect(cache.getVerdict('v3s␟q␟1977␟neunzehnhundertneunundsiebzig')).toBeUndefined();
     expect(new JudgeCache(file).getSolution('s2␟q␟img:x')).toEqual({ answer: 'A', confidence: 1 });
+  });
+});
+
+// V6 B-F16: the hint never says "Lösung –" – a number only in the explanation counts, a note without numbers gives no line.
+describe('number hint (V6 B-F16)', () => {
+  it.each([
+    ['1984', 'Bryan Adams - Summer Of 69 (aus dem Album Reckless von 1984)', 'Antwort 1984 | Lösung 69, 1984'],
+    ['1943', 'Jean-Paul Sartre - der französische Philosoph schrieb es 1943', 'Antwort 1943 | Lösung 1943'],
+    ['1978', 'Star Wars\nDer erste Film kam 1977 in die Kinos, in Deutschland 1978.', 'Antwort 1978 | Lösung 1977, 1978'], // not "1" of "erste"
+    ['1940', 'Am 1. September 1939 begann der Zweite Weltkrieg in Europa.', 'Antwort 1940 | Lösung 1939'], // not "2" of "Zweite"
+    ['1. Weltkrieg', 'Erster Weltkrieg', 'Antwort 1 | Lösung 1'], // a short solution keeps its number word
+    ['1939', '1. September 1939 - In Europa begann der Zweite Weltkrieg am 1. September 1939 mit dem Überfall auf Polen.', 'Antwort 1939 | Lösung 1939'],
+  ])('%s ← %j: %s', async (answer, reference, expected) => {
+    const { numberHint } = await import('../src/judge/llm-judge.ts');
+    expect(numberHint(answer, reference)).toBe(`Zahlenwerte (automatisch gelesen): ${expected}`);
+  });
+
+  it('a note without numbers gives no line at all', async () => {
+    const { numberHint } = await import('../src/judge/llm-judge.ts');
+    expect(numberHint('1984', 'Tatooine')).toBeNull();
+    expect(numberHint('1984', 'Bonnie Tyler - Total Eclipse of the Heart')).toBeNull();
   });
 });

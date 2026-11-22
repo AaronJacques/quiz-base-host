@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ImageInput, LlmClient, UsageMeter } from '../llm/client.ts';
 import type { AnswerJudge, JudgeInput, JudgeResult } from './judge.ts';
-import { DATE_WORDS, numberParts, referenceCore, stripDialogueDash } from './normalize.ts';
+import { DATE_WORDS, numberParts, numberReference, stripDialogueDash } from './normalize.ts';
 
 const VerdictSchema = z.object({
   correct: z.boolean(),
@@ -14,7 +14,7 @@ const SolveSchema = z.object({
 });
 
 /** Bump when JUDGE_SYSTEM changes meaningfully – invalidates cached verdicts. */
-export const JUDGE_RULES_VERSION = 5;
+export const JUDGE_RULES_VERSION = 6;
 
 // Kept short and stable on purpose: it is the bulk of every judging request.
 const JUDGE_SYSTEM = `Du bist ein fairer, lockerer Quizmaster bei einem Spieleabend unter Freunden.
@@ -39,6 +39,8 @@ Ist die Frage ohne weitere Infos nicht eindeutig lösbar, setze confidence unter
 
 /** At most this many values per side in the number hint. */
 const HINT_VALUES = 4;
+/** A solution with more words is prose: only its digits are values ("Erster Weltkrieg" keeps its 1, a sentence does not). */
+const HINT_PROSE_WORDS = 6;
 
 /**
  * "Zahlenwerte (automatisch gelesen): Antwort 1979 | Lösung 1977" – the parsed values, so the LLM need not split
@@ -46,12 +48,14 @@ const HINT_VALUES = 4;
  */
 export function numberHint(answer: string, reference: string | null, spoken = false): string | null {
   // Lone articles ("Eine neue Hoffnung") and digits inside words ("H2O") are no values worth naming.
-  const values = (s: string | null) => {
+  const values = (s: string | null, prose = false) => {
     const seen = new Set<string>();
     const out: string[] = [];
     const { words, numbers: found } = s ? numberParts(s) : { words: [], numbers: [] };
     for (const t of found) {
       if (t.article || t.partial) continue;
+      // Number words in longer prose ("Der erste Film kam 1977 …", "der Zweite Weltkrieg") are no solution values.
+      if (prose && t.words) continue;
       // The day of a date ("1. September 1939") is no value the answer has to name – only the year.
       if (t.ordinal && t.value <= 31 && DATE_WORDS.has(words[t.to + 1]?.replace(/\.+$/, '') ?? '')) continue;
       // "12.000", "1.500", "12 000": thousands or not – every reading, never just one of them.
@@ -66,9 +70,11 @@ export function numberHint(answer: string, reference: string | null, spoken = fa
   const undashed = spoken ? values(stripDialogueDash(answer)) : plain;
   const negative = !!reference && numberParts(reference).numbers.some((t) => t.value < 0);
   const a = undashed.join() === plain.join() || !negative ? undashed : [`${undashed.join(', ') || '–'} oder ${plain.join(', ')}`];
-  // Only the short solution: numbers of an explanation ("der Zweite Weltkrieg") are no values to match.
-  const r = values(reference ? referenceCore(reference) : null);
-  if (!a.length && !r.length) return null;
+  // The numbers that count: a short solution that is a number or date ("1939 - Der Krieg …" → 1939, not "der Zweite
+  // Weltkrieg"), else the whole note. Without a number in it there is no line – never "Lösung –" (B-F16).
+  const counted = reference ? numberReference(reference) : null;
+  const r = values(counted, !!counted && numberParts(counted).words.filter(Boolean).length > HINT_PROSE_WORDS);
+  if (!r.length) return null;
   const show = (v: string[]) => (v.length ? v.join(', ') : '–');
   return `Zahlenwerte (automatisch gelesen): Antwort ${show(a)} | Lösung ${show(r)}`;
 }
