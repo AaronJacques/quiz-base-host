@@ -16,6 +16,7 @@ import {
   similarity,
   spellingSimilarity,
   STOPWORDS,
+  stripDialogueDash,
   stripUrls,
   tokens,
   vowelSkeleton,
@@ -45,7 +46,9 @@ const sameNumbers = (a: string, b: string) => {
 export class FuzzyJudge implements AnswerJudge {
   constructor(private opts: { acceptThreshold: number; rejectThreshold: number; rejectDissimilar: boolean }) {}
 
-  async judge({ question, reference, answer, spoken, options }: JudgeInput): Promise<JudgeResult> {
+  async judge({ question, reference, answer: raw, spoken, options }: JudgeInput): Promise<JudgeResult> {
+    // Speech recognition writes dialogue dashes ("- 1977") – no minus sign.
+    const answer = spoken ? stripDialogueDash(raw) : raw;
     if (isNonAnswer(answer)) return { verdict: 'wrong', method: 'rule', confidence: 1, reason: 'keine Antwort' };
     const choice = options?.length ? judgeChoice(answer, options, !!spoken) : null;
     if (choice) return choice;
@@ -192,14 +195,28 @@ function judgeMath(question: string, variants: string[], answer: string): JudgeR
 
 // ───────────────────────────── numbers ─────────────────────────────
 
-/** Units: "42 km", "4 Mal", "1977 Einwohner" – they are no content of their own. */
-const NUMBER_UNITS = new Set([
-  'km', 'm', 'cm', 'mm', 'kg', 'g', 't', 'l', 'ml', 'jahr', 'jahre', 'jahren', 'mal', 'prozent', 'grad', 'euro', 'eur', 'dollar', 'usd',
-  'meter', 'kilometer', 'gramm', 'kilogramm', 'tonnen', 'liter', 'minuten', 'min', 'sekunden', 's', 'stunden', 'h', 'tage', 'monate',
-  'wochen', 'punkte', 'stueck', 'stk', 'einwohner', 'menschen', 'personen', 'spieler', 'folgen', 'episoden', 'staffeln', 'filme',
-]);
+/**
+ * Units: "42 km", "4 Mal", "1977 Einwohner" – no content of their own, but they have to agree when both sides name one
+ * ("6 Tage" is not "6 Wochen"). Spellings of the same unit map to one name.
+ */
+const UNIT_NAMES: Record<string, string> = {
+  km: 'km', kilometer: 'km', m: 'm', meter: 'm', cm: 'cm', zentimeter: 'cm', mm: 'mm', millimeter: 'mm',
+  kg: 'kg', kilogramm: 'kg', g: 'g', gramm: 'g', t: 't', tonne: 't', tonnen: 't', l: 'l', liter: 'l', ml: 'ml', milliliter: 'ml',
+  jahr: 'jahr', jahre: 'jahr', jahren: 'jahr', mal: 'mal', prozent: 'prozent', grad: 'grad',
+  euro: 'euro', eur: 'euro', dollar: 'dollar', usd: 'dollar',
+  sekunde: 's', sekunden: 's', s: 's', sek: 's', minute: 'min', minuten: 'min', min: 'min', stunde: 'h', stunden: 'h', h: 'h', std: 'h',
+  tag: 'tag', tage: 'tag', tagen: 'tag', woche: 'woche', wochen: 'woche', monat: 'monat', monate: 'monat', monaten: 'monat',
+  punkte: 'punkte', stueck: 'stueck', stk: 'stueck', einwohner: 'einwohner', menschen: 'menschen', personen: 'personen', spieler: 'spieler',
+  folgen: 'folgen', episoden: 'episoden', staffeln: 'staffeln', filme: 'filme',
+};
 /** Words around a number that add nothing ("im Jahr 1977", "1979 glaube ich", "meine Antwort lautet 4"). */
-const NUMBER_FILLER = new Set(['im', 'jahr', 'anno', 'ich', 'glaube', 'denke', 'wohl', 'so', 'es', 'ist', 'das', 'war', 'sind', 'meine', 'antwort', 'lautet', 'und', 'minus']);
+const NUMBER_FILLER = new Set([...FILLER, 'im', 'jahr', 'anno', 'denke', 'so', 'es', 'ist', 'das', 'war', 'sind', 'und', 'minus']);
+
+/** Months and seasons: "Mai 1977" answers a question for the year with the year (only then they are fillers). */
+const YEAR_FILLER = new Set([
+  'januar', 'jaenner', 'februar', 'maerz', 'april', 'mai', 'juni', 'juli', 'august', 'september', 'oktober', 'november', 'dezember',
+  'fruehling', 'fruehjahr', 'sommer', 'herbst', 'winter',
+]);
 
 /** Estimates and limits: then a close number may count – the LLM decides. */
 const ESTIMATE = /\b(?:ca|circa|zirka|etwa|ungefaehr|rund|mehr als|ueber|bis zu|mindestens|hoechstens|knapp)\b|schaetz/;
@@ -210,39 +227,84 @@ const YEAR_QUESTION = /in welchem jahr|welches jahr|\bwann\b|im jahr|jahreszahl|
 /** A text seen as numbers: the values and the words that are left besides units and fillers. */
 interface NumberView {
   values: NumberToken[];
-  /** Words that are no number, unit, filler or stop word (set, as by `tokens()`). */
+  /** Words that are no number, unit, filler, stop word or word of the question (set, as by `tokens()`). */
   content: Set<string>;
+  /** Units named ("tag", "km"), by their one name. */
+  units: Set<string>;
   /** Only numbers (and units/fillers) – nothing else said. */
   onlyNumber: boolean;
   /** Has digits inside a word ("h2o", "70er") – then the number rules stay out. */
   partial: boolean;
+  /** The words the numbers were read from (`numberParts`). */
+  words: string[];
 }
 
-function numberView(s: string): NumberView {
+/** `asked`: words of the question – "acht Beine" for "Wie viele Beine …?" says only the number. */
+function numberView(s: string, asked: ReadonlySet<string>): NumberView {
   const { words, numbers: found } = numberParts(s);
   const whole = found.filter((t) => !t.partial);
   const covered = new Set<number>();
   for (const t of whole) for (let i = t.from; i <= t.to; i++) covered.add(i);
   const content = new Set<string>();
+  const units = new Set<string>();
   words.forEach((w, i) => {
     const t = w.replace(/^\.+|\.+$/g, '');
-    if (!t || covered.has(i) || STOPWORDS.has(t) || NUMBER_UNITS.has(t) || NUMBER_FILLER.has(t)) return;
+    if (!t || covered.has(i)) return;
+    const unit = UNIT_NAMES[t];
+    // "im Jahr 1977": "Jahr" after "im" is a filler, not the unit "Jahre".
+    if (unit && !(t === 'jahr' && words[i - 1] === 'im')) units.add(unit);
+    if (unit || STOPWORDS.has(t) || NUMBER_FILLER.has(t) || asked.has(t)) return;
+    // "ein Tor" for "Wie viele Tore …?", "acht Beine" for "Wie viele Beine hat …?": singular and plural of a question word.
+    if (/^[a-z]{3,}$/.test(t) && ['e', 'n', 'en', 'er', 's'].some((end) => asked.has(t + end) || (t.endsWith(end) && asked.has(t.slice(0, -end.length))))) return;
     content.add(t);
   });
   // A lone article is a number only if nothing else is said ("eine" – not "Eine neue Hoffnung").
   const values = whole.every((t) => t.article) && whole.length === 1 && !content.size ? whole : whole.filter((t) => !t.article);
   const partial = found.some((t) => t.partial);
-  return { values, content, onlyNumber: !content.size && !partial && values.length > 0, partial };
+  return { values, content, units, onlyNumber: !content.size && !partial && values.length > 0, partial, words };
 }
 
 const sameSet = (a: Set<string>, b: Set<string>) => a.size === b.size && [...a].every((x) => b.has(x));
 const isYear = (t: NumberToken) => !t.ordinal && !t.decimal && !t.magnitude && Number.isInteger(t.value) && t.value >= 1000 && t.value <= 2099;
 const result = (verdict: 'correct' | 'wrong' | 'unsure', reason: string): JudgeResult => ({ verdict, method: 'fuzzy', confidence: verdict === 'unsure' ? 0.5 : 0.95, reason });
 
+/** Places after the decimal point ("3,14" → 2). */
+function decimals(x: number): number {
+  if (Number.isInteger(x)) return 0;
+  return /\.(\d+)$/.exec(String(x))?.[1]?.length ?? 0;
+}
+
+/** One value rounded or cut to fewer places than the other ("42" / "42,2" for 42,195, "3,14" for 3,14159 and back; not "3,2"). */
+function rounded(x: number, v: number): boolean {
+  const dx = decimals(x);
+  const dv = decimals(v);
+  if (dx === dv) return false;
+  const [short, long, d] = dx < dv ? [x, v, dx] : [v, x, dv];
+  const f = 10 ** d;
+  return sameValue(short, Math.round(long * f) / f) || sameValue(short, Math.trunc(long * f) / f);
+}
+
+/**
+ * Other readings of an answer that came out as several numbers: digit groups ("12 000", "1 500 000", "19 77"), the sum
+ * ("eine Million 500000", "1900 77", "2 tausend 14") and a year in two parts ("19 77"). Any of them may be meant.
+ */
+function joinedReadings(view: NumberView): number[] {
+  const t = view.values;
+  const out = [t.reduce((sum, x) => sum + x.value, 0)];
+  if (t.every((x) => !x.words && !x.decimal && !x.ordinal && x.from === x.to)) {
+    const joined = t.map((x) => view.words[x.from]!.replace(/\.+$/, '')).join('');
+    if (/^\d+$/.test(joined)) out.push(parseInt(joined, 10));
+  }
+  if (t.length === 2 && t[0]!.value >= 11 && t[0]!.value <= 20 && t[1]!.value >= 0 && t[1]!.value <= 99) out.push(t[0]!.value * 100 + t[1]!.value);
+  return out;
+}
+
 /**
  * Numbers and years decide without the LLM (R0–R3): a different number is wrong, the same number right – whether
  * written as digits or words ("neunzehnhundertneunundsiebzig" is 1979, not 1977). Estimates, ranges, roman numerals,
- * "1.500" (thousands or decimal?) and "Millionen" on one side only are left to the LLM (null).
+ * "1.500" (thousands or decimal?), "Millionen" on one side only and different units are left to the LLM (null).
+ * "Wrong" only when nothing speaks for the answer: a number the solution names anywhere (also in brackets: "1977
+ * (1978 in Deutschland)"), a rounding or another reading of the same digits leave it to the LLM.
  */
 export function judgeNumbers(question: string, reference: string, variants: string[], answer: string): JudgeResult | null {
   if (hasMathValue(answer)) return null;
@@ -257,18 +319,33 @@ export function judgeNumbers(question: string, reference: string, variants: stri
   const rFound = numberParts(reference).numbers;
   if ([...aFound, ...rFound].some((t) => t.ambiguous)) return null;
   if (aFound.some((t) => t.magnitude) !== rFound.some((t) => t.magnitude)) return null;
-  const a = numberView(answer);
+  // Words of the question say nothing ("acht Beine" for "Wie viele Beine …?") – if the solution uses them as well or is
+  // only a number. Otherwise they may tell candidates apart ("Rocky 4 oder Rambo 2?" – "Rocky 2" is not "Rambo 2").
+  const refWords = new Set(tokens(reference));
+  const refOnlyNumber = numberView(reference, new Set()).onlyNumber;
   const yearQuestion = YEAR_QUESTION.test(q);
-  const plainVariants = variants.filter((v) => !isFormula(v) && !hasMathValue(v)).map(numberView);
+  const asked = new Set(tokens(question).filter((w) => refOnlyNumber || refWords.has(w)));
+  // "Mai 1977" for 1977 – but if the solution names a month itself ("Mai 1977"), "Juni 1977" is not the same.
+  const answerAsked = yearQuestion && ![...refWords].some((w) => YEAR_FILLER.has(w)) ? new Set([...asked, ...YEAR_FILLER]) : asked;
+  const a = numberView(answer, answerAsked);
+  const r = numberView(reference, asked);
+  // "6 Wochen" for "6 Tage", "1,5 Stunden" for "90 Minuten": units differ – maybe a conversion, the LLM decides.
+  if (a.units.size && r.units.size && !sameSet(a.units, r.units)) return null;
+  const plainVariants = variants.filter((v) => !isFormula(v) && !hasMathValue(v)).map((v) => numberView(v, asked));
+  /** Every number the solution names, in brackets as well – an answer with one of them is never wrong here. */
+  const named = rFound.filter((t) => !t.partial && !t.article).map((t) => t.value);
+  const isNamed = (x: number) => named.some((v) => sameValue(x, v));
+  const wrong = (xs: number[], reason: string) => (xs.some(isNamed) ? null : result('wrong', reason));
 
   // R1 – a solution that is only a number.
   const solutions = plainVariants.filter((v) => v.onlyNumber && v.values.length === 1).map((v) => v.values[0]!.value);
   if (solutions.length && a.onlyNumber) {
     const values = a.values.map((t) => t.value);
     if (values.length >= 2) {
-      // "1987 1988 1989" – several numbers, one of them right.
-      if (values.some((x) => solutions.some((v) => sameValue(x, v)))) return result('unsure', 'mehrere Zahlen');
-      return result('wrong', 'falsche Zahlen');
+      // "1987 1988 1989" – several numbers, one of them right; "12 000", "eine Million 500000" – one number in parts.
+      if ([...values, ...joinedReadings(a)].some((x) => solutions.some((v) => sameValue(x, v)))) return result('unsure', 'mehrere Zahlen');
+      if (values.some((x) => solutions.some((v) => rounded(x, v)))) return result('unsure', 'gerundet');
+      return wrong(values, 'falsche Zahlen');
     }
     const x = values[0]!;
     if (solutions.some((v) => sameValue(x, v))) return result('correct', 'Zahl stimmt');
@@ -276,23 +353,26 @@ export function judgeNumbers(question: string, reference: string, variants: stri
     // "siebenundsiebzig" / "77" for 1977, when the question asks for the year.
     if (yearQuestion && Number.isInteger(x) && x >= 10 && x <= 99 && !t.ordinal && solutions.some((v) => Number.isInteger(v) && v >= 1000 && v <= 2099 && v % 100 === x))
       return result('correct', 'Kurzform des Jahres');
-    // "42" for 42,195 km – a usual rounding or not? The LLM knows (prompt rule).
-    if (Number.isInteger(x) && solutions.some((v) => !Number.isInteger(v) && Math.abs(x - v) < 1)) return result('unsure', 'gerundet');
-    return result('wrong', 'falsche Zahl');
+    // "42" or "42,2" for 42,195 km, "3,14" for 3,14159 – a usual rounding or not? The LLM knows (prompt rule).
+    if (solutions.some((v) => rounded(x, v))) return result('unsure', 'gerundet');
+    return wrong([x], 'falsche Zahl');
   }
 
   // R2 – the same words and one number ("Apollo 11" / "Apollo 13", "Rot 2" / "Rot Vier", "1. Weltkrieg" / "Erster Weltkrieg").
   if (a.values.length === 1 && a.content.size && !a.partial) {
+    const x = a.values[0]!.value;
     for (const v of plainVariants) {
       if (v.values.length !== 1 || !v.content.size || v.partial || !sameSet(v.content, a.content)) continue;
-      return sameValue(v.values[0]!.value, a.values[0]!.value) ? result('correct', 'Zahl stimmt') : result('wrong', 'falsche Zahl');
+      if (sameValue(v.values[0]!.value, x)) return result('correct', 'Zahl stimmt');
+      if (rounded(x, v.values[0]!.value)) return result('unsure', 'gerundet');
+      return wrong([x], 'falsche Zahl');
     }
   }
 
   // R3 – the year in a longer solution ("25. Mai 1977"), when the question asks for the year.
   if (yearQuestion && a.onlyNumber && a.values.length === 1 && isYear(a.values[0]!)) {
     const years = numberParts(refRaw.replace(/\([^)]*\)/g, ' ')).numbers.filter((t) => !t.partial && isYear(t) && !t.words);
-    if (years.length === 1) return sameValue(years[0]!.value, a.values[0]!.value) ? result('correct', 'Jahr stimmt') : result('wrong', 'falsches Jahr');
+    if (years.length === 1) return sameValue(years[0]!.value, a.values[0]!.value) ? result('correct', 'Jahr stimmt') : wrong([a.values[0]!.value], 'falsches Jahr');
   }
   return null;
 }

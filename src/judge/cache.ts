@@ -105,14 +105,15 @@ export class JudgeCache {
   }
 
   /**
-   * Removes the verdicts of other rule versions (key not starting with `v${version}` + "s" or "␟") – they never match
-   * again, and some may be wrong under the new rules. Solutions stay (own version). Writes only if something was removed.
+   * Removes the LLM verdicts of other rule versions (key not starting with `v${version}` + "s" or "␟") – they never match
+   * again, and some may be wrong under the new rules. Verdicts of the game master (`method: 'operator'`) and solutions
+   * stay: they do not depend on the judging rules. Writes only if something was removed.
    */
   prune(version: number): number {
     const prefixes = [`v${version}s␟`, `v${version}␟`];
     let removed = 0;
-    for (const key of Object.keys(this.data.verdicts)) {
-      if (prefixes.some((p) => key.startsWith(p))) continue;
+    for (const [key, verdict] of Object.entries(this.data.verdicts)) {
+      if (prefixes.some((p) => key.startsWith(p)) || verdict?.method === 'operator') continue;
       delete this.data.verdicts[key];
       removed++;
     }

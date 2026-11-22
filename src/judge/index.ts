@@ -30,7 +30,7 @@ export function createJudge(config: Config, bus: EventBus, llm: LlmClient | null
   if (!pruned.has(j.cacheFile)) {
     pruned.add(j.cacheFile);
     const removed = cache.prune(JUDGE_RULES_VERSION);
-    if (removed) log.info(`Bewertungs-Cache: ${removed} alte Urteile (Regelversion < ${JUDGE_RULES_VERSION}) entfernt`);
+    if (removed) log.info(`Bewertungs-Cache: ${removed} alte Urteile (andere Regelversion als ${JUDGE_RULES_VERSION}) entfernt`);
   }
   const llmJudge = llm ? new LlmJudge(llm, meter) : null;
   const stages: CascadeStage[] = [];

@@ -69,7 +69,7 @@ Faktoren sind Multiplikatoren. Bei einem Fragewert von 200 ergibt `correctFactor
 
 Bewertet Antworten. Ablauf: Fuzzy-Vergleich → Cache → LLM → Spielleitung. Details: [ARCHITECTURE.md](ARCHITECTURE.md).
 
-Zahlen und Jahre entscheidet der Fuzzy-Vergleich ohne LLM, ob als Ziffern oder als Wort gesagt („neunzehnhundertneunundsiebzig“ ist 1979 und damit falsch, wenn 1977 gesucht ist). Dafür gibt es keine eigene Einstellung. Nur Schätzfragen, Bereiche, römische Zahlen und Rundungen gehen an das LLM.
+Zahlen und Jahre entscheidet der Fuzzy-Vergleich ohne LLM, ob als Ziffern oder als Wort gesagt („neunzehnhundertneunundsiebzig“ ist 1979 und damit falsch, wenn 1977 gesucht ist). Dafür gibt es keine eigene Einstellung. Nur Schätzfragen, Bereiche, römische Zahlen, Rundungen, verschiedene Einheiten und Zahlen, die die Lösung selbst nennt, gehen an das LLM.
 
 | Option | Default | Bedeutung |
 |---|---|---|

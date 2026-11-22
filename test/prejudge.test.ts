@@ -447,12 +447,41 @@ describe('judging numbers in the cascade', () => {
     expect((await p).verdict).toBe('correct');
   });
 
-  it('the number hint names no lone articles and keeps years without grouping', async () => {
+  it('the number hint names no lone articles and writes numbers without grouping (a grouped "12.000" would be unclear)', async () => {
     const { numberHint } = await import('../src/judge/llm-judge.ts');
     expect(numberHint('neunzehnhundertneunundsiebzig', '1977')).toBe('Zahlenwerte (automatisch gelesen): Antwort 1979 | Lösung 1977');
     expect(numberHint('Eine neue Hoffnung', 'Episode IV')).toBeNull();
-    expect(numberHint('anderthalb Millionen', '1.500.000')).toBe('Zahlenwerte (automatisch gelesen): Antwort 1.500.000 | Lösung 1.500.000');
+    expect(numberHint('anderthalb Millionen', '1.500.000')).toBe('Zahlenwerte (automatisch gelesen): Antwort 1500000 | Lösung 1500000');
     expect(numberHint('Paris', 'Paris')).toBeNull();
+  });
+
+  // Review B-F2: "12.000" is left to the LLM because it is unclear – the hint must not hand it one (wrong) reading.
+  it.each([
+    ['zwölftausend', '12.000', 'Antwort 12000 | Lösung 12000 oder 12'],
+    ['1500', '1.500', 'Antwort 1500 | Lösung 1500 oder 1,5'],
+    ['fünfundzwanzigtausend', '25.000', 'Antwort 25000 | Lösung 25000 oder 25'],
+    ['12000', '12 000', 'Antwort 12000 | Lösung 12000 oder 12 und 0'],
+  ])('B-F2: hint for %s ← %s names both readings', async (answer, reference, expected) => {
+    const { numberHint } = await import('../src/judge/llm-judge.ts');
+    const hint = numberHint(answer, reference)!;
+    expect(hint).toBe(`Zahlenwerte (automatisch gelesen): ${expected}`);
+    expect(hint).not.toMatch(/Lösung (?:12|1,5|25)$/);
+  });
+
+  it('B-F2: the LLM prompt for 12.000 ← zwölftausend never says "Lösung 12" alone', async () => {
+    const { kit: k, llm } = kit();
+    const p = k.judge.judge({ question: 'Wie viele Zuschauer?', reference: '12.000', answer: 'zwölftausend' });
+    await until(() => llm.calls.length === 1);
+    expect(llm.calls[0]!.prompt).toContain('Lösung 12000 oder 12');
+    expect(llm.calls[0]!.prompt).not.toMatch(/Lösung 12$/m);
+    llm.calls[0]!.resolve(true);
+    await p;
+  });
+
+  it('B-F9: a dialogue dash before a spoken answer is no minus, also in the hint', async () => {
+    const { numberHint } = await import('../src/judge/llm-judge.ts');
+    expect(numberHint('- 1977', '1977', true)).toBe('Zahlenwerte (automatisch gelesen): Antwort 1977 | Lösung 1977');
+    expect(numberHint('-5', '5', true)).toBe('Zahlenwerte (automatisch gelesen): Antwort -5 | Lösung 5');
   });
 
   it('verdict keys carry rule version 4; createJudge removes older verdicts once and keeps the solutions', async () => {
@@ -477,6 +506,29 @@ describe('judging numbers in the cascade', () => {
     await p;
     const keys = Object.keys(JSON.parse(readFileSync(cacheFile, 'utf8')).verdicts);
     expect(keys.filter((key) => key.includes('lutetia'))).toEqual(['v4␟hauptstadt␟paris␟lutetia']);
+  });
+
+  it('B-F8: prune keeps the verdicts of the game master (operator) – they do not depend on the judging rules', () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), 'qbprune-'));
+    const cache = new JudgeCache(path.join(tmp, 'cache.json'));
+    cache.setVerdict('v3␟q␟paris␟lutetia', { verdict: 'correct', method: 'operator', confidence: 1 });
+    cache.setVerdict('v3␟q␟paris␟rom', { verdict: 'wrong', method: 'llm', confidence: 0.9 });
+    expect(cache.prune(4)).toBe(1);
+    expect(cache.getVerdict('v3␟q␟paris␟lutetia')?.method).toBe('operator');
+    expect(cache.getVerdict('v3␟q␟paris␟rom')).toBeUndefined();
+  });
+
+  it('B-F8: the log line says "andere Regelversion" (prune also removes higher versions)', async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => (lines.push(String(chunk)), true));
+    setLogLevel('info');
+    try {
+      kit({ verdicts: { 'v5␟q␟a␟b': { verdict: 'correct', method: 'llm', confidence: 0.9 } }, solutions: {} });
+      expect(lines.join('')).toContain('Bewertungs-Cache: 1 alte Urteile (andere Regelversion als 4) entfernt');
+    } finally {
+      spy.mockRestore();
+      setLogLevel('error');
+    }
   });
 
   it('JudgeCache.prune: removes other versions only, writes only if something was removed', () => {

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ImageInput, LlmClient, UsageMeter } from '../llm/client.ts';
 import type { AnswerJudge, JudgeInput, JudgeResult } from './judge.ts';
-import { numberParts } from './normalize.ts';
+import { numberParts, stripDialogueDash } from './normalize.ts';
 
 const VerdictSchema = z.object({
   correct: z.boolean(),
@@ -43,16 +43,29 @@ const HINT_VALUES = 4;
  * "Zahlenwerte (automatisch gelesen): Antwort 1979 | Lösung 1977" – the parsed values, so the LLM need not split
  * "neunzehnhundertneunundsiebzig" itself. Only for the LLM (never public). null when neither side has a number.
  */
-export function numberHint(answer: string, reference: string | null): string | null {
+export function numberHint(answer: string, reference: string | null, spoken = false): string | null {
   // Lone articles ("Eine neue Hoffnung") and digits inside words ("H2O") are no values worth naming.
-  const values = (s: string | null) => [...new Set(s ? numberParts(s).numbers.filter((t) => !t.article && !t.partial).map((t) => t.value) : [])].slice(0, HINT_VALUES);
-  // Years stay "1977", large numbers get German grouping ("1.500.000").
-  const show = (v: number[]) => (v.length ? v.map((n) => n.toLocaleString('de-DE', { maximumFractionDigits: 6, useGrouping: Math.abs(n) >= 10000 })).join(', ') : '–');
-  const a = values(answer);
+  const values = (s: string | null) => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const t of s ? numberParts(s).numbers : []) {
+      if (t.article || t.partial) continue;
+      // "12.000", "1.500", "12 000": thousands or not – every reading, never just one of them.
+      const shown = t.readings?.length ? t.readings.map((r) => r.map(plainNumber).join(' und ')).join(' oder ') : plainNumber(t.value);
+      if (!seen.has(shown) && out.length < HINT_VALUES) out.push(shown);
+      seen.add(shown);
+    }
+    return out;
+  };
+  const a = values(spoken ? stripDialogueDash(answer) : answer);
   const r = values(reference);
   if (!a.length && !r.length) return null;
+  const show = (v: string[]) => (v.length ? v.join(', ') : '–');
   return `Zahlenwerte (automatisch gelesen): Antwort ${show(a)} | Lösung ${show(r)}`;
 }
+
+/** German, without thousands separator ("1977", "1500000", "1,5") – a grouped "12.000" would be unclear itself. */
+const plainNumber = (n: number) => n.toLocaleString('de-DE', { maximumFractionDigits: 6, useGrouping: false });
 
 export class LlmJudge implements AnswerJudge {
   constructor(
@@ -65,7 +78,7 @@ export class LlmJudge implements AnswerJudge {
     if (options?.length) lines.push(`Antwortmöglichkeiten: ${options.map((o) => `${o.letter}) ${o.label}${o.correct ? ' (richtig)' : ''}`).join(' | ')}`);
     if (hints?.length) lines.push(`Hinweise: ${hints.join(' | ')}`);
     if (spoken) lines.push('Die Antwort wurde GESPROCHEN und automatisch transkribiert: Werte nach dem Klang, nicht nach der Schreibweise. Klingt sie eindeutig wie die Lösung (z.B. „Preaking Bat“ für „Breaking Bad“, „Tschingis Kan“ für „Dschingis Khan“), ist sie richtig. Das gilt nicht für Zahlen: Bei Zahlen und Jahren zählt nur der Wert, ähnlicher Klang („neunundsiebzig“/„siebenundsiebzig“) reicht nicht.');
-    const values = numberHint(answer, reference);
+    const values = numberHint(answer, reference, spoken);
     if (values) lines.push(values);
     lines.push(`Antwort des Spielers: ${answer}`);
     const res = await this.llm.completeJson({ system: JUDGE_SYSTEM, prompt: lines.join('\n'), schema: VerdictSchema, purpose: 'judge' });
