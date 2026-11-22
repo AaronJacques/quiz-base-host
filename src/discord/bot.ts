@@ -187,6 +187,8 @@ interface ActiveGame {
 
 type Handler = (msg: ChatMessage, args: string[], game: ActiveGame | null) => Promise<void>;
 
+/** Reply to `!quiz neu` / `erstellen` / `anlegen` once the shutdown has begun. */
+const SHUTTING_DOWN_LINE = '⏳ Der Quiz-Host fährt gerade herunter. Gleich bin ich wieder da, dann bitte noch einmal.';
 const BUSY_ELSEWHERE = '🎲 Ich hoste gerade ein Spiel auf einem anderen Server. Sobald es vorbei ist, bin ich wieder frei.';
 
 /**
@@ -235,6 +237,7 @@ export class QuizBot {
                 : BUSY_ELSEWHERE
               : null,
           onBusy: () => this.d.account?.interrupt('Board-Anlage'),
+          closing: () => (this.shuttingDown ? SHUTTING_DOWN_LINE : null),
         })
       : null;
     const c = this.commands = {} as Record<string, Handler>;
@@ -341,6 +344,7 @@ export class QuizBot {
   }
 
   private async cmdNew(msg: ChatMessage, args: string[], game: ActiveGame | null): Promise<void> {
+    if (this.shuttingDown) return this.reply(msg, SHUTTING_DOWN_LINE);
     if (game) return this.reply(msg, `Es läuft schon ein Spiel in <#${game.channelId}>. Die Spielleitung kann es mit \`${this.prefix} ende\` beenden.`);
     if (this.game) return this.reply(msg, BUSY_ELSEWHERE);
     if (this.boards?.creating) return this.reply(msg, '⏳ Ich lege gerade ein Board auf quiz-base an. In einer Minute bin ich frei.');
@@ -408,6 +412,8 @@ export class QuizBot {
   }
 
   private async createGame(msg: ChatMessage, board: string, own = false): Promise<void> {
+    // A lobby created now would never be ended on quiz-base (the shutdown ends only the game it found).
+    if (this.shuttingDown) return this.reply(msg, SHUTTING_DOWN_LINE);
     if (this.game) return this.reply(msg, this.game.guildId === msg.guildId ? `Es läuft schon ein Spiel in <#${this.game.channelId}>.` : BUSY_ELSEWHERE);
     this.menu = null;
     const guild = this.d.store.get(msg.guildId!);
@@ -1152,6 +1158,12 @@ export class QuizBot {
   /** For tests / shutdown. */
   get activeGame(): Readonly<ActiveGame> | null {
     return this.game;
+  }
+
+  /** The shutdown has begun (first step of `shutdownBot`): from now on no new lobbies and no board creation. */
+  beginShutdown(): void {
+    this.shuttingDown = true;
+    this.menu = null;
   }
 
   /** Ends the game (on quiz-base at most `SHUTDOWN_END_GAME_MS`), closes its browser and leaves the voice channel (goodbye at most `SHUTDOWN_GOODBYE_MS`). */

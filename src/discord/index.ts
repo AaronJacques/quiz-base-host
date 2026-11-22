@@ -1,11 +1,11 @@
-import { AccountKeeper, LoginStatusStore } from '../account.ts';
-import { QuizBaseBoardStudio } from '../board-studio.ts';
+import { AccountKeeper, LoginStatusStore, type AccountKeeperDeps } from '../account.ts';
+import { QuizBaseBoardStudio, type BoardStudio, type BoardStudioOptions } from '../board-studio.ts';
 import { closeOpenBrowsers } from '../browser/playwright-driver.ts';
 import type { Config } from '../config.ts';
 import { createLogger } from '../core/logger.ts';
 import { onStopSignal } from '../core/signals.ts';
-import { GameSession, fetchPublicBoards } from '../session.ts';
-import { QuizBot } from './bot.ts';
+import { GameSession, fetchPublicBoards, type GameSessionOptions } from '../session.ts';
+import { QuizBot, type SessionLike } from './bot.ts';
 import { DiscordGateway } from './discord-gateway.ts';
 import type { ChatGateway } from './gateway.ts';
 import { GuildStore } from './store.ts';
@@ -13,17 +13,58 @@ import { createVoiceKit, voiceProblems } from '../voice/index.ts';
 
 const log = createLogger('discord');
 
-/** A chat gateway the bot can log in with and shut down (`DiscordGateway`; the smoke test passes its own). */
+/** A chat gateway the bot can log in with and shut down (`DiscordGateway`; tests pass their own). */
 export type BotGateway = ChatGateway & { login(token: string): Promise<void>; destroy(): Promise<void> };
 
-/** `qbhost discord` – runs the bot until Ctrl+C / SIGTERM. `opts.gateway`: a gateway without Discord (smoke tests). */
-export async function runDiscordBot(config: Config, opts: { gateway?: BotGateway; token?: string } = {}): Promise<void> {
+/**
+ * Seams for tests (all optional; production uses the defaults). They replace only what would need Discord, a browser
+ * or process signals – the wiring between keeper, bot, sessions and shutdown stays the production code.
+ */
+export interface DiscordBotOptions {
+  gateway?: BotGateway;
+  token?: string;
+  /** Game session from the config and the keeper's session options (default `new GameSession(cfg, [], opts)`). */
+  createSession?: (config: Config, opts: GameSessionOptions) => SessionLike;
+  /** Board studio from the config and the keeper's options (default `new QuizBaseBoardStudio`). */
+  createBoards?: (config: Config, opts: BoardStudioOptions) => BoardStudio;
+  /** Public boards (default: quiz-base's own search in a browser). */
+  listBoards?: (query?: string) => Promise<string[]>;
+  /** Extra deps for the AccountKeeper (tests: `openProbe`, `now`). */
+  keeperDeps?: Pick<AccountKeeperDeps, 'openProbe' | 'now' | 'random'>;
+  /** Default `closeOpenBrowsers`. */
+  closeBrowsers?: (timeoutMs: number) => Promise<number>;
+  /** Default `onStopSignal` (SIGINT/SIGTERM). */
+  onStop?: typeof onStopSignal;
+  /** Install the `unhandledRejection` logger. Default true; tests: false. */
+  processHandlers?: boolean;
+  exit?: (code: number) => void;
+}
+
+export interface RunningBot {
+  bot: QuizBot;
+  keeper: AccountKeeper;
+  /** Resolves once a stop signal shut everything down. */
+  stopped: Promise<void>;
+}
+
+/** `qbhost discord` – runs the bot until Ctrl+C / SIGTERM. */
+export async function runDiscordBot(config: Config, opts: DiscordBotOptions = {}): Promise<void> {
+  await (await startDiscordBot(config, opts)).stopped;
+}
+
+/** Starts the bot (login, pending loss DM, login watch) and arms the clean shutdown on a stop signal. */
+export async function startDiscordBot(config: Config, opts: DiscordBotOptions = {}): Promise<RunningBot> {
   const token = opts.token ?? process.env[config.discord.tokenEnv];
   if (!token) {
     throw new Error(`Kein Discord-Token: setze ${config.discord.tokenEnv} (z.B. in .env). Anleitung: docs/DISCORD.md`);
   }
-  // The bot serves every server at once – a stray promise rejection is logged, it must not end the process.
-  process.on('unhandledRejection', (e) => log.error(`Unbehandelter Fehler: ${(e as Error)?.stack ?? e}`));
+  const closeBrowsers = opts.closeBrowsers ?? closeOpenBrowsers;
+  const exit = opts.exit ?? ((code: number) => process.exit(code));
+  if (opts.processHandlers !== false) {
+    // The bot serves every server at once – a stray promise rejection is logged, it must not end the process.
+    // (An exception nobody caught: `onFatalError` in cli.ts closes the browsers and exits with 1.)
+    process.on('unhandledRejection', (e) => log.error(`Unbehandelter Fehler: ${redact((e as Error)?.stack ?? String(e), token)}`));
+  }
   const gateway = opts.gateway ?? new DiscordGateway();
   let voice = null;
   if (config.voice.enabled) {
@@ -34,19 +75,22 @@ export async function runDiscordBot(config: Config, opts: { gateway?: BotGateway
   // The keeper asks the bot whether it is idle; the bot exists before the keeper's first timer can fire (start()).
   let bot: QuizBot | null = null;
   const keeper = new AccountKeeper({
+    ...opts.keeperDeps,
     config,
     store: new LoginStatusStore(config.account.statusFile),
     isIdle: () => bot?.isIdleForMaintenance() ?? false,
   });
+  const createSession = opts.createSession ?? ((cfg, o) => new GameSession(cfg, [], o));
+  const createBoards = opts.createBoards ?? ((cfg, o) => new QuizBaseBoardStudio(cfg, o));
   bot = new QuizBot({
     gateway,
     config,
     store: new GuildStore(config.discord.dataDir),
     // Discord games have no terminal/web channel – the chat is the interface.
-    createSession: (cfg) => new GameSession(cfg, [], { auth: keeper.authWatch('game'), onLogin: (ok) => keeper.report(ok, 'lobby') }),
-    listBoards: (query) => fetchPublicBoards(config, query),
+    createSession: (cfg) => createSession(cfg, { auth: keeper.authWatch('game'), onLogin: (ok) => keeper.report(ok, 'lobby') }),
+    listBoards: opts.listBoards ?? ((query) => fetchPublicBoards(config, query)),
     voice,
-    boards: new QuizBaseBoardStudio(config, { auth: keeper.authWatch('board'), onLogin: (ok) => keeper.report(ok, 'board-create') }),
+    boards: createBoards(config, { auth: keeper.authWatch('board'), onLogin: (ok) => keeper.report(ok, 'board-create') }),
     account: keeper,
   });
   try {
@@ -54,7 +98,7 @@ export async function runDiscordBot(config: Config, opts: { gateway?: BotGateway
   } catch (e) {
     // cli.ts exits with 1 right after: nothing of ours may still hold a browser (none should be open yet).
     await keeper.stop().catch(() => {});
-    await closeOpenBrowsers(3000).catch(() => 0);
+    await closeBrowsers(3000).catch(() => 0);
     throw e;
   }
   log.info(`Bereit. Befehle mit "${config.discord.prefix} hilfe" oder @Mention.${voice ? ' Sprachsteuerung: an.' : ''}`);
@@ -64,15 +108,21 @@ export async function runDiscordBot(config: Config, opts: { gateway?: BotGateway
   if (keeper.enabled) log.info(`🔐 Anmeldewächter an: erste Prüfung in ${config.account.startCheckDelaySec} s, dann alle ${config.account.keepAliveHours} h im Leerlauf`);
 
   const running = bot;
-  await new Promise<void>((resolve) => {
-    onStopSignal(
+  const stopped = new Promise<void>((resolve) => {
+    (opts.onStop ?? onStopSignal)(
       async () => {
-        await shutdownBot({ keeper, bot: running, voice, gateway, closeBrowsers: closeOpenBrowsers });
+        await shutdownBot({ keeper, bot: running, voice, gateway, closeBrowsers, exit });
         resolve();
       },
-      { beforeForceExit: () => closeOpenBrowsers(3000) },
+      { beforeForceExit: () => closeBrowsers(3000) },
     );
   });
+  return { bot: running, keeper, stopped };
+}
+
+/** Replaces the Discord token (if it ever appears in an error text) before logging. */
+function redact(text: string, secret: string | undefined): string {
+  return secret && secret.length >= 8 ? text.split(secret).join('***') : text;
 }
 
 /**
@@ -83,7 +133,8 @@ export const SHUTDOWN_BUDGET = { keeper: 8000, bot: 24_000, browsers: 7000, voic
 
 export interface ShutdownParts {
   keeper: { stop(): Promise<void> };
-  bot: { shutdown(): Promise<void> };
+  /** `beginShutdown`: refuse new lobbies and boards from now on (called first). */
+  bot: { shutdown(): Promise<void>; beginShutdown?(): void };
   voice?: { close(): Promise<void> } | null;
   gateway: { destroy(): Promise<void> };
   /** Closes every browser still open (`closeOpenBrowsers`); returns how many were open. */
@@ -113,6 +164,11 @@ export async function shutdownBot(p: ShutdownParts): Promise<number> {
       .catch(() => 0)
       .then(() => exit(1));
   }, b.watchdog);
+  try {
+    p.bot.beginShutdown?.(); // no new lobby may start while the running one is ended (it would stay open on quiz-base)
+  } catch (e) {
+    log.warn(`Herunterfahren: ${(e as Error).message}`);
+  }
   await step('Anmeldewächter', p.keeper.stop(), b.keeper);
   await step('Spiel', p.bot.shutdown(), b.bot);
   const late = await step('Browser', p.closeBrowsers(b.browsers), b.browsers); // safety net – normally 0
