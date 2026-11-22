@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { parseArgs } from 'node:util';
+import { formatLoginHistory, formatLoginStatus, LoginStatusStore, loginStatusIcon } from './account.ts';
 import { runHost } from './app.ts';
 import { BOARD_CLI_OPTIONS, runBoardCreate, runBoardDelete, runLogin } from './board-cli.ts';
 import { runDiscordBot } from './discord/index.ts';
@@ -197,6 +198,14 @@ switch (command) {
     });
     const configFile = path.resolve(values.config ?? 'qbhost.config.json');
     console.log(existsSync(configFile) ? `ℹ️  Konfiguration: ${configFile}` : `ℹ️  Keine ${path.basename(configFile)} gefunden – es gelten die Standardwerte (Vorlage: qbhost.config.example.json)`);
+    {
+      // From the status file only – no browser: the bot may hold the profile right now.
+      const status = new LoginStatusStore(config.account.statusFile).read();
+      const now = Date.now();
+      const tail = status.state === 'unknown' && !status.lastCheckAt ? ' (läuft der Bot?)' : '';
+      console.log(`${loginStatusIcon(status)} ${formatLoginStatus(status, now, config.account.loginCommand)}${tail}`);
+      for (const line of formatLoginHistory(status, now, 5)) console.log(`     ${line}`);
+    }
     if (config.llm.provider === 'claude-cli') {
       await check('Claude CLI', async () => {
         try {

@@ -1,4 +1,4 @@
-import { createDriver, type BrowserDriver } from './browser/index.ts';
+import { createDriver, type BrowserDriver, type ResponseWatch } from './browser/index.ts';
 import type { Channel } from './channels/channel.ts';
 import type { Config } from './config.ts';
 import { EventBus } from './core/events.ts';
@@ -7,10 +7,18 @@ import { createJudge } from './judge/index.ts';
 import { createLlm, UsageMeter } from './llm/index.ts';
 import { TafelquizController } from './modes/tafelquiz/controller.ts';
 import type { GameRules } from './modes/tafelquiz/rules.ts';
+import { NotLoggedInError, withLoginHint } from './site/errors.ts';
 import { createLobbyWithOwnBoard, createLobbyWithPublicBoard, listPublicBoards } from './site/lobby.ts';
 import { TafelquizPage } from './site/tafelquiz/page.ts';
 
 const log = createLogger('session');
+
+export interface GameSessionOptions {
+  /** Passive observation of the page's auth requests (the account keeper's `authWatch('game')`). */
+  auth?: ResponseWatch;
+  /** Login state seen while creating a lobby with an own board (true = it worked, false = not logged in). */
+  onLogin?: (ok: boolean | null, source: 'lobby') => void;
+}
 
 export interface LobbyInfo {
   code: string;
@@ -36,9 +44,11 @@ export class GameSession {
   constructor(
     private config: Config,
     private channels: Channel[] = [],
+    private opts: GameSessionOptions = {},
   ) {
     this.rules = { ...config.game };
-    this.driver = createDriver(config);
+    // The game waits for the profile (an idle login check gives it back within seconds).
+    this.driver = createDriver(config, { owner: 'game', watch: opts.auth });
     this.page = new TafelquizPage(this.driver);
 
     // Operator point corrections go straight to the page. A failing browser must not take the process down.
@@ -68,12 +78,28 @@ export class GameSession {
   /** Creates a Tafelquiz lobby for a public board (or, with `own`, one of the account's boards) and returns code + invite link. */
   async createLobby(boardTitle: string, opts: { own?: boolean } = {}): Promise<LobbyInfo> {
     await this.open();
-    if (opts.own) await createLobbyWithOwnBoard(this.driver, this.config.baseUrl, boardTitle);
-    else await createLobbyWithPublicBoard(this.driver, this.config.baseUrl, 'Tafelquiz', boardTitle);
+    if (opts.own) {
+      try {
+        await createLobbyWithOwnBoard(this.driver, this.config.baseUrl, boardTitle);
+      } catch (e) {
+        if (!(e instanceof NotLoggedInError)) throw e;
+        this.reportLogin(false);
+        throw withLoginHint(e, this.config.account.loginCommand);
+      }
+      this.reportLogin(true);
+    } else await createLobbyWithPublicBoard(this.driver, this.config.baseUrl, 'Tafelquiz', boardTitle);
     await this.page.revealCode();
     const s = await this.page.waitFor((x) => !!x.lobbyCode, 8000, 300);
     if (!s?.lobbyCode) throw new Error('Lobby-Code nicht lesbar');
     return { code: s.lobbyCode, joinUrl: `${this.config.baseUrl}/join?code=${s.lobbyCode}` };
+  }
+
+  private reportLogin(ok: boolean): void {
+    try {
+      this.opts.onLogin?.(ok, 'lobby');
+    } catch (e) {
+      log.warn(`Anmeldestatus nicht gespeichert: ${(e as Error).message}`);
+    }
   }
 
   /** Drives the game until results (or `stop()`). */
@@ -124,6 +150,7 @@ let searchQueue: Promise<unknown> = Promise.resolve();
  */
 export function fetchPublicBoards(config: Config, query?: string): Promise<string[]> {
   const run = async () => {
+    // Own profile (and so its own profile lock): never waits for a game or the login check.
     const driver = createDriver({ ...config, browser: { ...config.browser, headless: true, profileDir: `${config.browser.profileDir}-search` } });
     try {
       await driver.open(config.baseUrl);

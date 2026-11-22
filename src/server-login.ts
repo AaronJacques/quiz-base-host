@@ -399,13 +399,13 @@ export async function runRemoteLoginStdio(
     return ok ? 0 : 1;
   };
 
-  const driver = new PlaywrightDriver({ profileDir: config.browser.profileDir, headless: true, remoteDebuggingPort: devtoolsPort });
+  const driver = new PlaywrightDriver({ profileDir: config.browser.profileDir, headless: true, remoteDebuggingPort: devtoolsPort, owner: 'login' });
   let detected = false;
   try {
     await driver.open(config.baseUrl);
     const page = new BoardEditorPage(driver, config.baseUrl);
     await sleep(1500);
-    if (!stopped && (await page.loginState())) {
+    if (!stopped && (await page.loginState()) === true) {
       console.error('✅ Schon bei quiz-base angemeldet. Profil bleibt gespeichert.');
       relay.done();
       await driver.close().catch(() => {});
@@ -421,9 +421,10 @@ export async function runRemoteLoginStdio(
   relay.done();
   await driver.close().catch(() => {});
   if (stopped && !detected) return finish(undefined);
-  const ok = detected || (await checkLogin(config).catch(() => false));
-  console.error(ok ? '✅ Angemeldet.' : '❌ Nicht angemeldet.');
-  return finish(ok);
+  // The login browser is closed (profile free) before checkLogin opens it again.
+  const state = detected ? true : await checkLogin(config).catch(() => null);
+  console.error(state === true ? '✅ Angemeldet.' : state === null ? '❔ Anmeldung nicht sicher erkennbar.' : '❌ Nicht angemeldet.');
+  return finish(state === true);
 }
 
 /** `qbhost login --print-profile-dir`: the absolute profile path the bot uses (read by tools/server-login.sh). */

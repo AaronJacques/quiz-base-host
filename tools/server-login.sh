@@ -161,7 +161,7 @@ if [ "$running" = true ]; then
   elif [ "$liverestore" != false ]; then
     say "ℹ️  Docker live-restore aktiv (oder unbekannt): Neustart-Regel bleibt; startet der Server mitten in der Anmeldung neu, meldet es die Kontrolle am Ende."
   fi
-  d stop -t 40 "$bot" >/dev/null || { say "❌ Bot ließ sich nicht stoppen."; exit 1; }
+  d stop -t 60 "$bot" >/dev/null || { say "❌ Bot ließ sich nicht stoppen."; exit 1; }
 fi
 d rm -f "$name" >/dev/null 2>&1
 

@@ -26,8 +26,9 @@ services:
     pids_limit: 512
     # Chromium needs more than Docker's default 64 MB /dev/shm.
     shm_size: 1gb
-    # Time to end a running game on quiz-base cleanly (SIGTERM → bot.shutdown()).
-    stop_grace_period: 40s
+    # Time to end a running game on quiz-base and close the browsers cleanly (SIGTERM → bot.shutdown());
+    # the bot gives itself at most 50 s (see src/discord/index.ts) – a killed Chromium can lose a fresh login token.
+    stop_grace_period: 60s
     logging:
       driver: json-file
       options: { max-size: 10m, max-file: "5" }

@@ -11,10 +11,11 @@ import {
   type CostEstimate,
   type GeneratedBoard,
 } from './boardgen/index.ts';
-import { createDriver } from './browser/index.ts';
+import { createDriver, type ResponseWatch } from './browser/index.ts';
 import type { Config } from './config.ts';
 import { createLogger } from './core/logger.ts';
 import { UsageMeter } from './llm/client.ts';
+import { NotLoggedInError, withLoginHint } from './site/errors.ts';
 import { BoardEditorPage } from './site/editor/page.ts';
 import { writeBoard } from './site/editor/writer.ts';
 
@@ -36,12 +37,22 @@ export interface BoardStudio {
   findOwn(name: string): BoardRecord[];
 }
 
+export interface BoardStudioOptions {
+  /** Passive observation of the page's auth requests (the account keeper's `authWatch('board')`). */
+  auth?: ResponseWatch;
+  /** Login state seen in the board editor (true = board saved, false = not logged in). */
+  onLogin?: (ok: boolean | null, source: 'board-create') => void;
+}
+
 /** Generator + local register + quiz-base editor in the logged-in browser profile. */
 export class QuizBaseBoardStudio implements BoardStudio {
   readonly store: BoardStore;
   private creating = false;
 
-  constructor(private config: Config) {
+  constructor(
+    private config: Config,
+    private opts: BoardStudioOptions = {},
+  ) {
     this.store = new BoardStore(config.boardgen.dir);
   }
 
@@ -90,15 +101,31 @@ export class QuizBaseBoardStudio implements BoardStudio {
     if (this.store.get(id)?.status === 'created') throw new Error('Dieses Board ist schon auf quiz-base angelegt.');
     this.creating = true;
     const board = this.store.load(id);
-    const driver = createDriver(this.config);
+    const driver = createDriver(this.config, { owner: 'board', watch: this.opts.auth });
     try {
       await driver.open(this.config.baseUrl);
-      const res = await writeBoard(new BoardEditorPage(driver, this.config.baseUrl), board, { onProgress });
+      let res;
+      try {
+        res = await writeBoard(new BoardEditorPage(driver, this.config.baseUrl), board, { onProgress });
+      } catch (e) {
+        if (!(e instanceof NotLoggedInError)) throw e;
+        this.reportLogin(false);
+        throw withLoginHint(e, this.config.account.loginCommand);
+      }
+      this.reportLogin(true);
       log.info(`Board „${board.title}“ auf quiz-base angelegt`);
       return this.store.markCreated(id, res.url);
     } finally {
       this.creating = false;
       await driver.close().catch(() => {});
+    }
+  }
+
+  private reportLogin(ok: boolean): void {
+    try {
+      this.opts.onLogin?.(ok, 'board-create');
+    } catch (e) {
+      log.warn(`Anmeldestatus nicht gespeichert: ${(e as Error).message}`);
     }
   }
 

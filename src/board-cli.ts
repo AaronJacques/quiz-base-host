@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import { LoginStatusStore } from './account.ts';
 import { QuizBaseBoardStudio } from './board-studio.ts';
 import { BoardStore, defaultSpec, fullPreview, specLines, specProblems, type BoardSpec, type GeneratedBoard } from './boardgen/index.ts';
 import { createDriver } from './browser/index.ts';
@@ -20,30 +21,49 @@ export async function runLogin(config: Config): Promise<void> {
   if (config.browser.driver !== 'playwright') {
     console.log(`ℹ️  Browser "${config.browser.driver}": melde dich dort direkt bei quiz-base an. "qbhost login" ist für den eigenen Chromium (Profil ${config.browser.profileDir}).`);
   }
-  const driver = new PlaywrightDriver({ profileDir: config.browser.profileDir, headless: false });
-  await driver.open(config.baseUrl);
-  const page = new BoardEditorPage(driver, config.baseUrl);
-  await sleep(1500);
-  if (await page.loginState()) {
-    console.log('✅ Schon bei quiz-base angemeldet. Profil bleibt gespeichert.');
-    await driver.close();
-    return;
+  const t0 = Date.now();
+  const driver = new PlaywrightDriver({ profileDir: config.browser.profileDir, headless: false, owner: 'login' });
+  let detected = false;
+  try {
+    await driver.open(config.baseUrl);
+    const page = new BoardEditorPage(driver, config.baseUrl);
+    await sleep(1500);
+    if ((await page.loginState()) === true) {
+      await driver.close();
+      recordLogin(config, true, t0);
+      console.log('✅ Schon bei quiz-base angemeldet. Profil bleibt gespeichert.');
+      return;
+    }
+    // Leave the user menu open – it holds the login form.
+    await page.openUserMenu().catch(() => {});
+    console.log(
+      [
+        '🔐 Im Browserfenster: oben rechts im Benutzermenü bei quiz-base anmelden (E-Mail + Passwort).',
+        '   qbhost gibt nichts ein und liest nichts mit. Sobald du angemeldet bist, schließt sich das Fenster',
+        '   von selbst – oder schließ es selbst. Abbrechen: Strg+C.',
+      ].join('\n'),
+    );
+    detected = await watchLogin(page, Date.now() + LOGIN_TIMEOUT_MS);
+  } finally {
+    // Closed (and the profile free) before checkLogin opens it again – never two browsers on one profile.
+    await driver.close().catch(() => {});
   }
-  // Leave the user menu open – it holds the login form.
-  await page.openUserMenu().catch(() => {});
-  console.log(
-    [
-      '🔐 Im Browserfenster: oben rechts im Benutzermenü bei quiz-base anmelden (E-Mail + Passwort).',
-      '   qbhost gibt nichts ein und liest nichts mit. Sobald du angemeldet bist, schließt sich das Fenster',
-      '   von selbst – oder schließ es selbst. Abbrechen: Strg+C.',
-    ].join('\n'),
-  );
+  if (detected) recordLogin(config, true, t0);
+  const state = detected ? true : await checkLogin(config);
+  if (state === true) console.log('✅ Angemeldet. Das Profil bleibt gespeichert; eigene Boards gehen jetzt.');
+  else if (state === null) console.log('❔ Anmeldung nicht sicher erkennbar – `npx qbhost doctor` zeigt später den Stand (der Bot prüft nach dem Start selbst).');
+  else console.log('❌ Nicht angemeldet. Bitte "npx qbhost login" noch einmal ausführen.');
+  if (state !== true) process.exitCode = 1;
+}
 
-  const detected = await watchLogin(page, Date.now() + LOGIN_TIMEOUT_MS);
-  await driver.close().catch(() => {});
-  const ok = detected || (await checkLogin(config));
-  console.log(ok ? '✅ Angemeldet. Das Profil bleibt gespeichert; eigene Boards gehen jetzt.' : '❌ Nicht angemeldet. Bitte "npx qbhost login" noch einmal ausführen.');
-  if (!ok) process.exitCode = 1;
+/** Writes a check from the login commands into the status file (on the server only useful locally: the login container has no data dir). */
+function recordLogin(config: Config, value: boolean | null, t0: number): void {
+  new LoginStatusStore(config.account.statusFile).record({
+    at: new Date(t0).toISOString(),
+    source: 'login',
+    result: value === true ? 'ok' : value === false ? 'lost' : 'unclear',
+    ms: Date.now() - t0,
+  });
 }
 
 /**
@@ -76,16 +96,23 @@ export async function watchLogin(page: BoardEditorPage, until: number, stop: () 
   return false;
 }
 
-/** Headless check whether the persistent profile is logged in to quiz-base. */
-export async function checkLogin(config: Config): Promise<boolean> {
-  const driver = new PlaywrightDriver({ profileDir: config.browser.profileDir, headless: true });
+/**
+ * Headless check whether the persistent profile is logged in to quiz-base: true, false (sure: twice "logged out"),
+ * or null (could not tell – never treat that as logged out). Writes the result into the status file.
+ */
+export async function checkLogin(config: Config): Promise<boolean | null> {
+  const t0 = Date.now();
+  const driver = new PlaywrightDriver({ profileDir: config.browser.profileDir, headless: true, owner: 'login' });
+  let state: boolean | null = null;
   try {
     await driver.open(config.baseUrl);
     await sleep(1500);
-    return (await new BoardEditorPage(driver, config.baseUrl).loginState()) === true;
+    state = await new BoardEditorPage(driver, config.baseUrl).loginState();
   } finally {
     await driver.close().catch(() => {});
   }
+  recordLogin(config, state, t0);
+  return state;
 }
 
 /** Extra flags of `qbhost board-create` (merged into the CLI's parseArgs options). */

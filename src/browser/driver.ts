@@ -34,3 +34,30 @@ export function parseJsonResult<T>(raw: unknown): T {
     return raw as unknown as T;
   }
 }
+
+/**
+ * Passive observation of the page's own requests (Playwright only): which requests to follow, and what is
+ * reported about their responses. Never a body of a successful response (it may hold tokens), never a header.
+ */
+export interface ResponseWatch {
+  match(url: string): boolean;
+  /** status; errorCode only for status >= 400 and only a short snake_case code – never a body, never a header. */
+  onResponse(r: { url: string; status: number; errorCode?: string }): void;
+  /** close() waits this long for watched requests still running (a token refresh must not be cut off). */
+  settleMs?: number;
+}
+
+const ERROR_CODE = /^[a-z0-9_]{1,64}$/;
+
+/**
+ * What a watched response may tell us: the status, and for an error (>= 400) the `error_code` (or `error`)
+ * field of its JSON body if it is a short snake_case code. `readJson` is not called below 400.
+ */
+export async function readWatchedResponse(status: number, readJson: () => Promise<unknown>): Promise<{ status: number; errorCode?: string }> {
+  if (status < 400) return { status };
+  const body = await readJson().catch(() => null);
+  if (!body || typeof body !== 'object') return { status };
+  const b = body as Record<string, unknown>;
+  const raw = typeof b.error_code === 'string' ? b.error_code : b.error;
+  return typeof raw === 'string' && ERROR_CODE.test(raw) ? { status, errorCode: raw } : { status };
+}
