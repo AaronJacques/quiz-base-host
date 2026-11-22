@@ -292,13 +292,20 @@ describe('AccountKeeper: state changes', () => {
     );
   });
 
-  it('a successful refresh in the game browser → ok; 5xx changes nothing', () => {
+  it('a successful refresh only confirms an ok (lastOkAt), never turns unknown into ok; 5xx changes nothing', () => {
     const h = harness();
     const w = h.keeper.authWatch('board');
     w.onResponse({ url: REFRESH, status: 503 });
-    expect(h.store.read().state).toBe('unknown');
     w.onResponse({ url: REFRESH, status: 200 });
-    expect(h.store.read().state).toBe('ok');
+    expect(h.store.read().state).toBe('unknown');
+    expect(h.changes).toEqual([]);
+    h.keeper.report(true, 'lobby');
+    vi.setSystemTime(T0 + HOUR);
+    w.onResponse({ url: REFRESH, status: 200 });
+    const s = h.store.read();
+    expect(s.state).toBe('ok');
+    expect(s.lastOkAt).toBe(new Date(T0 + HOUR).toISOString());
+    expect(s.okSince).toBe(new Date(T0).toISOString());
     expect(stderr.join('')).toMatch(/Sitzung erneuert \(Board-Anlage\)/);
   });
 
@@ -313,16 +320,48 @@ describe('AccountKeeper: state changes', () => {
     expect(h.store.read().state).toBe('lost');
   });
 
-  it('during a check the menu decides, not a refused refresh of the same visit', async () => {
+  it('A1-F4: logged-in menu + refused refresh of the same visit → unclear, state unchanged, warning', async () => {
     const h = harness();
+    h.keeper.report(true, 'lobby');
     h.plans.push({ state: true, during: (w) => w.onResponse({ url: REFRESH, status: 400, errorCode: 'refresh_token_already_used' }) });
-    await runCheck(h.keeper);
-    expect(h.store.read().state).toBe('ok');
+    expect(await runCheck(h.keeper)).toBe('unclear');
+    const s = h.store.read();
+    expect(s.state).toBe('ok');
+    expect(s.history.at(-1)).toMatchObject({ result: 'unclear', menu: true, refresh: { status: 400, code: 'refresh_token_already_used' } });
     expect(h.changes.map((c) => c.after)).toEqual(['ok']);
-    // Menu unclear: then the refresh decides.
+    expect(stderr.join('')).toMatch(/\x1b\[33m.*Menü angemeldet, aber Erneuerung abgelehnt \(400 refresh_token_already_used\) – prüfe in 15 min/);
+  });
+
+  it('menu unclear: a refused refresh of the same visit means lost', async () => {
+    const h = harness();
+    h.keeper.report(true, 'lobby');
     h.plans.push({ state: null, during: (w) => w.onResponse({ url: REFRESH, status: 401, errorCode: 'session_not_found' }) });
     await runCheck(h.keeper);
     expect(h.store.read().state).toBe('lost');
+  });
+
+  it('A1-F2: after a loss, an anonymous session (signup) renewed with 200 stays lost – no "wieder angemeldet"', async () => {
+    const h = harness();
+    h.keeper.report(true, 'lobby');
+    h.keeper.report(false, 'lobby');
+    h.keeper.markNotified(Date.now());
+    const before = h.changes.length;
+    const w = h.keeper.authWatch('game');
+    w.onResponse({ url: `${SB}/signup`, status: 200 });
+    vi.setSystemTime(T0 + 2 * HOUR);
+    w.onResponse({ url: REFRESH, status: 200 });
+    // Keep-alive with an unclear menu and a 200 refresh: still lost.
+    h.plans.push({ state: null, during: (pw) => pw.onResponse({ url: REFRESH, status: 200 }) });
+    await runCheck(h.keeper);
+    const s = h.store.read();
+    expect(s.state).toBe('lost');
+    expect(s.notifiedLostAt).toBe(new Date(T0).toISOString());
+    expect(s.lostAt).not.toBeNull();
+    expect(h.changes.length).toBe(before);
+    // Only the menu (or a password login) brings it back.
+    w.onResponse({ url: `${SB}/token?grant_type=password`, status: 200 });
+    expect(h.store.read().state).toBe('ok');
+    expect(h.changes.at(-1)).toMatchObject({ before: 'lost', after: 'ok', source: 'game' });
   });
 
   it('back to ok after a loss: okSince new, lostAt/notifiedLostAt cleared, notifiedLostAt of before in the change', () => {
@@ -409,6 +448,77 @@ describe('formatLoginStatus', () => {
 
   it('shortError: first line, no URLs', () => {
     expect(shortError(new Error('net::ERR at https://www.quiz-base.de/?a=b\nmore'))).toBe('net::ERR at <URL>');
+  });
+});
+
+describe('AccountKeeper: retries (A1-F5) and stop', () => {
+  it('after an error the next visit comes in 30 min (twice), then again after keepAliveHours', async () => {
+    const h = harness({ account: { startCheckDelaySec: 1 }, random: () => 0.5 });
+    const err = () => ({ openError: new Error('net::ERR_NAME_NOT_RESOLVED') });
+    h.plans.push(err(), err(), err(), { state: true });
+    h.keeper.start();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(h.calls.open).toBe(1);
+    await vi.advanceTimersByTimeAsync(29 * MIN);
+    expect(h.calls.open).toBe(1);
+    await vi.advanceTimersByTimeAsync(2 * MIN);
+    expect(h.calls.open).toBe(2);
+    await vi.advanceTimersByTimeAsync(31 * MIN);
+    expect(h.calls.open).toBe(3);
+    // Two retries used up: back to the normal rhythm.
+    await vi.advanceTimersByTimeAsync(5 * HOUR);
+    expect(h.calls.open).toBe(3);
+    await vi.advanceTimersByTimeAsync(2 * HOUR);
+    expect(h.calls.open).toBe(4);
+    expect(h.store.read().history.map((c) => c.result)).toEqual(['error', 'error', 'error', 'ok']);
+    await h.keeper.stop();
+  });
+
+  it('a refused refresh with a logged-in menu: recheck after 15 min', async () => {
+    const h = harness({ account: { startCheckDelaySec: 1 } });
+    h.plans.push({ state: true, during: (w) => w.onResponse({ url: REFRESH, status: 400, errorCode: 'session_expired' }) }, { state: false }, { state: false });
+    h.keeper.start();
+    await vi.advanceTimersByTimeAsync(1000 + 5000);
+    expect(h.calls.open).toBe(1);
+    await vi.advanceTimersByTimeAsync(14 * MIN);
+    expect(h.calls.open).toBe(1);
+    await vi.advanceTimersByTimeAsync(2 * MIN);
+    expect(h.calls.open).toBe(2);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(h.store.read().state).toBe('lost');
+    await h.keeper.stop();
+  });
+
+  it('check() after stop() starts nothing', async () => {
+    const h = harness();
+    await h.keeper.stop();
+    expect(await h.keeper.check('keepalive')).toBe('aborted');
+    expect(h.calls.open).toBe(0);
+  });
+
+  it('release() aborts a running check and waits until its browser is closed', async () => {
+    const h = harness();
+    h.plans.push({ state: waitForAbort, closeMs: 2000 });
+    void h.keeper.check('keepalive');
+    await vi.advanceTimersByTimeAsync(10);
+    let done = false;
+    const p = h.keeper.release().then(() => void (done = true));
+    await vi.advanceTimersByTimeAsync(1900);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(200);
+    await p;
+    expect(h.calls.close).toBe(1);
+    expect(h.store.read().history[0]!.result).toBe('aborted');
+  });
+
+  it('a check that hangs is aborted after 60 s and recorded as an error', async () => {
+    const h = harness();
+    h.plans.push({ state: waitForAbort });
+    const p = h.keeper.check('keepalive');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await p).toBe('error');
+    expect(h.calls.close).toBe(1);
+    expect(h.store.read().history[0]).toMatchObject({ result: 'error', error: 'Zeitlimit (60 s)' });
   });
 });
 

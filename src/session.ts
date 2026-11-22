@@ -1,4 +1,5 @@
 import { createDriver, type BrowserDriver, type ResponseWatch } from './browser/index.ts';
+import { PROFILE_WAIT_MS } from './browser/profile-lock.ts';
 import type { Channel } from './channels/channel.ts';
 import type { Config } from './config.ts';
 import { EventBus } from './core/events.ts';
@@ -7,7 +8,7 @@ import { createJudge } from './judge/index.ts';
 import { createLlm, UsageMeter } from './llm/index.ts';
 import { TafelquizController } from './modes/tafelquiz/controller.ts';
 import type { GameRules } from './modes/tafelquiz/rules.ts';
-import { NotLoggedInError, withLoginHint } from './site/errors.ts';
+import { NotLoggedInError, OwnBoardsUnavailableError, withLoginHint } from './site/errors.ts';
 import { createLobbyWithOwnBoard, createLobbyWithPublicBoard, listPublicBoards } from './site/lobby.ts';
 import { TafelquizPage } from './site/tafelquiz/page.ts';
 
@@ -47,8 +48,9 @@ export class GameSession {
     private opts: GameSessionOptions = {},
   ) {
     this.rules = { ...config.game };
-    // The game waits for the profile (an idle login check gives it back within seconds).
-    this.driver = createDriver(config, { owner: 'game', watch: opts.auth });
+    // The game waits for the profile: an idle login check closes its browser at once when asked (worst case:
+    // Chromium still starting, a token request settling, the close itself) – 30 s covers that with room to spare.
+    this.driver = createDriver(config, { owner: 'game', watch: opts.auth, lockWaitMs: PROFILE_WAIT_MS });
     this.page = new TafelquizPage(this.driver);
 
     // Operator point corrections go straight to the page. A failing browser must not take the process down.
@@ -82,6 +84,10 @@ export class GameSession {
       try {
         await createLobbyWithOwnBoard(this.driver, this.config.baseUrl, boardTitle);
       } catch (e) {
+        if (e instanceof OwnBoardsUnavailableError) {
+          this.reportLogin(e.loggedIn);
+          throw e;
+        }
         if (!(e instanceof NotLoggedInError)) throw e;
         this.reportLogin(false);
         throw withLoginHint(e, this.config.account.loginCommand);
@@ -94,7 +100,7 @@ export class GameSession {
     return { code: s.lobbyCode, joinUrl: `${this.config.baseUrl}/join?code=${s.lobbyCode}` };
   }
 
-  private reportLogin(ok: boolean): void {
+  private reportLogin(ok: boolean | null): void {
     try {
       this.opts.onLogin?.(ok, 'lobby');
     } catch (e) {

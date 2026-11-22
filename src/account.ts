@@ -35,6 +35,8 @@ export interface LoginCheck {
   closeMs?: number;
   /** Short message, no URL, no body. */
   error?: string;
+  /** What the user menu said (keep-alive checks); a refused refresh does not overrule a logged-in menu. */
+  menu?: boolean | null;
 }
 
 export interface AuthRecord {
@@ -134,9 +136,15 @@ export class LoginStatusStore {
     return this.update((s) => {
       if (c.result === 'busy') return;
       s.lastCheckAt = c.at;
-      const effect = c.result === 'ok' ? 'ok' : c.result === 'lost' ? 'lost' : c.refresh && c.refresh !== 'none' ? refreshEffect(c.refresh.status) : null;
-      if (effect === 'ok') setOk(s, c.at);
-      else if (effect === 'lost') setLost(s, c.at);
+      if (c.result === 'ok') setOk(s, c.at);
+      else if (c.result === 'lost') setLost(s, c.at);
+      else if (c.refresh && c.refresh !== 'none') {
+        // Menu unclear: the refresh of the same visit says what it can – a 2xx only confirms an existing ok
+        // (an anonymous session renews with 200 too), a refusal is a loss unless the menu showed the account.
+        const effect = refreshEffect(c.refresh.status);
+        if (effect === 'ok') confirmOk(s, c.at);
+        else if (effect === 'lost' && c.menu !== true) setLost(s, c.at);
+      }
       s.history.push(c);
       s.history = s.history.slice(-MAX_ENTRIES);
     });
@@ -155,9 +163,14 @@ export class LoginStatusStore {
       else s.authHistory.push(entry);
       s.authHistory = s.authHistory.slice(-MAX_ENTRIES);
       if (opts.applyState === false) return;
-      const effect = e.kind === 'refresh' ? refreshEffect(e.status) : e.kind === 'login' && e.ok ? 'ok' : e.kind === 'logout' && e.ok ? 'lost' : null;
-      if (effect === 'ok') setOk(s, at);
-      else if (effect === 'lost') setLost(s, at);
+      if (e.kind === 'refresh') {
+        // A 2xx refresh only confirms an ok: quiz-base renews an anonymous session the same way, so it never
+        // turns unknown/lost into ok. Only the menu, report(true) and a password login do that.
+        const effect = refreshEffect(e.status);
+        if (effect === 'ok') confirmOk(s, at);
+        else if (effect === 'lost') setLost(s, at);
+      } else if (e.kind === 'login' && e.ok) setOk(s, at);
+      else if (e.kind === 'logout' && e.ok) setLost(s, at);
     });
   }
 
@@ -205,6 +218,11 @@ function setOk(s: LoginStatus, at: string): void {
   s.lastOkAt = at;
 }
 
+/** Evidence that an existing login still works – never a change of state. */
+function confirmOk(s: LoginStatus, at: string): void {
+  if (s.state === 'ok') s.lastOkAt = at;
+}
+
 function setLost(s: LoginStatus, at: string): void {
   if (s.state !== 'lost') s.lostAt = at;
   s.state = 'lost';
@@ -243,6 +261,14 @@ const NOT_IDLE_RETRY_MS = MINUTE;
 const BUSY_RETRY_MS = 10 * MINUTE;
 /** stop() waits at most this long for a running check to close its browser. */
 const STOP_WAIT_MS = 8000;
+/** A check (open, menu, hold) takes at most this long; then it is aborted and the browser closed. */
+const RUN_LIMIT_MS = 60_000;
+/** Navigation limit of the keep-alive browser (Playwright's default is 30 s). */
+const KEEPALIVE_NAV_MS = 20_000;
+/** After an error or an unclear result: try again this soon (a refused refresh with a logged-in menu: sooner), at most MAX_RETRIES times in a row. */
+const RETRY_MS = 30 * MINUTE;
+const CONFLICT_RETRY_MS = 15 * MINUTE;
+const MAX_RETRIES = 2;
 
 export class AccountKeeper {
   /** browser.driver === 'playwright' && keepAliveHours > 0 */
@@ -262,6 +288,10 @@ export class AccountKeeper {
   private busyUntil = 0;
   private running: Promise<LoginCheck['result']> | null = null;
   private ac: AbortController | null = null;
+  /** Retries in a row after error/unclear. */
+  private retries = 0;
+  /** The last check saw a logged-in menu but a refused refresh. */
+  private lastConflict = false;
 
   constructor(private d: AccountKeeperDeps) {
     this.cfg = d.config.account;
@@ -350,8 +380,22 @@ export class AccountKeeper {
     this.store.markNotified(at);
   }
 
-  /** Runs one check now (unless one is running – then its result). Never throws. */
+  /**
+   * Gives the profile back now: aborts a running check and waits until its browser is closed (≤ timeoutMs).
+   * `interrupt()` does the same without waiting; the profile lock also preempts the check by itself.
+   */
+  async release(timeoutMs = 10_000): Promise<void> {
+    const running = this.running;
+    if (!running) return;
+    this.interrupt('Profil wird gebraucht');
+    let t: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([running.catch(() => {}), new Promise<void>((r) => (t = setTimeout(r, timeoutMs)))]);
+    clearTimeout(t);
+  }
+
+  /** Runs one check now (unless one is running – then its result; after stop(): nothing, 'aborted'). Never throws. */
   check(source: CheckSource): Promise<LoginCheck['result']> {
+    if (this.stopped) return Promise.resolve('aborted');
     if (this.running) return this.running;
     const ac = new AbortController();
     this.ac = ac;
@@ -397,7 +441,14 @@ export class AccountKeeper {
       this.busyUntil = this.now() + BUSY_RETRY_MS;
     } else {
       if (shot && this.oneShot === shot) this.oneShot = null;
-      this.keepAliveAt = this.now() + this.cfg.keepAliveHours * HOUR + (this.random() * 2 - 1) * this.cfg.keepAliveJitterMin * MINUTE;
+      // quiz-base unreachable or the menu unclear: visit again soon instead of after keepAliveHours (a few times).
+      if ((result === 'error' || result === 'unclear') && this.retries < MAX_RETRIES) {
+        this.retries++;
+        this.keepAliveAt = this.now() + (this.lastConflict ? CONFLICT_RETRY_MS : RETRY_MS);
+      } else {
+        this.retries = 0;
+        this.keepAliveAt = this.now() + this.cfg.keepAliveHours * HOUR + (this.random() * 2 - 1) * this.cfg.keepAliveJitterMin * MINUTE;
+      }
     }
     this.writeNextDue();
     this.arm();
@@ -431,8 +482,18 @@ export class AccountKeeper {
 
     let probe: KeeperProbe | null = null;
     let result: LoginCheck['result'] = 'unclear';
+    let menu: boolean | null | undefined;
     let error: string | undefined;
     let closeMs: number | undefined;
+    let timedOut = false;
+    this.lastConflict = false;
+    // A hanging page (or Chromium start) must not keep the profile: abort – which closes the browser – after RUN_LIMIT_MS.
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      log.warn(`🔐 Anmeldeprüfung (${source}): Zeitlimit (${RUN_LIMIT_MS / 1000} s) – breche ab`);
+      ac.abort();
+    }, RUN_LIMIT_MS);
+    deadline.unref?.();
     try {
       probe = await this.openProbe(ac.signal, watch, () => this.interrupt('Profil wird für ein Spiel oder ein Board gebraucht'));
     } catch (e) {
@@ -446,6 +507,7 @@ export class AccountKeeper {
     if (probe) {
       try {
         const v = ac.signal.aborted ? null : await probe.loginState(ac.signal);
+        menu = v;
         result = v === true ? 'ok' : v === false ? 'lost' : ac.signal.aborted ? 'aborted' : 'unclear';
         if (!ac.signal.aborted) {
           // Give the page time to renew the session: 2 s more after a refresh, else up to holdSec for one.
@@ -467,9 +529,21 @@ export class AccountKeeper {
         });
       }
     }
+    clearTimeout(deadline);
+    if (timedOut && result === 'aborted') {
+      result = 'error';
+      error ??= `Zeitlimit (${RUN_LIMIT_MS / 1000} s)`;
+    }
+    // Logged-in menu, but the page's refresh of the same visit was refused: do not trust either – look again soon.
+    if (result === 'ok' && seen.refresh && refreshEffect(seen.refresh.status) === 'lost') {
+      result = 'unclear';
+      this.lastConflict = true;
+      log.warn(`🔐 quiz-base-Anmeldung (${source}): Menü angemeldet, aber Erneuerung abgelehnt (${seen.refresh.status}${seen.refresh.code ? ` ${seen.refresh.code}` : ''}) – prüfe in ${CONFLICT_RETRY_MS / MINUTE} min noch einmal`);
+    }
 
     const c: LoginCheck = { at: iso(t0), source, result, ms: this.now() - t0 };
     if (probe) c.refresh = seen.refresh ?? 'none';
+    if (menu !== undefined) c.menu = menu;
     if (closeMs !== undefined) c.closeMs = closeMs;
     if (error) c.error = error;
     const before = this.store.read();
@@ -481,11 +555,33 @@ export class AccountKeeper {
     return result;
   }
 
-  /** Real probe: headless Chromium on the bot's profile, preemptible, never waits for the profile. */
+  /**
+   * Real probe: headless Chromium on the bot's profile, preemptible, never waits for the profile. An abort
+   * (interrupt, preemption, stop, time limit) closes the browser at once – also while it is still starting or the
+   * page hangs; close() still waits for a running token request (settle) before it frees the profile.
+   */
   private async openBrowser(signal: AbortSignal, watch: ResponseWatch, onPreempt: () => void): Promise<KeeperProbe> {
     const c = this.d.config;
-    const driver = new PlaywrightDriver({ profileDir: c.browser.profileDir, headless: true, owner: 'keepalive', preemptible: true, onPreempt, lockWaitMs: 0, watch });
-    await driver.open(c.baseUrl);
+    const driver = new PlaywrightDriver({
+      profileDir: c.browser.profileDir,
+      headless: true,
+      owner: 'keepalive',
+      preemptible: true,
+      onPreempt,
+      lockWaitMs: 0,
+      watch,
+      navTimeoutMs: KEEPALIVE_NAV_MS,
+    });
+    const onAbort = () => void driver.close().catch(() => {});
+    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      if (signal.aborted) throw new Error('Anmeldeprüfung abgebrochen');
+      await driver.open(c.baseUrl);
+    } catch (e) {
+      signal.removeEventListener('abort', onAbort);
+      await driver.close().catch(() => {});
+      throw e;
+    }
     const page = new BoardEditorPage(driver, c.baseUrl);
     return {
       loginState: async (sig) => {
@@ -493,6 +589,7 @@ export class AccountKeeper {
         return sig.aborted ? null : page.loginState({ signal: sig });
       },
       close: async () => {
+        signal.removeEventListener('abort', onAbort);
         await driver.close();
         return driver.lastCloseMs ?? 0;
       },

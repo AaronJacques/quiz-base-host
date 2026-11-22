@@ -70,7 +70,7 @@ docker compose -f app/deploy/compose.yml restart bot        # Neustart
 docker compose -f app/deploy/compose.yml exec bot node_modules/.bin/tsx src/cli.ts doctor   # Selbstdiagnose
 ```
 
-- **Deploy während eines Spiels:** Ein laufendes Spiel wird beim Neustart beendet (der Bot hat 60 s, es auf quiz-base sauber zu schließen und die Browser zu schließen). Pushes auf `main` also nicht mitten in einer Runde.
+- **Deploy während eines Spiels:** Ein laufendes Spiel wird beim Neustart beendet (Docker gibt dem Bot 60 s, es auf quiz-base sauber zu schließen und die Browser zu schließen). Pushes auf `main` also nicht mitten in einer Runde.
 - **Rollback von Hand:** `mv app app.bad && mv app.prev app && docker image tag quizmaster:prev quizmaster:latest && docker compose -f app/deploy/compose.yml up -d --no-build`
 - **Kleine Server:** siehe [unten](#kleine-server). Nach einer Änderung von `qbhost.config.json` prüft der Container beim nächsten Start die Sprachmodelle und lädt neue nach (vorhandene werden übersprungen). Erzwingen: `data/voice/.ready` löschen.
 - **quiz-base-Anmeldung für eigene Boards:** vom Mac aus mit `npx qbhost login --server quizmaster-vps`, siehe [unten](#quiz-base-anmeldung-auf-dem-server).
@@ -159,9 +159,9 @@ Das stoppt den Bot kurz, löscht den Profilordner des Bots auf dem Server und st
 
 ### Anmeldung hält
 
-Die Anmeldung ging auf dem Server mehrfach nach einigen Tagen verloren, ohne dass sich jemand abgemeldet hat. Das Cookie selbst läuft erst nach 400 Tagen ab; die Sitzung endet also auf quiz-base-Seite (Leerlauf- oder Zeitlimit) oder geht bei einem harten Stopp verloren. Der Bot tut deshalb dreierlei:
+Die Anmeldung ging auf dem Server mehrfach nach einigen Tagen verloren, ohne dass sich jemand abgemeldet hat. Das Cookie selbst läuft erst nach 400 Tagen ab; die Sitzung endet also auf quiz-base-Seite (Leerlauf- oder Zeitlimit) oder geht bei einem harten Stopp verloren. Der Bot tut deshalb dreierlei. Der Wächter (Keep-alive, Status) läuft im Discord-Bot (`qbhost discord`), sobald er in `src/discord/index.ts` verdrahtet ist (Paket A2); `qbhost host` und die CLI-Befehle starten ihn nicht.
 
-- **Keep-alive:** Im Leerlauf (kein Spiel, keine Board-Anlage, kein Voice-Raum) öffnet er alle 6 h (± 30 min) kurz headless quiz-base, außerdem 120 s nach dem Start und 60 s nach jedem Spiel. Die Seite erneuert dabei ihre Sitzung selbst (das Access-Token gilt 1 h, also erneuert jeder dieser Besuche). Der Bot liest nur das Benutzermenü und schließt den Browser sauber; er wartet dabei bis zu 5 s auf eine laufende Erneuerung. Braucht ein Spiel oder eine Board-Anlage das Profil, bricht er die Prüfung ab (die Lobby startet höchstens ~20 s später). Einstellungen: `account` in [CONFIG.md](CONFIG.md#account). Abschalten ohne Rollback: `"account": { "keepAliveHours": 0 }` und Neustart.
+- **Keep-alive:** Im Leerlauf (kein Spiel, keine Board-Anlage, kein Voice-Raum) öffnet er alle 6 h (± 30 min) kurz headless quiz-base, außerdem 120 s nach dem Start und 60 s nach jedem Spiel. Die Seite erneuert dabei ihre Sitzung selbst (das Access-Token gilt 1 h, also erneuert jeder dieser Besuche). Der Bot liest nur das Benutzermenü und schließt den Browser sauber; er wartet dabei bis zu 5 s auf eine laufende Erneuerung. Braucht ein Spiel oder eine Board-Anlage das Profil, bricht er die Prüfung ab und schließt den Browser sofort, auch wenn er noch startet oder die Seite hängt. Die Lobby startet dann meist wenige Sekunden später; das Spiel wartet bis zu 30 s auf das Profil, sonst kommt „Das Browser-Profil ist gerade belegt … Gleich noch einmal versuchen.“ Eine Prüfung dauert höchstens 60 s, die Seite lädt höchstens 20 s. Ist quiz-base nicht erreichbar oder das Menü unklar, versucht er es nach 30 min noch einmal (höchstens zweimal), dann wieder im 6-h-Takt. Einstellungen: `account` in [CONFIG.md](CONFIG.md#account). Abschalten ohne Rollback: `"account": { "keepAliveHours": 0 }` und Neustart.
 - **Status:** `data/login-status.json` (im Container `.qbhost/login-status.json`) hält Zustand, „angemeldet seit“, letzte Prüfungen und die letzten Anfragen der Seite an ihre Anmeldung: Art, Statuscode und bei Fehlern den Supabase-Fehlercode. Keine Tokens, Cookies oder URLs. Anzeigen ohne Browser:
   ```bash
   sudo docker exec quizmaster-bot-1 node_modules/.bin/tsx src/cli.ts doctor
@@ -171,7 +171,7 @@ Die Anmeldung ging auf dem Server mehrfach nach einigen Tagen verloren, ohne das
   ❌ quiz-base-Anmeldung: abgemeldet seit 20.11. 15:02 (Erneuerung abgelehnt: 400 session_expired) → npx qbhost login --server quizmaster-vps
   ```
   Den Befehl in der Meldung legt `account.loginCommand` fest; auf dem Server in `qbhost.config.json` `"account": { "loginCommand": "npx qbhost login --server quizmaster-vps" }` eintragen (Vorlage: `deploy/qbhost.config.server.example.json`).
-- **Sauberer Stopp:** Docker gibt dem Bot 60 s (`stop_grace_period`, auch `docker stop -t 60` im Login-Skript). Ein Chromium, der hart beendet wird, kann ein gerade erneuertes Token verlieren (Chromium schreibt Cookies gebündelt etwa alle 30 s).
+- **Sauberer Stopp:** Docker gibt dem Bot 60 s (`stop_grace_period`, auch `docker stop -t 60` im Login-Skript). Das interne Zeitbudget und das Schließen aller Browser beim Herunterfahren verdrahtet Paket A2 in `src/discord/index.ts`. Ein Chromium, der hart beendet wird, kann ein gerade erneuertes Token verlieren (Chromium schreibt Cookies gebündelt etwa alle 30 s).
 
 Log-Zeilen (`docker logs`), alle mit `🔐`:
 - `🔐 quiz-base-Anmeldung (keepalive): angemeldet · Sitzung erneuert (200) · 14 s · Browser zu in 1,2 s` – so soll es alle ~6 h aussehen.

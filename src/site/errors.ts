@@ -10,3 +10,17 @@ export class NotLoggedInError extends Error {
 export function withLoginHint(e: NotLoggedInError, loginCommand: string): NotLoggedInError {
   return new NotLoggedInError(`${e.message} Neu anmelden: \`${loginCommand}\``);
 }
+
+/**
+ * "Eigenes Board verwenden" is missing, but the user menu does not say "logged out": the page changed or is slow
+ * (`loggedIn` true), or the login could not be told (`loggedIn` null). Not a lost login.
+ */
+export class OwnBoardsUnavailableError extends Error {
+  constructor(
+    message: string,
+    readonly loggedIn: boolean | null,
+  ) {
+    super(message);
+    this.name = 'OwnBoardsUnavailableError';
+  }
+}
