@@ -12,6 +12,7 @@ import { setupVoice, voiceProblems, voiceWarnings } from './voice/index.ts';
 import { deepgramReachable } from './voice/stt-deepgram.ts';
 import { createDriver } from './browser/index.ts';
 import { closeOpenBrowsers } from './browser/playwright-driver.ts';
+import { secretValues } from './core/secrets.ts';
 import { onFatalError } from './core/signals.ts';
 import { loadConfig, type Config } from './config.ts';
 import { EventBus } from './core/events.ts';
@@ -106,13 +107,13 @@ const [command = 'host', ...rest] = positionals;
 
 switch (command) {
   case 'host':
-    onFatalError(() => closeOpenBrowsers(3000));
+    onFatalError(() => closeOpenBrowsers(3000), { secrets: () => secretValues(config) });
     await runHost(config);
     break;
 
   case 'discord':
     // An exception that escapes would kill Chromium with the process – close the browsers first.
-    onFatalError(() => closeOpenBrowsers(3000));
+    onFatalError(() => closeOpenBrowsers(3000), { secrets: () => secretValues(config) });
     try {
       await runDiscordBot(config);
     } catch (e) {

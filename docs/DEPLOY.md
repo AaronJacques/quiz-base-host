@@ -187,7 +187,7 @@ Was die Fehlercodes nahelegen (Erwartung nach Supabase-Standard, nicht geprüft)
 - `refresh_token_already_used`: Ein schon benutztes Token wurde noch einmal geschickt, meist nach einem harten Stopp kurz nach einer Erneuerung. Dann das Log des letzten Herunterfahrens prüfen.
 - `session_not_found`, `refresh_token_not_found`: Die Sitzung wurde gelöscht (Abmelden anderswo, Passwortwechsel, Betreiber).
 
-Nicht garantiert: Ein festes Zeitlimit, ein Widerruf durch quiz-base oder ein Passwortwechsel beendet die Sitzung trotzdem. Ein Absturz, OOM-Kill oder Stromausfall kurz nach einer Erneuerung kann das neue Token verlieren. Eine Exception, die im Bot niemand fängt, beendet ihn dagegen nicht mehr sofort: `qbhost discord`/`host` schließen dann erst die Browser (höchstens 3 s) und beenden mit Code 1 (Log `❌ Unerwarteter Fehler – schließe die Browser und beende: …`). Der Bot merkt das spätestens bei der nächsten Prüfung (≤ 6 h) oder beim nächsten Spiel mit eigenem Board.
+Nicht garantiert: Ein festes Zeitlimit, ein Widerruf durch quiz-base oder ein Passwortwechsel beendet die Sitzung trotzdem. Ein Absturz, OOM-Kill oder Stromausfall kurz nach einer Erneuerung kann das neue Token verlieren. Eine Exception, die im Bot niemand fängt, beendet ihn dagegen nicht mehr sofort: `qbhost discord`/`host` schließen dann erst die Browser (höchstens 3 s) und beenden mit Code 1 (Log `❌ Unerwarteter Fehler – schließe die Browser und beende: …`; Discord-Token, API-Schlüssel und andere geheime Umgebungsvariablen sind in Meldung und Stack durch `***` ersetzt, ebenso in `Unbehandelter Fehler: …`). Der Bot merkt das spätestens bei der nächsten Prüfung (≤ 6 h) oder beim nächsten Spiel mit eigenem Board.
 
 ## Kleine Server
 

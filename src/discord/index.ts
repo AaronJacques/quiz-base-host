@@ -3,6 +3,7 @@ import { QuizBaseBoardStudio, type BoardStudio, type BoardStudioOptions } from '
 import { closeOpenBrowsers } from '../browser/playwright-driver.ts';
 import type { Config } from '../config.ts';
 import { createLogger } from '../core/logger.ts';
+import { redactedError, secretValues } from '../core/secrets.ts';
 import { onStopSignal } from '../core/signals.ts';
 import { GameSession, fetchPublicBoards, type GameSessionOptions } from '../session.ts';
 import { QuizBot, type SessionLike } from './bot.ts';
@@ -63,7 +64,7 @@ export async function startDiscordBot(config: Config, opts: DiscordBotOptions = 
   if (opts.processHandlers !== false) {
     // The bot serves every server at once – a stray promise rejection is logged, it must not end the process.
     // (An exception nobody caught: `onFatalError` in cli.ts closes the browsers and exits with 1.)
-    process.on('unhandledRejection', (e) => log.error(`Unbehandelter Fehler: ${redact((e as Error)?.stack ?? String(e), token)}`));
+    process.on('unhandledRejection', (e) => log.error(`Unbehandelter Fehler: ${redactedError(e, [token, ...secretValues(config)])}`));
   }
   const gateway = opts.gateway ?? new DiscordGateway();
   let voice = null;
@@ -118,11 +119,6 @@ export async function startDiscordBot(config: Config, opts: DiscordBotOptions = 
     );
   });
   return { bot: running, keeper, stopped };
-}
-
-/** Replaces the Discord token (if it ever appears in an error text) before logging. */
-function redact(text: string, secret: string | undefined): string {
-  return secret && secret.length >= 8 ? text.split(secret).join('***') : text;
 }
 
 /**

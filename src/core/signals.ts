@@ -1,3 +1,5 @@
+import { redactedError, secretValues } from './secrets.ts';
+
 /**
  * Runs `stop` once on SIGINT/SIGTERM – the clean shutdown (the bot still says goodbye).
  *
@@ -58,7 +60,13 @@ export function onStopSignal(
  */
 export function fatalErrorHandler(
   beforeExit: () => Promise<unknown>,
-  opts: { exit?: (code: number) => void; timeoutMs?: number; report?: (text: string) => void } = {},
+  opts: {
+    exit?: (code: number) => void;
+    timeoutMs?: number;
+    report?: (text: string) => void;
+    /** Secrets to blank out of message and stack (default: all secret environment variables, see secretValues). */
+    secrets?: () => (string | undefined)[];
+  } = {},
 ): (e: unknown) => void {
   const exit = opts.exit ?? ((code: number) => process.exit(code));
   const report = opts.report ?? ((text: string) => process.stderr.write(`${text}\n`));
@@ -66,7 +74,7 @@ export function fatalErrorHandler(
   let closing = false;
   return (e: unknown) => {
     try {
-      report(`❌ Unerwarteter Fehler – schließe die Browser und beende: ${(e as Error)?.stack ?? String(e)}`);
+      report(`❌ Unerwarteter Fehler – schließe die Browser und beende: ${redactedError(e, (opts.secrets ?? secretValues)())}`);
     } catch {
       // Reporting must not stop the exit.
     }
